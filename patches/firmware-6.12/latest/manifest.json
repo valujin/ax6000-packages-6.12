@@ -25,6 +25,14 @@
       "sha256": "6c572f41f7036b5f9b44a779dbe5e2af3fe8b9359bd36fcfd9c3da5b7dcda8ca",
       "before_sha256": "b7e25ca6e9173c0051213b33bebc8292149adb8c2d69cdd798395aa449ec2783",
       "after_sha256": "29a3f5cd67b0fef4689e07c50b6e284bb4f54ae610712ba6d450c2321fbb896a"
+    },
+    {
+      "patch": "130-mtk-ethernet-ptp-dependency.patch",
+      "path": "target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch",
+      "operation": "add",
+      "sha256": "7b07552afa9a8c8d08aae00830a4d95c3f24d0d30bde79fea2f9438cddf4a34b",
+      "before_sha256": null,
+      "after_sha256": "c4edbd8a2b08d60748f1c12dccdcd5dfda8854d32d6a4e36b2c05fd50d3194a2"
     }
   ]
 }

@@ -1,0 +1,25 @@
+diff --git a/target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch b/target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch
+new file mode 100644
+--- /dev/null
++++ b/target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch
+@@ -0,0 +1,20 @@
++From: AX6000 package builder
++Subject: [PATCH] net: mediatek: select a reachable PTP core
++
++The vendor driver always links mtk_eth_ptp.o. A built-in Ethernet
++driver cannot call ptp_clock_register() from a loadable PTP core.
++Select the core with the driver, retaining module support when Ethernet
++is modular and the existing dummy helpers when POSIX timers are absent.
++NET is inherited through NETDEVICES; POSIX_TIMERS satisfies the other
++PTP dependency.
++
++--- a/drivers/net/ethernet/mediatek/Kconfig
+++++ b/drivers/net/ethernet/mediatek/Kconfig
++@@ -20,6 +20,7 @@
++ 	select PAGE_POOL
++ 	select PCS_MTK_LYNXI
++ 	select REGMAP_MMIO
+++	select PTP_1588_CLOCK if POSIX_TIMERS
++ 	help
++ 	  This driver supports the gigabit ethernet MACs in the
++ 	  MediaTek SoC family.

@@ -125,7 +125,7 @@ class Source612Tests(unittest.TestCase):
                 output=(self.source/'include/kernel-defaults.mk').read_text()
                 self.assertIn('/bin/xz -T1 -9 -fz --check=crc32',output)
                 self.assertNotIn('-T$(if',output)
-                self.assertEqual(len(patches),3)
+                self.assertEqual(len(patches),4)
                 firmware.vendor_fixes(profile(channel),self.source,check_only=True)
                 firmware.vendor_fixes(profile(channel),self.source)
         target=self.source/'include/kernel-defaults.mk';target.write_text(target.read_text()+'# unexpected drift\n')
