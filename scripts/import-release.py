@@ -17,13 +17,17 @@ prepare = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(prepare)
 
 
-def release_identity(release):
+def release_identity(release, asset_names=('raw.tar.zst', 'raw.tar.zst.sha256')):
     if not isinstance(release, dict) or release.get('immutable') is not True:
         raise ValueError('The source release must be immutable')
     if release.get('draft') is not False:
         raise ValueError('Publish the draft release after all asset uploads finish')
+    if (not isinstance(asset_names, (tuple, list)) or not asset_names
+            or any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]*', name)
+                   for name in asset_names) or len(set(asset_names)) != len(asset_names)):
+        raise ValueError('Release asset names must be unique safe filenames')
     assets = []
-    for name in ('raw.tar.zst', 'raw.tar.zst.sha256'):
+    for name in asset_names:
         matches = [asset for asset in release.get('assets', []) if asset.get('name') == name]
         if len(matches) != 1 or matches[0].get('state') != 'uploaded':
             raise ValueError(f'Release must contain exactly one uploaded {name}')
@@ -90,9 +94,13 @@ def validate_inventory(raw, profile, manifest):
         raise ValueError('Firmware inventory must contain exactly one matching profile SDK archive')
     if inventory[sdk.relative_to(raw).as_posix()]['sha256'] != profile['sdk']['sha256']:
         raise ValueError('Firmware SDK archive checksum differs from the generated profile')
-    images = list(target.glob('*-xiaomi_redmi-router-ax6000-stock-squashfs-sysupgrade.bin'))
-    if len(images) != 1 or images[0].relative_to(raw).as_posix() not in inventory:
-        raise ValueError('Firmware inventory must contain exactly one recorded stock sysupgrade image')
+    if profile.get('channel'):
+        from firmware_layouts import collect_firmware_assets
+        collect_firmware_assets(raw, profile, manifest)
+    else:
+        images = list(target.glob('*-xiaomi_redmi-router-ax6000-stock-squashfs-sysupgrade.bin'))
+        if len(images) != 1 or images[0].relative_to(raw).as_posix() not in inventory:
+            raise ValueError('Firmware inventory must contain exactly one recorded stock sysupgrade image')
 
 
 def validate_metadata(raw, expected_profile):
@@ -106,6 +114,14 @@ def validate_metadata(raw, expected_profile):
             raise ValueError(f'Imported firmware {field} differs from the checked-in source profile')
     if profile['id'] != expected['id']:
         raise ValueError('Imported profile id differs from source profile')
+    if profile.get('channel') != expected.get('channel'):
+        raise ValueError('Imported channel differs from source profile')
+    if profile.get('channel'):
+        for field in ('publication', 'build_source'):
+            if profile.get(field) != expected.get(field):
+                raise ValueError(f'Imported {field} differs from source profile')
+        if profile['firmware'].get('devices') != expected['firmware'].get('devices'):
+            raise ValueError('Imported firmware layouts differ from source profile')
     expected_abi = expected['firmware'].get('kernel_version')
     if expected_abi is not None and profile['firmware']['kernel_version'] != expected_abi:
         raise ValueError('Imported firmware kernel ABI differs from source profile')
@@ -123,7 +139,12 @@ def validate_metadata(raw, expected_profile):
     if (manifest.get('source_commit') != profile['firmware']['commit'] or
             manifest.get('kernel_version') != profile['firmware']['kernel_version']):
         raise ValueError('Release firmware manifest source or kernel ABI differs from profile')
+    if profile.get('channel') and (manifest.get('channel') != profile['channel']
+            or manifest.get('build_id') != profile['build_id']
+            or manifest.get('devices') != profile['firmware']['devices']):
+        raise ValueError('Release firmware manifest channel, build or layouts differ from profile')
     validate_inventory(raw, profile, manifest)
+    return {'profile': profile, 'lock': lock, 'manifest': manifest}
 
 
 def import_bundle(archive, checksum, output, expected_profile, *, max_bytes=8 * 1024 ** 3):

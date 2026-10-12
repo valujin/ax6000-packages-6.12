@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 
 import prepare
+import firmware_layouts
 from publish import read_control
 
 
@@ -29,8 +30,7 @@ def validate(profile, lock):
     prepare.require(isinstance(defconfig, str) and not PurePosixPath(defconfig).is_absolute()
                     and ".." not in PurePosixPath(defconfig).parts and bool(defconfig),
                     "build_source.defconfig must be a relative path inside pinned source")
-    prepare.require(source.get("device") == "xiaomi_redmi-router-ax6000-stock",
-                    "firmware build supports only Redmi AX6000 stock flash layout")
+    firmware_layouts.validate_devices(profile)
     firmware = profile.get("firmware", {})
     prepare.require((firmware.get("target"), firmware.get("subtarget"), firmware.get("architecture")) ==
                     ("mediatek", "filogic", "aarch64_cortex-a53"), "source firmware target must be mediatek/filogic AX6000")
@@ -52,7 +52,7 @@ def validate(profile, lock):
 
 def configure(profile, lock, source):
     validate(profile, lock)
-    repository_files(source)
+    repository_files(source, profile=profile)
     pins = prepare.feed_pins(profile, lock)
     (source / "feeds.conf").write_text("".join(
         f"src-git {feed['name']} {feed['url']}^{pins[feed['name']]}\n" for feed in profile["feeds"]))
@@ -69,10 +69,37 @@ def configure(profile, lock, source):
                "CONFIG_ALL_KMODS=y\nCONFIG_DEVEL=y\nCONFIG_SDK=y\n"
                "# CONFIG_ALL is not set\n# CONFIG_ALL_NONSHARED is not set\n"
                "CONFIG_SIGNED_PACKAGES=y\nCONFIG_SIGNATURE_CHECK=y\n")
-    (source / ".config").write_text(set_symbols(config, ssl_symbols(profile)))
+    values = ssl_symbols(profile)
+    devices = firmware_layouts.validate_devices(profile)
+    for device in devices:
+        values["TARGET_DEVICE_mediatek_filogic_DEVICE_" + device] = "y"
+        values["TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_" + device] = '"-kmod-mt7915e -kmod-mt7986-firmware"'
+    values.update(source_symbols(profile))
+    (source / ".config").write_text(set_symbols(config, values))
 
 
-def repository_files(source, check_only=False):
+def source_symbols(profile):
+    """Required 25.12 vendor image and opkg choices; never change kernel options."""
+    if profile.get("channel") is None:
+        return {}
+    installed = {"kmod-mt_wifi", "kmod-conninfra", "kmod-warp", "kmod-mediatek_hnat",
+                 "kmod-leds-ws2812b", "mtwifi-cfg-ucode", "iwinfo-ucode", "ucode-mod-iwinfo",
+                 "ucode-mod-datconf", "ucode-mod-l1parser", "wifi-dats", "libiwinfo",
+                 "luci-app-mtwifi-cfg", "opkg"}
+    values = {"PACKAGE_" + name: "y" for name in installed}
+    values.update({"PACKAGE_" + name: "n" for name in ("iwinfo", "mtwifi-cfg", "apk", "apk-mbedtls", "apk-openssl")})
+    values.update({"WIFI_SCRIPTS_UCODE": "y", "USE_APK": "n", "CLEAN_IPKG": "n",
+                   "TARGET_ROOTFS_SQUASHFS": "y", "TARGET_ROOTFS_INITRAMFS": "y",
+                   "TARGET_ROOTFS_INITRAMFS_SEPARATE": "y", "TARGET_INITRAMFS_COMPRESSION_XZ": "y"})
+    for symbol in ("TARGET_ROOTFS_EXT4FS", "TARGET_ROOTFS_JFFS2", "TARGET_ROOTFS_EROFS", "TARGET_ROOTFS_TARGZ",
+                   "TARGET_ROOTFS_CPIOGZ", "TARGET_INITRAMFS_COMPRESSION_NONE", "TARGET_INITRAMFS_COMPRESSION_GZIP",
+                   "TARGET_INITRAMFS_COMPRESSION_BZIP2", "TARGET_INITRAMFS_COMPRESSION_LZMA",
+                   "TARGET_INITRAMFS_COMPRESSION_LZO", "TARGET_INITRAMFS_COMPRESSION_LZ4", "TARGET_INITRAMFS_COMPRESSION_ZSTD"):
+        values[symbol] = "n"
+    return values
+
+
+def repository_files(source, check_only=False, profile=None):
     """Override moving official feeds; connect the verified feed with install-feed.sh."""
     public = (Path(__file__).resolve().parents[1] / "keys/repository.pub").read_bytes()
     lines = public.decode("ascii").splitlines()
@@ -83,6 +110,14 @@ def repository_files(source, check_only=False):
     installer = (Path(__file__).resolve().parent / "install-feed.sh").read_bytes()
     prepare.require(b"expected_fingerprint=" + fingerprint.encode() + b"\n" in installer,
                     "bundled installer signing key differs from repository key")
+    if profile is not None and profile.get("channel") is not None:
+        firmware_layouts.validate_devices(profile)
+        default = b"base=${PACKAGE_REPOSITORY_URL:-https://valujin.github.io/ax6000-packages}"
+        prepare.require(installer.count(default) == 1, "bundled installer default URL differs from reviewed template")
+        base = profile["publication"]["site_url"].rstrip("/") + "/channels/" + profile["channel"]
+        prepare.require(base == "https://valujin.github.io/ax6000-packages-6.12/channels/" + profile["channel"],
+                        "untrusted channel installer URL")
+        installer = installer.replace(default, b"base=${PACKAGE_REPOSITORY_URL:-" + base.encode() + b"}")
     files = {
         "files/etc/opkg/distfeeds.conf":
             b"# Packages for this firmware require its exact kernel ABI.\n"
@@ -214,10 +249,13 @@ def apply_source_patch(source, spec, patch, check_only=False):
 
 def vendor_fixes(profile, source, check_only=False):
     directory = Path(__file__).resolve().parents[1] / "patches/firmware"
+    if profile.get("channel") is not None:
+        firmware_layouts.validate_devices(profile)
+        directory = directory.parent / "firmware-6.12" / profile["channel"]
     manifest = json.loads((directory / "manifest.json").read_text())
     target = source / "target/linux/mediatek/Makefile"
     series = re.findall(r"^KERNEL_PATCHVER\s*:?=\s*(\S+)\s*$", target.read_text(), re.M)
-    prepare.require(series == [manifest["kernel_series"]], "vendor patches require the reviewed kernel series 6.6")
+    prepare.require(series == [manifest["kernel_series"]], "vendor patches require the reviewed kernel series " + manifest["kernel_series"])
     prepare.require(profile["firmware"]["commit"] == manifest["source_commit"],
                     "vendor patches require the reviewed firmware source commit")
     for spec in manifest["patches"]:
@@ -254,18 +292,23 @@ def select(profile, source):
                     "requested firmware packages absent from pinned feeds: " + ", ".join(sorted(requested - available)))
     config_path = source / ".config"
     config = config_path.read_text()
-    # Disable every generated device except the explicitly requested stock profile.
+    # Enable only the reviewed device layouts; unrelated source profiles stay disabled.
     target_info = (source / "tmp/.config-target.in").read_text()
     devices = set(re.findall(r"^(?:menu)?config\s+(TARGET_DEVICE_\S+)", target_info, re.M))
-    desired = "TARGET_DEVICE_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-stock"
-    prepare.require(desired in devices, "pinned source has no AX6000 stock device profile")
-    values = {device: ("y" if device == desired else "n") for device in devices}
+    desired = {"TARGET_DEVICE_mediatek_filogic_DEVICE_" + device for device in firmware_layouts.validate_devices(profile)}
+    prepare.require(desired <= devices, "pinned source is missing a requested AX6000 device layout")
+    values = {device: ("y" if device in desired else "n") for device in devices}
     values.update({"SIGNED_PACKAGES": "y", "SIGNATURE_CHECK": "y"})
     values.update(prepare.luci_language_symbols(profile, source, "y"))
     baseline_y = set(re.findall(r"^CONFIG_PACKAGE_(.+)=y$", config, re.M))
     kmods = sorted(name for name in available if name.startswith("kmod-")) if profile.get("all_kmods", True) else []
     for name in sorted(requested | set(kmods)):
         values["PACKAGE_" + name] = "y" if name in baseline_y or name in profile.get("image_packages", []) else "m"
+    required = source_symbols(profile)
+    installed = {symbol.removeprefix("PACKAGE_") for symbol, value in required.items()
+                 if symbol.startswith("PACKAGE_") and value == "y"}
+    prepare.require(installed <= available, "pinned source is missing vendor/opkg packages: " + ", ".join(sorted(installed - available)))
+    values.update(required)
     values.update(ssl_symbols(profile))
     config_path.write_text(set_symbols(config, values))
     report = {"profile": profile["id"], "requested": sorted(requested), "candidate_kmods": kmods,
@@ -273,6 +316,9 @@ def select(profile, source):
               "luci_languages": {name: "y" for name in profile.get("luci_languages", [])},
               "baseline_vendor_drivers": sorted(name for name in baseline_y if name in
                                                  {"kmod-mt_wifi", "kmod-conninfra", "kmod-warp", "kmod-mediatek_hnat"})}
+    if profile.get("channel") is not None:
+        report["channel"] = profile["channel"]
+        report["devices"] = profile["firmware"]["devices"]
     patches = source / "firmware-source-patches.json"
     if patches.is_file():
         report["source_patches"] = json.loads(patches.read_text())["patches"]
@@ -280,15 +326,32 @@ def select(profile, source):
 
 
 def verify(profile, source):
-    repository_files(source, check_only=True)
+    repository_files(source, check_only=True, profile=profile)
     patches = vendor_fixes(profile, source, check_only=True)
     report = prepare.verify_selection(profile, source)
     prepare.require(report.get("source_patches") == patches, "selection report omits vendor patch provenance")
     config = (source / ".config").read_text()
     verify_ssl(profile, config)
     enabled = set(re.findall(r"^CONFIG_TARGET_DEVICE_(.+)=y$", config, re.M))
-    prepare.require(enabled == {"mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000-stock"},
-                    "firmware selection includes another device or omits AX6000 stock")
+    expected = {"mediatek_filogic_DEVICE_" + device for device in firmware_layouts.validate_devices(profile)}
+    prepare.require(enabled == expected, "firmware selection includes another device or omits a requested AX6000 layout")
+    if profile.get("channel") is not None:
+        prepare.require(report.get("devices") == profile["firmware"]["devices"] and report.get("channel") == profile["channel"],
+                        "selection report device/channel identity mismatch")
+        for symbol, value in source_symbols(profile).items():
+            if value == "y":
+                prepare.require(f"CONFIG_{symbol}=y\n" in config, f"firmware configuration dropped {symbol}")
+            else:
+                prepare.require(not re.search(r"^CONFIG_" + re.escape(symbol) + r"=[my]$", config, re.M),
+                                f"firmware configuration enabled incompatible {symbol}")
+        for name in ("kmod-mt7915e", "kmod-mt7986-firmware"):
+            prepare.require(f"CONFIG_PACKAGE_{name}=y\n" not in config, f"native WiFi package {name} was installed with vendor radio")
+        for device in firmware_layouts.validate_devices(profile):
+            expected_override = f'CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_{device}="-kmod-mt7915e -kmod-mt7986-firmware"'
+            prepare.require(expected_override + "\n" in config, f"device WiFi exclusion dropped for {device}")
+        for symbol in ("TARGET_MULTI_PROFILE", "TARGET_PER_DEVICE_ROOTFS"):
+            prepare.require(f"CONFIG_{symbol}=y\n" in config, f"firmware configuration dropped {symbol}")
+        prepare.require("CONFIG_TARGET_ALL_PROFILES=y\n" not in config, "all unrelated device profiles were enabled")
     for symbol in ("TARGET_mediatek", "TARGET_mediatek_filogic", "SDK", "DEVEL", "ALL_KMODS", "SIGNED_PACKAGES", "SIGNATURE_CHECK"):
         prepare.require(f"CONFIG_{symbol}=y\n" in config, f"firmware configuration dropped {symbol}")
     prepare.require('CONFIG_TARGET_ARCH_PACKAGES="aarch64_cortex-a53"' in config,
@@ -541,6 +604,9 @@ def export(profile, lock, source, output):
     prepare.require(len(kernel) == 1, "build must produce exactly one kernel ipk to discover actual firmware ABI")
     abi = kernel[0].get("Version", "")
     prepare.require(prepare.KERNEL_PACKAGE.fullmatch(abi), "built kernel ipk has invalid ABI version")
+    if profile.get("channel") is not None:
+        expected_version = prepare.CHANNEL_SOURCES[profile["channel"]][1]
+        prepare.require(abi.startswith(expected_version + "~"), "built kernel version differs from pinned 6.12 channel")
     prepare.require(kernel[0].get("Architecture") == profile["firmware"]["architecture"], "built kernel architecture mismatch")
     for path, control in controls:
         if control.get("Package", "").startswith("kmod-"):
@@ -554,8 +620,11 @@ def export(profile, lock, source, output):
     prepare.require(not missing_kmods,
                     "build omitted selected kernel modules: " + ", ".join(missing_kmods))
     target = source / "bin/targets/mediatek/filogic"
-    images = sorted(target.glob("*xiaomi_redmi-router-ax6000-stock*sysupgrade*"))
-    prepare.require(bool(images), "build produced no Redmi AX6000 stock sysupgrade image")
+    for device, layout in firmware_layouts.validate_devices(profile).items():
+        suffix = "squashfs-sysupgrade.itb" if layout == "ubootmod" else "squashfs-sysupgrade.bin"
+        images = sorted(target.glob(f"*-{device}-{suffix}"))
+        prepare.require(len(images) == 1 and images[0].is_file() and not images[0].is_symlink(),
+                        f"build must produce one Redmi AX6000 {layout} sysupgrade image")
     sdks = sorted(target.glob("*sdk*.tar.*"))
     prepare.require(len(sdks) == 1, "build must produce one matching SDK archive")
     signer = source / "staging_dir/host/bin/usign"
@@ -565,8 +634,10 @@ def export(profile, lock, source, output):
     augment_sdk(profile, source, sdks[0], controls, abi)
     # Daily SDK builds keep the kernel configuration fixed and reuse frozen modules.
     generated["all_kmods"] = False
-    generated["feeds"].insert(0, {"name": "base", "url": profile["firmware"]["repository"],
-                                  "commit": profile["firmware"]["commit"]})
+    base_feed = {"name": "base", "url": profile["firmware"]["repository"], "commit": profile["firmware"]["commit"]}
+    if profile.get("channel") is not None:
+        base_feed["root"] = "package"
+    generated["feeds"].insert(0, base_feed)
     with sdks[0].open("rb") as stream:
         sdk_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     build_id = f"{profile['id']}-{profile['firmware']['commit'][:12]}-{sdk_hash[:12]}"
@@ -574,7 +645,9 @@ def export(profile, lock, source, output):
     site_url = profile["build_source"].get("publication_url", "https://valujin.github.io/ax6000-packages")
     url_base = site_url.rstrip("/") + "/firmware/" + build_id
     prepare.https_url(url_base, "firmware publication URL")
-    generated["sdk"] = {"url": url_base.rstrip("/") + "/" + sdks[0].name, "sha256": sdk_hash}
+    generated["sdk"] = {"url": firmware_layouts.firmware_release_url(generated, sdks[0].name)
+                        if profile.get("channel") is not None else url_base.rstrip("/") + "/" + sdks[0].name,
+                        "sha256": sdk_hash}
     output.mkdir(parents=True)
     shutil.copytree(source / "bin", output / "bin", symlinks=True)
     exported_target = output / "bin/targets/mediatek/filogic"
@@ -612,11 +685,19 @@ def export(profile, lock, source, output):
         except subprocess.CalledProcessError:
             recipe_commit = None
     prepare.require(recipe_commit is None or prepare.COMMIT.fullmatch(recipe_commit), "invalid build recipe commit provenance")
-    (output / "firmware-manifest.json").write_text(json.dumps({"build_id": build_id, "kernel_version": abi,
-                                                               "recipe_commit": recipe_commit,
-                                                               "source_commit": profile["firmware"]["commit"],
-                                                               "source_patches": report.get("source_patches", []),
-                                                               "files": manifest}, indent=2) + "\n")
+    firmware_manifest = {"build_id": build_id, "kernel_version": abi, "recipe_commit": recipe_commit,
+                         "source_commit": profile["firmware"]["commit"], "source_patches": report.get("source_patches", []),
+                         "files": manifest}
+    if profile.get("channel") is not None:
+        firmware_manifest.update({"channel": profile["channel"], "devices": profile["firmware"]["devices"]})
+        assets = firmware_layouts.collect_firmware_assets(output, generated, firmware_manifest)
+        catalog = {"schema_version": 1, "channel": generated["channel"], "profile_id": generated["id"],
+                   "build_id": build_id, "firmware": generated["firmware"], "sdk": generated["sdk"],
+                   "assets": [{**{key: value for key, value in asset.items() if key != "path"},
+                               "url": firmware_layouts.firmware_release_url(generated, asset["filename"])} for asset in assets]}
+        firmware_layouts.validate_download_catalog(catalog, generated)
+        (output / "downloads.json").write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+    (output / "firmware-manifest.json").write_text(json.dumps(firmware_manifest, indent=2) + "\n")
     print(f"Exported matching firmware, SDK and packages with kernel ABI {abi} to {output}")
 
 
@@ -640,13 +721,13 @@ def main():
             return
         prepare.require(args.source_dir is not None and args.source_dir.is_dir(), "--source-dir is required")
         if args.phase == "export":
-            repository_files(args.source_dir, check_only=True)
+            repository_files(args.source_dir, check_only=True, profile=profile)
             vendor_fixes(profile, args.source_dir, check_only=True)
             prepare.require(args.output_dir is not None, "--output-dir is required")
             export(profile, lock, args.source_dir, args.output_dir)
         else:
             actions = {"configure": lambda: configure(profile, lock, args.source_dir),
-                       "repository-files": lambda: repository_files(args.source_dir),
+                       "repository-files": lambda: repository_files(args.source_dir, profile=profile),
                        "check-feeds": lambda: prepare.verify_feeds(profile, lock, args.source_dir),
                        "vendor-fixes": lambda: vendor_fixes(profile, args.source_dir),
                        "overrides": lambda: overrides(profile, lock, args.source_dir),

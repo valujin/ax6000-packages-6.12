@@ -1,0 +1,11 @@
+--- a/include/kernel-defaults.mk
++++ b/include/kernel-defaults.mk
+@@ -207,7 +207,7 @@
+ 				$(if $(CONFIG_TARGET_INITRAMFS_COMPRESSION_LZO), \
+ 					$(STAGING_DIR_HOST)/bin/lzop -9 -f $(KERNEL_BUILD_DIR)/initrd$(2).cpio;) \
+ 				$(if $(CONFIG_TARGET_INITRAMFS_COMPRESSION_XZ), \
+-					$(STAGING_DIR_HOST)/bin/xz -T$(if $(filter 1,$(NPROC)),2,0) -9 -fz --check=crc32 $(KERNEL_BUILD_DIR)/initrd$(2).cpio;) \
++					$(STAGING_DIR_HOST)/bin/xz -T1 -9 -fz --check=crc32 $(KERNEL_BUILD_DIR)/initrd$(2).cpio;) \
+ 				$(if $(CONFIG_TARGET_INITRAMFS_COMPRESSION_ZSTD), \
+ 					$(STAGING_DIR_HOST)/bin/zstd -T0 -f -o $(KERNEL_BUILD_DIR)/initrd$(2).cpio.zstd $(KERNEL_BUILD_DIR)/initrd$(2).cpio;) \
+ 			}, gen-cpio$(2)); \

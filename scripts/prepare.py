@@ -17,6 +17,10 @@ COMMIT = re.compile(r"[0-9a-fA-F]{40}\Z")
 SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+.-]*\Z")
 KERNEL_PACKAGE = re.compile(r"([0-9]+\.[0-9]+\.[0-9]+)~([0-9a-f]{32})-r([0-9]+)\Z")
+CHANNEL_SOURCES = {
+    "recommended": ("ae65e1de69971b5a2e3cf7e39390ee93f274d488", "6.12.108"),
+    "latest": ("a99b0888b88f134f56bcb2a7d93027b5d20638a9", "6.12.112"),
+}
 
 
 def require(condition, message):
@@ -44,6 +48,52 @@ def feed_pins(profile, lock):
                 f"feed {feed['name']} needs a full 40-character commit")
         result[feed["name"]] = pin.lower()
     return result
+
+
+def validate_channel_inputs(profile, pins):
+    """Keep the two issued firmware generations fixed during package refreshes."""
+    channel = profile.get("channel")
+    if channel is None:
+        require("devices" not in profile["firmware"], "multi-layout firmware requires a 6.12 channel")
+        return
+    require(isinstance(channel, str) and channel in CHANNEL_SOURCES, "invalid 6.12 channel")
+    require(profile["id"] == "redmi-ax6000-612-" + channel, "profile id differs from channel")
+    firmware = profile["firmware"]
+    commit, version = CHANNEL_SOURCES[channel]
+    require(firmware["repository"] == "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git"
+            and firmware["commit"] == commit, "channel differs from its pinned vendor source")
+    require((firmware["target"], firmware["subtarget"], firmware["architecture"]) ==
+            ("mediatek", "filogic", "aarch64_cortex-a53"), "channel requires the AX6000 target")
+    from firmware_layouts import validate_devices
+    validate_devices(profile)
+    require(firmware.get("device") == "xiaomi_redmi-router-ax6000-stock", "primary firmware device must be stock")
+    publication = profile.get("publication")
+    require(isinstance(publication, dict) and publication.get("repository") == "valujin/ax6000-packages-6.12"
+            and publication.get("site_url") == "https://valujin.github.io/ax6000-packages-6.12"
+            and publication.get("firmware_assets") == "github-release", "invalid channel publication site or policy")
+    source = profile.get("build_source")
+    if source is not None:
+        require(isinstance(source, dict) and source.get("device") == firmware["device"]
+                and source.get("publication_url") == publication["site_url"] + "/channels/" + channel,
+                "source overlay publication URL differs from channel")
+    sdk = profile["sdk"]
+    surrogate = (isinstance(source, dict) and firmware["kernel_version"] == "0.0.0~" + "0" * 32 + "-r0"
+                 and sdk == {"url": "https://invalid.example/source-build-only.tar.xz", "sha256": "0" * 64}
+                 and "build_id" not in profile)
+    if not surrogate:
+        require(firmware["kernel_version"].startswith(version + "~"), "kernel version differs from channel source")
+        build_id = profile["id"] + "-" + commit[:12] + "-" + sdk["sha256"][:12]
+        require(profile.get("build_id") == build_id, "channel build id must identify its exact SDK")
+        prefix = "https://github.com/" + publication["repository"] + "/releases/download/firmware-" + build_id + "/"
+        filename = sdk["url"].removeprefix(prefix)
+        require(sdk["url"].startswith(prefix) and NAME.fullmatch(filename) and filename.endswith(".tar.zst"),
+                "channel SDK URL must identify its immutable firmware Release asset")
+    base = [feed for feed in profile["feeds"] if feed["name"] == "base"]
+    require(surrogate or len(base) == 1, "channel SDK requires the pinned base root feed")
+    if base:
+        require(base[0].get("root") == "package" and base[0]["url"] == firmware["repository"]
+                and base[0]["commit"] == commit and pins["base"] == commit
+                and not base[0].get("monitor_ref"), "channel base root feed must remain at the firmware commit")
 
 
 def validate(profile, lock):
@@ -78,6 +128,10 @@ def validate(profile, lock):
         https_url(feed.get("url"), f"feed {name} URL")
         require(isinstance(feed.get("commit"), str) and COMMIT.fullmatch(feed["commit"]),
                 f"feed {name} profile pin needs a full 40-character commit")
+        if "root" in feed:
+            require(name == "base" and feed["root"] == "package", "only the base feed may use root=package")
+            require(feed["url"] == firmware["repository"] and feed["commit"] == firmware["commit"]
+                    and not feed.get("monitor_ref"), "base root feed must use the fixed firmware source")
     packages = profile.get("packages")
     require(isinstance(packages, list) and packages and all(
         isinstance(name, str) and NAME.fullmatch(name) for name in packages),
@@ -89,7 +143,8 @@ def validate(profile, lock):
             re.fullmatch(r"[a-z]{2,3}(?:_[A-Za-z]{2,8})?", language) for language in languages)
             and len(set(languages)) == len(languages), "luci_languages must be a unique list of LuCI language codes")
     require(isinstance(lock, dict), "lock must be an object")
-    feed_pins(profile, lock)
+    pins = feed_pins(profile, lock)
+    validate_channel_inputs(profile, pins)
     overrides = package_overrides(lock)
     for name, override in overrides.items():
         require(isinstance(name, str) and NAME.fullmatch(name), "invalid package override name")
@@ -122,12 +177,24 @@ def configure_feeds(profile, lock, sdk):
     validate(profile, lock)
     pins = feed_pins(profile, lock)
     (sdk / "feeds.conf").write_text("".join(
-        f"src-git {feed['name']} {feed['url']}^{pins[feed['name']]}\n" for feed in profile["feeds"]))
+        f"src-git {'--root=package ' if feed.get('root') == 'package' else ''}"
+        f"{feed['name']} {feed['url']}^{pins[feed['name']]}\n" for feed in profile["feeds"]))
 
 
 def verify_feeds(profile, lock, sdk):
+    feeds = {feed["name"]: feed for feed in profile["feeds"]}
     for name, expected in feed_pins(profile, lock).items():
         directory = sdk / "feeds" / name
+        if "root" in feeds[name]:
+            require(name == "base" and feeds[name]["root"] == "package", "invalid feed root")
+            clone = sdk / "feeds/base_root"
+            require(not (sdk / "feeds").is_symlink() and clone.is_dir() and not clone.is_symlink()
+                    and (clone / ".git").is_dir() and not (clone / ".git").is_symlink(),
+                    "base root clone must be a local Git directory")
+            require(directory.is_symlink() and os.readlink(directory) == "base_root/package"
+                    and (clone / "package").is_dir() and not (clone / "package").is_symlink()
+                    and directory.resolve() == clone.resolve() / "package", "base root feed link differs from package root")
+            directory = clone
         actual = subprocess.check_output(["git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
         require(actual == expected, f"feed {name} checkout {actual} differs from locked {expected}")
 
@@ -434,6 +501,9 @@ def select_packages(profile, sdk):
                   lambda match: "" if match.group(1) in language_symbols else match.group(0), text, flags=re.M)
     # Preserve target/toolchain config, clear preselected package defaults and firmware build output.
     text = re.sub(r"^(?:CONFIG_PACKAGE_.*|# CONFIG_PACKAGE_.*)\n?", "", text, flags=re.M)
+    if profile.get("channel") is not None:
+        text = re.sub(r"^(?:CONFIG_USE_APK=.*|# CONFIG_USE_APK is not set)\n?", "", text, flags=re.M)
+        text += "\n# CONFIG_USE_APK is not set\n"
     text = re.sub(r"^(?:CONFIG_(?:SDK|ALL|ALL_KMODS|ALL_NONSHARED|SIGNED_PACKAGES|BUILD_LOG|BUILDBOT|TARGET_ROOTFS_[A-Z0-9_]+)=.*|# CONFIG_(?:SDK|ALL|ALL_KMODS|ALL_NONSHARED|SIGNED_PACKAGES|BUILD_LOG|BUILDBOT|TARGET_ROOTFS_[A-Z0-9_]+) is not set)\n?", "", text, flags=re.M)
     if refresh:
         refresh_path, defaults, config_in, refreshed = refresh
@@ -541,6 +611,9 @@ def close_native(profile, sdk):
 def verify_selection(profile, sdk):
     report = json.loads((sdk / "build-selection.json").read_text())
     config = (sdk / ".config").read_text()
+    if profile.get("channel") is not None:
+        require("# CONFIG_USE_APK is not set\n" in config and not re.search(r"^CONFIG_USE_APK=[my]$", config, re.M),
+                "6.12 SDK must retain opkg/IPK; APK was enabled after defconfig")
     selected = set(re.findall(r"^CONFIG_PACKAGE_(.+)=[my]$", config, re.M))
     baseline = baseline_packages(profile, sdk)
     required = required_native_kmods(baseline, config)

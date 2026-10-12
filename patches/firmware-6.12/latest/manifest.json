@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source_commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
+  "kernel_series": "6.12",
+  "patches": [
+    {
+      "patch": "100-initramfs-xz-single-thread.patch",
+      "path": "include/kernel-defaults.mk",
+      "sha256": "08d9282458473babea6408a254395789a13eb700853cb680c11eb2c9758a44ad",
+      "before_sha256": "3b3f133dc439cc15bb29ecff87bf4ccce6e7b7893f5c3f66e629b0c57c5a7679",
+      "after_sha256": "2595267671b70a18922dbefd8bbcd27956761a924c422c9ea8c4eccf80eb1683"
+    }
+  ]
+}

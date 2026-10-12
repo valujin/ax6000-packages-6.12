@@ -1,40 +1,48 @@
-# Ограниченная сборка без изменения сервисов сервера
+# Ограниченная локальная сборка
 
-Полная сборка требует большого объёма диска и нескольких часов. Основной вариант
-для текущего сервера — отдельный Docker-контейнер. Зависимости устанавливаются
-в контейнер, без apt-обновления хостовой системы. Хостовые исходники форка не
-изменяются. Рабочий каталог и результат находятся отдельно.
+Полная сборка выполняется в отдельном Docker-контейнере. Пакеты сборочной
+системы устанавливаются только внутри контейнера; исходный checkout 6.6 и
+сервисы хоста не изменяются. Для сервера 8 CPU / 23 GiB установлены лимиты
+4 CPU, 10 GiB RAM, без swap, nice 19 и idle I/O. Тяжёлые сборки выполняются
+последовательно, включая сборки другого репозитория.
 
-Рекомендуемые ограничения для сервера8CPU/23GiB RAM:
+Для воспроизводимого запуска использовать отдельный чистый checkout рецептов
+на закреплённом commit. Выбрать `recommended` или `latest`, разрешить lock
+свежих пакетов, проверить pins и сохранить его до начала сборки:
 
 ```sh
-mkdir -p ../ax6000-packages-build/{work,output}
-python3 scripts/monitor.py --profile profiles/redmi-ax6000-new.json --output state/new-lock.json
-docker run -d --name ax6000-firmware-build \
+channel=recommended
+mkdir -p state ../ax6000-packages-6.12-build/$channel/{work,output} ../ax6000-build-global
+python3 scripts/monitor.py --profile "profiles/redmi-ax6000-612-$channel-new.json" \
+  --output "state/$channel-new-lock.json"
+docker run -d --name "ax6000-612-$channel-build" \
   --cpus 4 --memory 10g --memory-swap 10g --pids-limit 2048 \
   --oom-score-adj 500 --security-opt no-new-privileges \
   --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
-  --mount "type=bind,src=$(realpath ../ax6000-packages-build/work),dst=/build" \
-  --mount "type=bind,src=$(realpath ../ax6000-packages-build/output),dst=/output" \
-  ubuntu:24.04 nice -n 19 ionice -c 3 bash /workspace/scripts/container-entrypoint.sh
+  --mount "type=bind,src=$(realpath ../ax6000-packages-6.12-build/$channel/work),dst=/build" \
+  --mount "type=bind,src=$(realpath ../ax6000-packages-6.12-build/$channel/output),dst=/output" \
+  --mount "type=bind,src=$(realpath ../ax6000-build-global),dst=/global" \
+  ubuntu:24.04 bash /workspace/scripts/container-entrypoint.sh \
+  --profile "/workspace/profiles/redmi-ax6000-612-$channel-new.json" \
+  --lock "/workspace/state/$channel-new-lock.json" --work-dir /build --output-dir /output/raw
 ```
 
-Компиляторы запускаются с nice19, idle I/O и affinity не более половины CPU.
-Квота Docker ограничивает контейнер4CPU, память10GiB, swap отключён. Потоки Go
-также учитываются настройками ограничителя. Для другой машины выбирать лимиты
-не более половины её ресурсов, оставляя память и диск работающим сервисам.
+Все другие локальные сборки должны использовать тот же файл lock:
+`AX6000_BUILD_LOCK=/absolute/path/ax6000-build-global/.build.lock`
+(в контейнерах — bind mount того же файла). Скрипт откажется запускать вторую
+сборку, пока первая удерживает lock. Контейнер ограничивает память всего дерева
+процессов, а `resource-limit.sh` дополнительно ограничивает affinity и jobs.
+
+Результат включает три разметки, точный SDK, IPK и provenance. Перед публикацией
+проверить реальные образы:
 
 ```sh
-docker logs --tail 80 ax6000-firmware-build
-docker stats --no-stream ax6000-firmware-build
+python3 scripts/verify-firmware.py --source /absolute/source \
+  --raw /absolute/output/raw --repo "$PWD" --output /absolute/verification.json
 ```
 
-Скрипт полной сборки проверяет свободный диск, точные pins, корректный stock-device,
-наличие запрошенных пакетов после Kconfig и модульные зависимости. Результат:
-образ для ручного обновления, SDK, IPK, профиль ABI, provenance и список модулей.
-Повторный запуск не обновляет base source без изменения профиля.
-
-GitHub-hosted runner обычно предоставляет недостаточно диска для полной сборки
-всех модулей. Manual workflow проверяет диск и выдаёт причину отказа. Ежедневные
-сборки по готовому SDK существенно меньше. Сборка никогда автоматически не
-переносится на self-hosted runner сервера.
+Экспортированный SDK отдельно проверяется сборкой свежих пакетов и AmneziaWG.
+Штатные kmods остаются побайтно из исходной прошивки; её kernel context не
+изменяется. Проверки артефактов не подтверждают загрузку на физическом роутере.
+GitHub Actions использует только hosted runners; автоматического переноса
+полной сборки на сервер нет.
