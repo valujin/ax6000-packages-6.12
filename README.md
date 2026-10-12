@@ -17,7 +17,10 @@ MediaTek и штатный vendor-стек сохранены. SDK и полны
 Проверены три sysupgrade-образа, свежая сборка пакетов из SDK и фактически
 опубликованные файлы. Stock factory UBI не публикуется: полный initramfs превышает
 30 MiB раздела; stock sysupgrade и образ initramfs для загрузки в RAM доступны.
-[Latest 6.12.112 сейчас собирается](https://github.com/valujin/ax6000-packages-6.12/actions/runs/38237483412).
+**Latest 6.12.112 также опубликована:** [образы и SDK](https://github.com/valujin/ax6000-packages-6.12/releases/tag/firmware-redmi-ax6000-612-latest-a99b0888b88f-30f1cc518a7f).
+Проверены три образа, отдельная сборка пакетов из свежего SDK, все опубликованные
+пакеты и SHA256 образов/SDK. Добавление latest сохранило весь канал recommended
+побайтно. Испытания на физическом роутере ещё не выполнялись.
 Линия Linux 6.6 находится в [ax6000-packages](https://github.com/valujin/ax6000-packages).
 
 ## Пакеты
