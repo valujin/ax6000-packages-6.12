@@ -6,12 +6,14 @@ import gzip
 import hashlib
 import html
 import io
+import importlib.util
 import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 from urllib.parse import urlsplit
 
 
@@ -197,6 +199,35 @@ def public_key_payload(text):
     return data
 
 
+def validate_external_catalog(catalog_path, signature, metadata_path, profile, public_key, usign):
+    spec = importlib.util.spec_from_file_location('publisher_snapshot', Path(__file__).with_name('channel-snapshot.py'))
+    snapshot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(snapshot)
+    metadata = snapshot.read_json(metadata_path)
+    if metadata.get('draft') is not False or metadata.get('immutable') is not True:
+        raise ValueError('Firmware asset release must be immutable')
+    with tempfile.TemporaryDirectory(prefix='ax6000-catalog-') as temporary:
+        tree = Path(temporary)
+        shutil.copyfile(catalog_path, tree / 'downloads.json')
+        shutil.copyfile(signature, tree / 'downloads.sig')
+        catalog = snapshot.catalog_identity(tree, profile, public_key, usign)
+    release = catalog['release']
+    if metadata.get('id') != release['id'] or metadata.get('tag_name') != release['tag']:
+        raise ValueError('Catalog generation release identity mismatch')
+    assets = {}
+    for asset in metadata.get('assets', []):
+        if asset.get('name') in assets or asset.get('state') != 'uploaded':
+            raise ValueError('Duplicate or incomplete generation asset')
+        assets[asset['name']] = asset
+    for record in catalog['assets']:
+        asset = assets.get(record['filename'], {})
+        if (asset.get('id') != record['asset_id'] or asset.get('size') != record['size']
+                or asset.get('digest') not in (None, 'sha256:' + record['sha256'])
+                or asset.get('updated_at') != record['updated_at']):
+            raise ValueError('Catalog asset API identity mismatch')
+    return catalog
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', required=True, type=Path)
@@ -207,6 +238,9 @@ def main():
                         help='Require the signing secret to match this pinned usign public key')
     parser.add_argument('--usign', required=True, type=Path)
     parser.add_argument('--lock', required=True, type=Path)
+    parser.add_argument('--external-assets', type=Path)
+    parser.add_argument('--external-assets-signature', type=Path)
+    parser.add_argument('--generation-release-metadata', type=Path)
     args = parser.parse_args()
     profile = json.loads(args.profile.read_text())
     if not args.key.is_file() or not args.usign.is_file():
@@ -224,6 +258,12 @@ def main():
             raise ValueError('Invalid pinned public key') from error
         if public_key_payload(pinned_public) != public_key_payload(derived_public):
             raise ValueError('Signing key differs from pinned public key')
+    catalog = None
+    external = (args.external_assets, args.external_assets_signature, args.generation_release_metadata)
+    if any(external) or profile.get('channel') is not None:
+        if not all(external) or args.public_key is None:
+            raise ValueError('Channel publication requires signed immutable external assets and a pinned key')
+        catalog = validate_external_catalog(*external, profile, args.public_key, args.usign)
     feed = stage_feed(args.input, args.output, profile)
     public_key = args.output / 'repository.pub'
     usign = str(args.usign.resolve())
@@ -236,7 +276,10 @@ def main():
         subprocess.run([usign, '-V', '-m', str(feed / 'Packages'),
                         '-p', str(args.public_key.resolve()),
                         '-x', str(feed / 'Packages.sig')], check=True)
-    firmware_dir = stage_firmware(args.input, args.output, profile)
+    firmware_dir = None if catalog is not None else stage_firmware(args.input, args.output, profile)
+    if catalog is not None:
+        shutil.copyfile(args.external_assets, args.output / 'downloads.json')
+        shutil.copyfile(args.external_assets_signature, args.output / 'downloads.sig')
     state = args.output / 'state'
     state.mkdir()
     shutil.copy2(args.lock, state / 'lock.json')
@@ -246,6 +289,11 @@ def main():
             shutil.copy2(args.input / name, args.output / name)
     (args.output / '.nojekyll').touch()
     downloads = ''
+    if catalog is not None:
+        downloads = '<ul>' + ''.join(
+            f'<li>{html.escape(record.get("layout") or record["kind"])}: '
+            f'<a href="{html.escape(record["url"], quote=True)}">{html.escape(record["filename"])}</a>'
+            f' (SHA256 {record["sha256"]})</li>' for record in catalog['assets']) + '</ul>'
     if firmware_dir:
         downloads = '<ul>' + ''.join(
             f'<li><a href="{html.escape(p.relative_to(args.output).as_posix(), quote=True)}">'
@@ -260,7 +308,7 @@ def main():
         f'<p><a href="{feed.relative_to(args.output).as_posix()}/Packages">Package index</a></p>' +
         (f'<p>Kernel ABI: <code>{html.escape(profile["firmware"]["kernel_version"])}</code></p>'
          '<p>Firmware and SDK for Redmi AX6000 stock layout. Install the matching firmware '
-         'before using these kernel modules.</p>' + downloads if firmware_dir else ''))
+         'before using these kernel modules.</p>' + downloads if firmware_dir else downloads))
     print(f'Validated and signed feed: {feed}')
 
 

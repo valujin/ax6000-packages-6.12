@@ -1,4 +1,4 @@
-name: Monitor and publish packages
+name: Monitor and publish 6.12 channels
 
 on:
   schedule:
@@ -19,9 +19,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  PROFILE: profiles/redmi-ax6000.json
 
 jobs:
   heartbeat:
@@ -102,150 +99,70 @@ jobs:
           PY
 
   monitor:
-    # Manual runs on feature branches cannot access the publication path.
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
-      enabled: ${{ steps.profile.outputs.enabled }}
-      changed: ${{ steps.monitor.outputs.changed }}
+      enabled: ${{ steps.profiles.outputs.enabled }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check compatibility profile
-        id: profile
+      - name: Monitor both fixed channels and check activation
+        id: profiles
         run: |
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
+          import subprocess
 
-          profile = json.loads(Path(os.environ['PROFILE']).read_text())
-          enabled = profile.get('enabled') is True
+          enabled = False
+          for channel in ('recommended', 'latest'):
+              generated = Path(f'profiles/redmi-ax6000-612-{channel}.json')
+              profile = generated if generated.is_file() else Path(f'profiles/redmi-ax6000-612-{channel}-new.json')
+              if not profile.is_file():
+                  raise SystemExit(f'Missing explicit 6.12 channel profile: {profile}')
+              data = json.loads(profile.read_text())
+              if data.get('channel') != channel or data.get('id') != f'redmi-ax6000-612-{channel}':
+                  raise SystemExit('Channel/profile identity mismatch')
+              active = generated.is_file() and data.get('enabled') is True
+              enabled = enabled or active
+              subprocess.run(['python3', 'scripts/monitor.py', '--profile', str(profile),
+                              '--output', f'state/{channel}-monitored.json'], check=True)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write(f'- {channel}: ' + ('daily profile active' if active else
+                      'publication disabled; verify firmware + exact SDK and initial signed snapshot before activation') + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'enabled={str(enabled).lower()}\n')
-          if not enabled:
-              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-                  summary.write('Package publication is disabled; source monitoring remains active. '
-                                'Complete the exact firmware '
-                                'commit, kernel ABI and matching SDK URL/checksum in '
-                                '`profiles/redmi-ax6000.json`, then set `enabled` to `true`. '
-                                'See `docs/CI.md` for Pages and signing setup.\n')
           PY
-      - name: Read last successfully published source lock
-        env:
-          PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import urllib.error
-          import urllib.parse
-          import urllib.request
-          from pathlib import Path
-
-          owner, repo = os.environ['GITHUB_REPOSITORY'].split('/', 1)
-          base = os.environ['PACKAGE_REPOSITORY_URL'].strip()
-          if not base:
-              base = f'https://{owner.lower()}.github.io/{repo}'
-          parsed = urllib.parse.urlsplit(base)
-          if parsed.scheme != 'https' or not parsed.netloc or parsed.query or parsed.fragment:
-              raise SystemExit('PACKAGE_REPOSITORY_URL must be an HTTPS site base URL')
-          url = base.rstrip('/') + '/state/lock.json'
-          Path('state').mkdir(exist_ok=True)
-          request = urllib.request.Request(url, headers={'Cache-Control': 'no-cache'})
-          try:
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  body = response.read(8 * 1024 * 1024 + 1)
-              if len(body) > 8 * 1024 * 1024:
-                  raise SystemExit('Published source lock is unexpectedly large')
-              json.loads(body)
-              Path('state/previous.json').write_bytes(body)
-          except urllib.error.HTTPError as error:
-              if error.code != 404:
-                  raise
-              print('No published source lock exists; this is the first publication.')
-          PY
-      - name: Resolve sources and detect changes
-        id: monitor
-        env:
-          FORCE: ${{ inputs.force || false }}
-        run: |
-          args=(--profile "$PROFILE" --output state/lock.json)
-          if [[ -f state/previous.json ]]; then
-            args+=(--previous state/previous.json)
-          fi
-          python3 scripts/monitor.py "${args[@]}"
-          if [[ "$FORCE" == true ]]; then
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Store resolved source lock
-        if: steps.monitor.outputs.changed == 'true'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: source-lock
-          path: state/lock.json
-          if-no-files-found: error
+          name: monitored-6.12-inputs
+          path: state/*-monitored.json
           retention-days: 7
-      - name: Summarize unchanged sources
-        if: steps.monitor.outputs.changed != 'true'
-        run: echo 'Published source lock is unchanged; no build is needed.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Summarize monitored sources
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
+          if-no-files-found: error
 
-          lock = json.loads(Path('state/lock.json').read_text())
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('\nLatest monitored inputs:\n\n')
-              for name, revision in sorted(lock.get('feeds', {}).items()):
-                  summary.write(f'- Feed `{name}`: `{revision}`\n')
-              version = lock.get('tailscale', {}).get('version', 'unavailable')
-              summary.write(f'- Tailscale: `{version}`\n')
-          PY
-
-  build:
+  publish:
     needs: monitor
-    if: needs.monitor.outputs.enabled == 'true' && needs.monitor.outputs.changed == 'true'
+    if: needs.monitor.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     permissions:
-      contents: read
+      contents: write
       pages: read
+    outputs:
+      deploy: ${{ steps.refresh.outputs.deploy }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: source-lock
-          path: state
-      - name: Run unit tests and shell checks
-        run: |
-          python3 -m unittest discover -s tests -v
-          for script in scripts/*.sh; do bash -n "$script"; done
-      - name: Check signing prerequisite
-        env:
-          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
-        run: |
-          if [[ -z "$OPKG_SIGNING_KEY" ]]; then
-            echo 'Set the repository secret OPKG_SIGNING_KEY before building.' >&2
-            exit 1
-          fi
-      - name: Install SDK build prerequisites
+      - name: Install SDK and trusted signing prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang cmake flex bison gawk gettext git libjson-c-dev libncurses-dev \
-            libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev \
-            file wget curl zstd xz-utils
-      - name: Build packages on the GitHub hosted runner
-        run: |
-          bash scripts/build.sh --profile "$PROFILE" --lock state/lock.json \
-            --work-dir "$RUNNER_TEMP/sdk-build" --output-dir raw
+            libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev file wget curl zstd xz-utils
       - name: Build pinned official host usign
         run: |
           pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
@@ -253,47 +170,50 @@ jobs:
           git -C "$RUNNER_TEMP/usign-source" fetch --depth 1 https://github.com/openwrt/usign.git "$pin"
           git -C "$RUNNER_TEMP/usign-source" checkout --detach FETCH_HEAD
           [[ $(git -C "$RUNNER_TEMP/usign-source" rev-parse HEAD) == "$pin" ]]
-          bash scripts/resource-limit.sh --jobs 1 -- cmake \
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
-          bash scripts/resource-limit.sh --jobs 1 -- cmake \
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             --build "$RUNNER_TEMP/usign-build" --parallel 1
-      - name: Validate and sign package repository
+      - name: Refresh serial channel snapshots and compose the complete site
+        id: refresh
         env:
+          GH_TOKEN: ${{ github.token }}
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
+          FORCE: ${{ inputs.force || false }}
         run: |
-          if [[ -z "$OPKG_SIGNING_KEY" ]]; then
-            echo 'Set the repository secret OPKG_SIGNING_KEY to the private usign key.' >&2
-            exit 1
-          fi
+          [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
           key="$RUNNER_TEMP/opkg-signing.key"
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
           unset OPKG_SIGNING_KEY
-          python3 scripts/publish.py --profile "$PROFILE" --input raw \
-            --output public --key "$key" --public-key keys/repository.pub \
-            --usign "$RUNNER_TEMP/usign-build/usign" --lock state/lock.json
-      - name: Enforce the complete Pages site size limit
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          size = sum(path.stat().st_size for path in Path('public').rglob('*') if path.is_file())
-          if size > 1_000_000_000:
-              raise SystemExit(f'Complete Pages site is {size} bytes, exceeding the 1 GB limit. '
-                               'The last successful deployment remains unchanged.')
-          print(f'Complete Pages site: {size} bytes')
-          PY
+          site="${PACKAGE_REPOSITORY_URL:-https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}}"
+          args=(--site-url "$site" --repository "$GITHUB_REPOSITORY" \
+            --profiles profiles --work-root "$RUNNER_TEMP/channel-refresh" --output public \
+            --key "$key" --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign")
+          if [[ "$FORCE" == true ]]; then args+=(--force); fi
+          python3 scripts/hosted-publication.py -- python3 scripts/channel-snapshot.py refresh "${args[@]}"
       - name: Prepare Pages
+        if: steps.refresh.outputs.deploy == 'true'
         uses: actions/configure-pages@v5
-      - name: Upload complete repository
+      - name: Upload the complete two-channel repository
+        if: steps.refresh.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
+      - name: Preserve authenticated deployment expectations
+        if: steps.refresh.outputs.deploy == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-check
+          path: ${{ runner.temp }}/channel-refresh/deployment-check.json
+          if-no-files-found: error
+          retention-days: 7
 
   deploy:
-    needs: build
+    needs: publish
+    if: needs.publish.outputs.deploy == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -303,6 +223,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy validated repository
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-check
+          path: deployment-check
+      - name: Require the authenticated live predecessor
+        run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase before
+      - name: Deploy both authenticated channels atomically
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify the intended live signed state
+        run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase after

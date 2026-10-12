@@ -1,12 +1,25 @@
-name: Publish an existing firmware build
+name: Publish an existing 6.12 firmware generation
 
 on:
   workflow_dispatch:
     inputs:
+      channel:
+        description: Fixed channel in the immutable firmware generation
+        required: true
+        default: recommended
+        type: choice
+        options:
+          - recommended
+          - latest
       release_tag:
-        description: Immutable release in this repository containing raw.tar.zst and its checksum
+        description: Exact immutable firmware-BUILD_ID release in this repository
         required: true
         type: string
+      bootstrap:
+        description: Allow an absent live site only for the first publication
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: package-repository
@@ -19,51 +32,18 @@ jobs:
   publish:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
-      contents: read
+      contents: write
       pages: read
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check signing prerequisite
-        env:
-          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
-        run: |
-          [[ -n "$OPKG_SIGNING_KEY" ]] || {
-            echo 'Set repository secret OPKG_SIGNING_KEY before publication.' >&2
-            exit 1
-          }
-      - name: Install small import and signing prerequisites
+      - name: Install bounded import and host signing prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zstd cmake build-essential libjson-c-dev
-      - name: Download the existing immutable build release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
-            echo 'release_tag must contain only letters, numbers, dots, underscores and hyphens.' >&2
-            exit 1
-          }
-          mkdir release-download
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release-before.json"
-          python3 scripts/import-release.py --release-metadata "$RUNNER_TEMP/release-before.json"
-          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --dir release-download \
-            --pattern raw.tar.zst --pattern raw.tar.zst.sha256
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release-after.json"
-          python3 scripts/import-release.py --release-metadata "$RUNNER_TEMP/release-after.json" \
-            --previous-release-metadata "$RUNNER_TEMP/release-before.json"
-      - name: Verify checksum and safely import the actual firmware build
-        run: |
-          python3 scripts/import-release.py --archive release-download/raw.tar.zst \
-            --checksum release-download/raw.tar.zst.sha256 --output raw \
-            --expected-profile profiles/redmi-ax6000-new.json
       - name: Build pinned official host usign
         run: |
           pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
@@ -71,47 +51,55 @@ jobs:
           git -C "$RUNNER_TEMP/usign-source" fetch --depth 1 https://github.com/openwrt/usign.git "$pin"
           git -C "$RUNNER_TEMP/usign-source" checkout --detach FETCH_HEAD
           [[ $(git -C "$RUNNER_TEMP/usign-source" rev-parse HEAD) == "$pin" ]]
-          bash scripts/resource-limit.sh --jobs 1 -- cmake \
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
-          bash scripts/resource-limit.sh --jobs 1 -- cmake \
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             --build "$RUNNER_TEMP/usign-build" --parallel 1
-      - name: Validate packages and sign the repository
+      - name: Verify immutable generation and import the complete raw build
         env:
-          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
+          [[ "$RELEASE_TAG" =~ ^firmware-[A-Za-z0-9._-]+$ ]] || { echo 'Invalid immutable generation tag.' >&2; exit 1; }
+          python3 scripts/channel-snapshot.py fetch-generation --release-tag "$RELEASE_TAG" \
+            --repository "$GITHUB_REPOSITORY" --output release-download \
+            --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign"
+          python3 scripts/import-release.py --archive release-download/raw.tar.zst \
+            --checksum release-download/raw.tar.zst.sha256 --output raw \
+            --expected-profile "profiles/redmi-ax6000-612-$CHANNEL-new.json"
+      - name: Publish a signed durable snapshot and compose both channels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+        run: |
+          [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
           key="$RUNNER_TEMP/opkg-signing.key"
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
           unset OPKG_SIGNING_KEY
-          python3 scripts/publish.py --profile raw/profile.json --input raw \
-            --output public --key "$key" --public-key keys/repository.pub \
-            --usign "$RUNNER_TEMP/usign-build/usign" \
-            --lock raw/lock.json
-      - name: Enforce the complete Pages site size limit
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          size = sum(p.stat().st_size for p in Path('public').rglob('*') if p.is_file())
-          if size > 1_000_000_000:
-              raise SystemExit(f'Pages site is {size} bytes, exceeding the 1 GB limit. '
-                               'The original build remains in its release.')
-          print(f'Pages site: {size} bytes')
-          PY
-      - name: Prepare Pages
-        uses: actions/configure-pages@v5
-      - name: Upload signed Pages artifact
-        uses: actions/upload-pages-artifact@v3
+          site="${PACKAGE_REPOSITORY_URL:-https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}}"
+          args=(--raw raw --external-assets release-download/downloads.json \
+            --external-assets-signature release-download/downloads.sig \
+            --generation-release-metadata release-download/release.json \
+            --site-url "$site" --repository "$GITHUB_REPOSITORY" --profiles profiles \
+            --work-root "$RUNNER_TEMP/channel-publication" --output public --key "$key" \
+            --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign")
+          if [[ "$BOOTSTRAP" == true ]]; then args+=(--bootstrap); fi
+          python3 scripts/hosted-publication.py -- python3 scripts/channel-snapshot.py publish-channel "${args[@]}"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: public
-      - name: Record imported release
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          printf 'Imported and signed existing build from release %s; no firmware compilation ran.\n' \
-            "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deployment-check
+          path: ${{ runner.temp }}/channel-publication/deployment-check.json
+          if-no-files-found: error
+          retention-days: 7
 
   deploy:
     needs: publish
@@ -124,6 +112,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy the existing firmware and signed package repository
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-check
+          path: deployment-check
+      - name: Require the authenticated live predecessor
+        run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase before
+      - name: Deploy both signed channels atomically
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify the intended live signed state
+        run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase after

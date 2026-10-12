@@ -1,13 +1,16 @@
-name: Build new AX6000 firmware and SDK
+name: Build AX6000 6.12 firmware and SDK
 
 on:
   workflow_dispatch:
     inputs:
-      publish:
-        description: Sign and deploy the matching firmware and package repository to Pages
-        required: false
-        default: false
-        type: boolean
+      channel:
+        description: Fixed firmware channel; builds stock, mtkuboot and ubootmod together
+        required: true
+        default: recommended
+        type: choice
+        options:
+          - recommended
+          - latest
 
 concurrency:
   group: package-repository
@@ -17,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  PROFILE: profiles/redmi-ax6000-new.json
+  PROFILE: profiles/redmi-ax6000-612-${{ inputs.channel }}-new.json
 
 jobs:
   build:
@@ -65,15 +68,6 @@ jobs:
                                f'free; this hosted runner has {free / 1024 ** 3:.1f} GiB. '
                                'Use the documented local isolated build command instead.')
           PY
-      - name: Check requested signing prerequisite
-        if: inputs.publish
-        env:
-          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
-        run: |
-          if [[ -z "$OPKG_SIGNING_KEY" ]]; then
-            echo 'Set repository secret OPKG_SIGNING_KEY before requesting publication.' >&2
-            exit 1
-          fi
       - name: Run lightweight verification
         run: |
           python3 -m unittest discover -s tests -v
@@ -91,9 +85,14 @@ jobs:
       - name: Build firmware, SDK and kernel modules
         run: |
           mkdir -p logs
-          bash scripts/build-firmware.sh --profile "$PROFILE" --lock state/firmware-lock.json \
+          python3 scripts/hosted-publication.py -- bash scripts/build-firmware.sh --profile "$PROFILE" --lock state/firmware-lock.json \
             --work-dir "$RUNNER_TEMP/firmware-build" --output-dir raw \
             2>&1 | tee logs/firmware-build.log
+      - name: Independently verify native images and matching SDK context
+        run: |
+          python3 scripts/hosted-publication.py -- python3 scripts/verify-firmware.py \
+            --source "$RUNNER_TEMP/firmware-build/source" --raw raw \
+            --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/firmware-verification.json"
       - name: Upload complete firmware and SDK artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -110,54 +109,9 @@ jobs:
           path: |
             logs
             state/firmware-lock.json
+            ${{ runner.temp }}/firmware-verification.json
           if-no-files-found: ignore
           retention-days: 7
-      - name: Validate and sign the matching repository
-        if: inputs.publish
-        env:
-          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+      - name: Record publication prerequisite
         run: |
-          umask 077
-          key="$RUNNER_TEMP/opkg-signing.key"
-          trap 'rm -f "$key"' EXIT
-          printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
-          unset OPKG_SIGNING_KEY
-          python3 scripts/publish.py --profile raw/profile.json --input raw \
-            --output public --key "$key" --public-key keys/repository.pub \
-            --usign raw/usign --lock raw/lock.json
-      - name: Check complete Pages artifact size
-        if: inputs.publish
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          size = sum(path.stat().st_size for path in Path('public').rglob('*') if path.is_file())
-          if size > 1_000_000_000:
-              raise SystemExit('Complete repository exceeds the GitHub Pages 1 GB site limit. '
-                               'Firmware, SDK and package artifacts remain available in this run.')
-          PY
-      - name: Prepare Pages
-        if: inputs.publish
-        uses: actions/configure-pages@v5
-      - name: Upload signed Pages artifact
-        if: inputs.publish
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
-
-  deploy:
-    if: inputs.publish
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy matching firmware and package repository
-        id: deployment
-        uses: actions/deploy-pages@v4
+          echo 'Artifacts only. Validate the exact exported SDK, then use channel-snapshot.py publish-generation and publish-existing.yml to publish both channels atomically.' >> "$GITHUB_STEP_SUMMARY"

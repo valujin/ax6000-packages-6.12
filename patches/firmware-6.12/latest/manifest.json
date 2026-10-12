@@ -9,6 +9,15 @@
       "sha256": "08d9282458473babea6408a254395789a13eb700853cb680c11eb2c9758a44ad",
       "before_sha256": "3b3f133dc439cc15bb29ecff87bf4ccce6e7b7893f5c3f66e629b0c57c5a7679",
       "after_sha256": "2595267671b70a18922dbefd8bbcd27956761a924c422c9ea8c4eccf80eb1683"
+    },
+    {
+      "patch": "110-openvswitch-linux-6.12-intree-availability.patch",
+      "path": "feeds/packages/net/openvswitch/Makefile",
+      "sha256": "0974ce219cce261174a5a630e100f611efef19e7f36cc99608773d9b78bd8fc9",
+      "before_sha256": "359009a4191a85eb725fe96fd161a5e5a4ea6f2eff0e387d69a40bea2837d35b",
+      "after_sha256": "c62fee2efd4d2e3a2303619d7bf9bfde7fab22edd0241ea76fa71e367420bb60",
+      "feed_name": "packages",
+      "feed_commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8"
     }
   ]
 }

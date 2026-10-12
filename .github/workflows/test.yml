@@ -16,6 +16,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Verify hosted resource scope before compilation
+        env:
+          GH_TOKEN: scope-fixture-not-a-secret
+        run: |
+          python3 scripts/hosted-publication.py -- python3 - <<'PYCODE'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          assert os.getuid() != 0
+          assert os.environ.get('GH_TOKEN') == 'scope-fixture-not-a-secret'
+          assert os.environ.get('GITHUB_OUTPUT')
+          parent = Path('/proc/self/cgroup').read_text()
+          child = subprocess.check_output([sys.executable, '-c',
+              'from pathlib import Path; print(Path("/proc/self/cgroup").read_text(), end="")'], text=True)
+          assert parent == child, 'Resource scope must cover descendants'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as proof:
+              proof.write('scope_verified=true\n')
+          print('Hosted scope, runner identity, environment and descendant inheritance verified.')
+          PYCODE
       - name: Build pinned host usign for signing integration
         run: |
           pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
@@ -23,9 +44,9 @@ jobs:
           git -C "$RUNNER_TEMP/usign-source" fetch --depth 1 https://github.com/openwrt/usign.git "$pin"
           git -C "$RUNNER_TEMP/usign-source" checkout --detach FETCH_HEAD
           [[ $(git -C "$RUNNER_TEMP/usign-source" rev-parse HEAD) == "$pin" ]]
-          bash scripts/resource-limit.sh --jobs 1 -- cmake \
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
-          bash scripts/resource-limit.sh --jobs 1 -- cmake \
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             --build "$RUNNER_TEMP/usign-build" --parallel 1
       - name: Python unit tests
         env:

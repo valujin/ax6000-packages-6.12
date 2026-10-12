@@ -1,178 +1,166 @@
-# GitHub Actions and Pages
+# GitHub Actions and signed channel publication
 
-This is a standalone package repository. Builds use GitHub hosted
-`ubuntu-24.04` runners. `scripts/build.sh` limits compilation to half the runner's
-available CPUs; no runner or build daemon is installed on the router or server.
+This repository publishes two fixed generations: `recommended` (Linux 6.12.108)
+and `latest` (Linux 6.12.112). Each generation has stock, mtkuboot and ubootmod
+images, one matching SDK and one exact kernel ABI. Daily package refreshes keep
+that generation fixed. The inherited 6.6 profiles are never workflow defaults.
 
-## Workflows
+`test.yml` runs the Python suite and shell syntax checks on pushes and pull
+requests. It builds official OpenWrt host usign at commit
+`f1f65026a94137c91b5466b149ef3ea3f20091e9`, with one compiler job, for real signing
+fixtures. A cheap scope probe verifies the actual hosted cgroup, UID, environment
+and descendant inheritance before compiling usign. Locally, set `USIGN` to that trusted host executable.
 
-`.github/workflows/test.yml` runs Python unit tests and shell syntax checks on
-every push, pull request and manual run. These checks do not download an SDK or
-compile firmware. The test runner compiles the small, pinned OpenWrt host `usign`
-utility with one compiler job so the signing integration test runs against a real
-implementation. Locally that test also runs when `USIGN` points to a host
-executable; otherwise it reports a skip.
+`firmware.yml` is manual and requires a channel. It builds the corresponding
+`profiles/redmi-ax6000-612-CHANNEL-new.json`, all three layouts, modules and SDK
+together, and retains the complete raw artifact for fourteen days. It does not
+publish unverified output. The disposable hosted runner reclaims only the fixed
+unused toolchain directories listed in the workflow, then requires 60 GiB free.
+`FIRMWARE_RUNNER` may name a larger GitHub hosted Ubuntu runner; a runtime guard
+rejects self-hosted runners.
 
-`.github/workflows/packages.yml` checks sources daily at 03:17 UTC and supports
-manual runs under **Actions → Monitor and publish packages → Run workflow**.
-Scheduled execution follows GitHub's default-branch schedule behavior. Manual
-publication also runs only on the repository's default branch.
+Hosted build and publication commands run inside `hosted-publication.py`. A
+transient systemd scope limits the entire descendant tree to half of available
+CPUs and half of MemTotal, with swap disabled. The helper returns to the runner's
+unprivileged UID and reads the actual cgroup limits before executing the command;
+unavailable or incorrect enforcement fails visibly. Secret values stay in the
+environment or a temporary mode-0600 key file, never command arguments. The
+existing build affinity and job limits also remain in effect.
 
-GitHub [automatically disables scheduled workflows in public repositories after
-60 days without repository activity](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows).
-An independent lightweight job checks the default branch's latest commit date
-and, after at least 30 idle days, commits only `.github/monitor-heartbeat.json`.
-It runs even if monitoring or compilation fails. Only that job receives
-`contents: write`; it uses the repository's temporary `GITHUB_TOKEN` and obeys
-branch protection. Permission or branch-rule failures fail the job visibly.
-The heartbeat file is outside the recipe and profile digests, so it does not
-cause package rebuilds. [Pushes using `GITHUB_TOKEN` do not trigger push workflows
-or Pages builds](https://docs.github.com/en/actions/concepts/security/github_token).
-An already disabled workflow must first be re-enabled, for example with
-`gh workflow enable packages.yml --repo valujin/ax6000-packages`.
+`packages.yml` monitors both source profiles daily at 03:17 UTC, including before
+bootstrap. A channel can build only after its generated
+`profiles/redmi-ax6000-612-CHANNEL.json` exists and is enabled. Absent profiles
+produce an actionable monitoring summary. The manual `force` option refreshes
+unchanged inputs. Builds run serially: after successful staging, immutable
+snapshot publication and authenticated round-trip restore, only that channel's
+owned SDK/work/raw files are removed before starting the next SDK.
 
-The package workflow uses the enabled `profiles/redmi-ax6000.json` for the
-published Linux 6.6.133 generation. Its SDK archive was tested by an independent
-package-only build with fresh AmneziaWG compilation and exact kernel-context
-verification. `profiles/redmi-ax6000-legacy.json` retains the disabled 6.6.95
-profile; its original matching SDK is unavailable. A generic SDK for the same
-chipset is not sufficient evidence of kernel module compatibility.
+The signed live `site-state.json` and `site-state.sig` are the sole successful
+publication baseline. Every non-null channel pointer names an exact immutable
+snapshot release and asset, inventory hash and archive hash. Its restored lock
+is passed to monitoring. Actions artifacts and newer undeployed releases are
+never selected as the successful baseline. An unchanged lock skips compilation.
 
-Monitoring resolves source revisions and the Tailscale
-release into `state/lock.json`. The workflow compares this with the last
-successful publication's `state/lock.json`. An unchanged lock skips compilation.
-The manual **force** option rebuilds unchanged inputs; use it after changing build
-or publishing code. Profile changes are included in source-lock identity.
+`publish-existing.yml` imports an exact immutable `firmware-BUILD_ID` release
+from this repository, validates the full raw inventory and three layouts, then
+uses the same snapshot and composition commands as local publication. It runs
+no firmware compilation and executes no release-provided binaries. `bootstrap`
+is permitted only when both live state files are absent; subsequent publication
+restores the other channel from its signed live pointer.
 
-Only HTTP 404 means there is no previous publication. Other download failures or
-invalid JSON fail the monitor rather than quietly launching a redundant build.
-The comparison URL defaults to
-`https://OWNER.github.io/REPOSITORY/state/lock.json`. If Pages uses a custom domain
-or a different path, set repository variable `PACKAGE_REPOSITORY_URL` to the
-HTTPS site base URL, without `/state/lock.json`.
+All publication workflows share `package-repository` concurrency with
+`cancel-in-progress: false`. A complete two-channel Pages payload is assembled
+before upload. The other channel is retained byte for byte; channel removal and
+implicit source/SDK/ABI migration are refused. The deploy job checks the live
+predecessor again immediately before deployment and checks the intended state
+afterward. A failed build or pre-deployment check preserves the previous site;
+a published but undeployed snapshot can exist safely. A lost deployment response
+is resolved by reading authenticated live state on the next run.
 
-## Bootstrap
+SDKs and firmware images live in immutable generation Releases. The Pages site
+contains signed feeds, profiles, locks, keys, download catalogs and metadata. The
+combined site is limited to 1,000,000,000 bytes, below the documented
+[Pages 1 GB limit](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits).
+Each Release asset must be
+[under 2 GiB](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+There is no automatic replacement of a firmware generation: a future migration
+must explicitly retain the previous ABI before changing its channel pointer.
 
-1. Push this directory as its own GitHub repository, with the workflows and
-   scripts on its default branch.
-2. In **Settings → Pages**, select **GitHub Actions** as the build/deployment
-   source. The workflow reads existing Pages configuration; it does not enable
-   Pages through the API.
-3. Create a usign key pair in a trusted environment with an available OpenWrt
-   `usign` executable:
+Before first publication, configure Pages to use GitHub Actions, enable
+[release immutability](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes),
+and store the private key matching `keys/repository.pub` in `OPKG_SIGNING_KEY`.
+The key payload is checked before staging or release writes. The publisher uses
+the locally built pinned host usign; exported SDK usign relocation wrappers are
+not standalone signers. No public-key secret is needed. Publication jobs receive
+`contents: write`; only deployment receives `pages: write` and `id-token: write`.
+The default Pages base is `https://valujin.github.io/ax6000-packages-6.12`;
+`PACKAGE_REPOSITORY_URL` may supply a different HTTPS serving base.
 
-   ```sh
-   umask 077
-   usign -G -s opkg-private.key -p opkg-public.key -c ax6000-packages
-   ```
-
-4. Store the complete contents of `opkg-private.key` as the repository Actions
-   secret `OPKG_SIGNING_KEY`. Keep the private key out of Git. Preserve a private
-   backup so future indexes retain the same trusted signing identity. The
-   publisher derives and publishes the corresponding public key and requires
-   it to match `keys/repository.pub` before creating publication output. No
-   separate public-key secret is required.
-   `scripts/install-feed.sh` pins this repository's public-key fingerprint. When
-   creating a separate repository with a new key pair, update its
-   `keys/repository.pub` and its installer
-   `expected_fingerprint` to the output of `usign -F -p opkg-public.key` before
-   distributing that installation script.
-5. Configure `PACKAGE_REPOSITORY_URL` if the default Pages URL is unsuitable.
-6. Activate the exact exported profile only after the matching firmware, SDK
-   SHA256, public key and signed feed have been verified at their live URLs. Run
-   the package workflow manually and inspect its summary and logs. The matching
-   image already contains the pinned public key; use `ax6000-install-feed` after
-   manual flashing and ABI verification.
-
-The existing `github-pages` environment must allow deployment from the default
-branch. GitHub repository/environment policy controls access to secrets and
-deployment. No personal access token is needed: checkout receives `contents:
-read`, Pages setup receives `pages: read`, and the deployment job alone receives
-`pages: write` and `id-token: write`. Pull requests execute only the test workflow.
-
-## Publication and recovery
-
-To publish an existing isolated local full build, use
-[`publish-existing.yml`](../.github/workflows/publish-existing.yml) with an
-immutable release from this repository. See [the import instructions](PUBLISH.md).
-That workflow verifies the archived build and signs it without running firmware
-compilation or executing release-provided binaries.
-
-Every build consumes the resolved source lock. The publisher validates package
-metadata against the profile, including package architecture and the exact kernel
-dependency for kernel modules, before constructing and signing the index.
-Validation failure prevents upload. The private signing key is written with mode
-`0600` into the runner's temporary directory during publication and removed when
-that step exits. It is never included in the Pages artifact.
-The package workflow builds official host `usign` from verified commit
-`f1f65026a94137c91b5466b149ef3ea3f20091e9` with one compiler job for publication.
-An SDK's exported `usign` can be a relocation wrapper requiring private loader
-files; it is not used as a standalone signing executable.
-
-The artifact contains the complete public repository, its signed index, public
-key, build metadata and `state/lock.json`. A separate Pages deployment job runs
-only after the artifact is ready. Workflow concurrency serializes monitoring,
-building and deploying, with `cancel-in-progress: false` so a newer scheduled
-check does not cancel an active publication.
-
-A failed build, signing step or deployment leaves the previously deployed Pages
-site in place. Its lock remains the last successful state, so a subsequent check
-retries the changed sources. A lock from a failed build is never treated as a
-successful publication. Source-lock Actions artifacts are retained for seven
-days for inspection; they are not used as the success baseline.
-
-The runner's 350-minute build timeout and GitHub account quota still apply.
-Compiling all kernel modules can exceed hosted runner time or disk limits; review
-build logs and narrow the profile package selection if needed. CI never falls
-back to a self-hosted machine. GitHub may delay scheduled runs; manual execution
-is available when an immediate check is needed.
-
-## Local lightweight checks
+For an independently verified initial raw build, use these same local/cloud
+publication interfaces. Set `raw` to its output directory, `channel` to the exact
+channel, `key` to a private mode-0600 key and `trusted_usign` to the pinned host
+executable. Provide `GH_TOKEN` through your authenticated environment with access
+to this repository. Commit the build's recipe first so its recorded recipe SHA
+exists remotely. Outputs below must be fresh directories.
 
 ```sh
-python3 -m unittest discover -s tests -v
-for script in scripts/*.sh; do bash -n "$script"; done
+set -euo pipefail
+repository=valujin/ax6000-packages-6.12
+channel=recommended
+raw=/absolute/path/to/recommended/raw
+transport=/absolute/path/to/fresh/recommended-transport
+mkdir -m 700 "$transport"
+# All raw files are transported as data; the exported SDK signer is excluded.
+tar --exclude='./usign' -C "$raw" -cf - . | \
+  zstd -T1 -3 -o "$transport/raw.tar.zst"
+(cd "$transport" && sha256sum raw.tar.zst > raw.tar.zst.sha256)
+python3 scripts/channel-snapshot.py publish-generation \
+  --raw "$raw" --expected-profile "profiles/redmi-ax6000-612-$channel-new.json" \
+  --raw-archive "$transport/raw.tar.zst" --checksum "$transport/raw.tar.zst.sha256" \
+  --repository "$repository" --output "$transport/generation" \
+  --key "$key" --public-key keys/repository.pub --usign "$trusted_usign"
 ```
 
-These validate the repository tooling, not the router's runtime ABI. A successful
-lightweight check alone is not permission to enable a profile with an unverified
-SDK.
+`publish-generation` validates the raw directory and independently imports the
+bundle before any remote write. It uploads all SDK/image/build metadata and raw
+assets while the Release is a draft; only after draft asset IDs are known does
+it create, sign and upload `downloads.json` and `downloads.sig`. Then it publishes
+and requires immutable API readback, exact asset inventory/digests and a tag
+pointing to the recorded recipe commit. Existing matching immutable releases are
+reused; an existing draft or foreign tag is refused. Large uploads are streamed.
+See GitHub's
+[immutable release model](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
 
-## New firmware and matching SDK
+For initial hosted publication, use the resulting generation tag:
 
-`.github/workflows/firmware.yml` is a manual workflow for
-`profiles/redmi-ax6000-new.json`. It builds a new firmware image, its SDK and
-kernel modules together from the pinned full source tree. The resulting
-`raw/profile.json` and `raw/lock.json` carry the actual new kernel ABI; publication
-uses those generated files. The old installed-firmware profile is retained as
-`profiles/redmi-ax6000-legacy.json` and remains disabled because its exact SDK is
-unavailable. The enabled daily profile uses the validated published generation.
+```sh
+build_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_id"])' "$raw/profile.json")
+gh workflow run publish-existing.yml --repo "$repository" \
+  -f channel="$channel" -f release_tag="firmware-$build_id" -f bootstrap=true
+```
 
-Every successful full build uploads the complete firmware, SDK, packages and
-metadata as an Actions artifact retained for fourteen days. Build logs and the
-source lock are retained for seven days, including failed builds. **publish** is
-off by default so a full build can produce downloadable artifacts before Pages
-and the signing secret are configured. Selecting it validates and signs the
-matching package feed and deploys the complete repository through the same
-serialized Pages publication path.
+Only the first recommended publication uses `bootstrap=true`. After the workflow
+and independent live SDK checksum/feed signature checks pass, copy its exact
+`raw/profile.json` to `profiles/redmi-ax6000-612-recommended.json` and activate that
+generated daily profile. Keep its profile bytes unchanged so the initial lock's
+fingerprint still matches. Repeat generation publication for `latest`, then run
+`publish-existing.yml` with `channel=latest` and `bootstrap=false`; the already
+activated recommended profile allows authenticated restoration of that channel.
+Activate the exact latest generated profile only after the same live checks.
 
-Full compilation requires at least 60 GiB free storage and refuses to start if
-the hosted runner lacks it. Standard GitHub hosted Linux runners guarantee only
-[14 GB of storage](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
-so the standard runner can fail this preflight. Use the documented isolated local
-full-build command on a machine with sufficient storage, or configure repository
-variable `FIRMWARE_RUNNER` with the label of a larger GitHub hosted Ubuntu runner
-provisioned in the repository's runner settings. A runtime guard rejects a
-self-hosted runner before checkout or build commands. This
-workflow never switches to a self-hosted runner or removes installed server
-software to free space. The build retains the half-CPU resource limit and the
-350-minute job timeout.
+For local staging of the same first channel transaction, instead of hosted
+`publish-existing.yml`, run:
 
-The entire published site must fit the
-[GitHub Pages 1 GB limit](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits).
-If the generated SDK, firmware and package feed exceed that limit, Pages
-publication fails before upload while the complete Actions artifact remains
-available. A failed publication keeps the previous Pages deployment intact.
+```sh
+python3 scripts/channel-snapshot.py publish-channel --raw "$raw" \
+  --external-assets "$transport/generation/downloads.json" \
+  --external-assets-signature "$transport/generation/downloads.sig" \
+  --generation-release-metadata "$transport/generation/release.json" \
+  --site-url https://valujin.github.io/ax6000-packages-6.12 --repository "$repository" \
+  --profiles profiles --work-root "$transport/channel-work" --output "$transport/public" \
+  --key "$key" --public-key keys/repository.pub --usign "$trusted_usign" --bootstrap
+python3 scripts/channel-snapshot.py verify-deployment \
+  --check "$transport/channel-work/deployment-check.json" --phase before
+```
 
-GitHub documents the [Pages workflow and permissions](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
-and the [Pages deployment action](https://github.com/actions/deploy-pages).
+This creates the durable immutable snapshot, round-trip verifies it and produces
+the complete Pages directory plus the authenticated deployment expectation; it
+does not itself deploy Pages. Deployment must upload that entire directory and
+then run the same `verify-deployment --phase after` check. Later local channel
+transactions omit `--bootstrap`. Use the hosted workflow when a complete managed
+Pages deployment is required.
+
+GitHub public repository schedules
+[disable after 60 days without repository activity](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows).
+The independent heartbeat job has narrowly scoped `contents: write` and commits
+only `.github/monitor-heartbeat.json` after 30 idle days. It obeys branch protection,
+fails visibly if denied and never force-pushes. Its content is outside recipe and
+profile digests, so it does not cause package rebuilds. Pushes made with the
+workflow token do not trigger additional push workflows. An already disabled
+schedule must be re-enabled, for example:
+
+```sh
+gh workflow enable packages.yml --repo valujin/ax6000-packages-6.12
+USIGN=/absolute/path/to/trusted/usign python3 -m unittest discover -s tests -v
+for script in scripts/*.sh; do bash -n "$script"; done
+```

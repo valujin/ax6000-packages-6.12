@@ -1,0 +1,11 @@
+--- a/feeds/packages/net/openvswitch/Makefile
++++ b/feeds/packages/net/openvswitch/Makefile
+@@ -61,7 +61,7 @@
+      CATEGORY:=Kernel modules
+      SUBMENU:=Network Support
+      TITLE:=$(ovs_kmod_$(1)_title)
+-     DEPENDS:=$(ovs_kmod_$(1)_depends) $(if $(call ovs_kmod_is_intree,$(1)),@IPV6 @DEVEL)
++     DEPENDS:=$(ovs_kmod_$(1)_depends) $(if $(call ovs_kmod_is_intree,$(1)),@IPV6 @DEVEL @!LINUX_6_12)
+      PROVIDES:=$(call ovs_kmod_package_provides,$(1))
+      KCONFIG:=$(ovs_kmod_$(1)_kconfig)
+      FILES:=$(ovs_kmod_$(1)_files)

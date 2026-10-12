@@ -46,6 +46,14 @@ def validate(profile, lock):
     image = profile.get("image_packages", [])
     prepare.require(isinstance(image, list) and all(name in profile["packages"] for name in image),
                     "image_packages must be a subset of requested packages")
+    if profile.get("channel") is not None:
+        directory = Path(__file__).resolve().parents[1] / "patches/firmware-6.12" / profile["channel"]
+        reviewed = json.loads((directory / "manifest.json").read_text())
+        pins = prepare.feed_pins(profile, lock)
+        for patch in reviewed["patches"]:
+            if "feed_name" in patch:
+                prepare.require(pins.get(patch["feed_name"]) == patch["feed_commit"],
+                                f"source build {patch['feed_name']} pin differs from reviewed patch input")
     ssl_symbols(profile)
     return profile
 
