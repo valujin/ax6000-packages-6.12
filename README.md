@@ -12,10 +12,13 @@
 MediaTek и штатный vendor-стек сохранены. SDK и полный банк применимых модулей
 ядра выпускаются вместе с прошивкой; две линии имеют отдельные ABI и feeds.
 
-**Публикация 6.12 готовится.** Ссылки на готовые образы и результаты реальной
-сборки появятся после независимой проверки образов и свежей сборки из SDK.
-Уже готовая линия Linux 6.6 доступна в
-[ax6000-packages](https://github.com/valujin/ax6000-packages).
+**Recommended 6.12.108 опубликована:** [образы и SDK](https://github.com/valujin/ax6000-packages-6.12/releases/tag/firmware-redmi-ax6000-612-recommended-ae65e1de6997-96f60860edff),
+[подписанный репозиторий пакетов](https://valujin.github.io/ax6000-packages-6.12/).
+Проверены три sysupgrade-образа, свежая сборка пакетов из SDK и фактически
+опубликованные файлы. Stock factory UBI не публикуется: полный initramfs превышает
+30 MiB раздела; stock sysupgrade и образ initramfs для загрузки в RAM доступны.
+[Latest 6.12.112 сейчас собирается](https://github.com/valujin/ax6000-packages-6.12/actions/runs/38237483412).
+Линия Linux 6.6 находится в [ax6000-packages](https://github.com/valujin/ax6000-packages).
 
 ## Пакеты
 
