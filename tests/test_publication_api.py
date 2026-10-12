@@ -117,4 +117,110 @@ class ImmutableReleaseAPI(unittest.TestCase):
             with self.assertRaises(ValueError):self.client.verify_assets(release,self.plan['assets'])
 
 
+
+class ExplicitDraftResume(unittest.TestCase):
+    def setUp(self):
+        ImmutableReleaseAPI.setUp(self)
+        second=self.root/'profile.json';second.write_bytes(b'exact profile bytes')
+        self.second={'name':second.name,'path':str(second),'size':second.stat().st_size,'sha256':api.sha256_file(second)}
+        self.plan['assets'].append(self.second)
+        self.draft=copy.deepcopy(self.release)
+        self.draft.update(draft=True,immutable=False,target_commitish=self.plan['recipe_commit'])
+        self.complete=copy.deepcopy(self.draft)
+        self.complete['assets'].append({'id':16,'name':self.second['name'],'size':self.second['size'],
+                                       'digest':'sha256:'+self.second['sha256'],'state':'uploaded','updated_at':'now'})
+        self.published=copy.deepcopy(self.complete);self.published.update(draft=False,immutable=True)
+
+    def test_resume_uploads_only_missing_and_publishes_exact_selected_draft(self):
+        mutations=[];uploads=[]
+        def request(method,endpoint,body=None,**kwargs):
+            if method=='GET':return {'enabled':True}
+            mutations.append((method,endpoint,body))
+        with patch.object(self.client,'get_release',side_effect=[self.draft,self.complete,self.complete,self.published]), \
+             patch.object(self.client,'resolve_tag_commit',side_effect=[None,None,self.plan['recipe_commit']]), \
+             patch.object(self.client,'request',side_effect=request), \
+             patch.object(self.client,'upload_asset',side_effect=lambda release,record:uploads.append(record['name'])):
+            self.assertEqual(self.client.resume_draft(self.plan,12)['id'],12)
+        self.assertEqual(uploads,['profile.json'])
+        self.assertEqual(mutations,[('PATCH','/releases/12',{'draft':False})])
+
+    def test_resume_validates_core_then_signs_uploads_catalog_before_publication(self):
+        extra=self.root/'downloads.json';extra.write_bytes(b'exact signed catalog fixture')
+        record={'name':extra.name,'path':str(extra),'size':extra.stat().st_size,'sha256':api.sha256_file(extra)}
+        full=copy.deepcopy(self.complete);full['assets'].append({'id':17,'name':record['name'],'size':record['size'],
+                                                               'digest':'sha256:'+record['sha256'],'state':'uploaded'})
+        published=copy.deepcopy(full);published.update(draft=False,immutable=True)
+        uploads=[]
+        def finalize(release,*,reuse):
+            self.assertFalse(reuse);self.assertEqual({a['name'] for a in release['assets']},{a['name'] for a in self.plan['assets']})
+            return [record]
+        def request(method,endpoint,body=None,**kwargs):
+            if method=='GET':return {'enabled':True}
+            self.assertEqual(uploads,['profile.json','downloads.json']);self.assertEqual(body,{'draft':False})
+        with patch.object(self.client,'get_release',side_effect=[self.draft,self.complete,full,published]), \
+             patch.object(self.client,'resolve_tag_commit',side_effect=[None,None,self.plan['recipe_commit']]), \
+             patch.object(self.client,'request',side_effect=request), \
+             patch.object(self.client,'upload_asset',side_effect=lambda release,record:uploads.append(record['name'])):
+            self.client.resume_draft(self.plan,12,finalize=finalize)
+
+    def test_draft_identity_and_existing_asset_drift_reject_before_any_write(self):
+        cases=[]
+        for key,value in [('id',13),('tag_name','foreign'),('target_commitish','c'*40),('draft',False),('immutable',True)]:
+            r=copy.deepcopy(self.draft);r[key]=value;cases.append(r)
+        for key,value in [('digest','sha256:'+'0'*64),('size',999),('state','starter')]:
+            r=copy.deepcopy(self.draft);r['assets'][0][key]=value;cases.append(r)
+        r=copy.deepcopy(self.draft);r['assets'][0]['name']='foreign.bin';cases.append(r)
+        r=copy.deepcopy(self.draft);r['assets']*=2;cases.append(r)
+        for release in cases:
+            with self.subTest(release=release),patch.object(self.client,'get_release',return_value=release), \
+                 patch.object(self.client,'resolve_tag_commit',return_value=None), \
+                 patch.object(self.client,'request',return_value={'enabled':True}) as request, \
+                 patch.object(self.client,'upload_asset') as upload:
+                with self.assertRaises(ValueError):self.client.resume_draft(self.plan,12)
+                upload.assert_not_called()
+                self.assertTrue(all(c.args[0]=='GET' for c in request.call_args_list))
+
+    def test_foreign_tag_or_disabled_immutability_rejects_without_upload(self):
+        for target,enabled in [('c'*40,True),(None,False)]:
+            with patch.object(self.client,'get_release',return_value=self.draft), \
+                 patch.object(self.client,'resolve_tag_commit',return_value=target), \
+                 patch.object(self.client,'request',return_value={'enabled':enabled}) as request, \
+                 patch.object(self.client,'upload_asset') as upload:
+                with self.assertRaises(ValueError):self.client.resume_draft(self.plan,12)
+                upload.assert_not_called()
+                self.assertTrue(all(c.args[0]=='GET' for c in request.call_args_list))
+
+    def test_changed_draft_identity_or_original_asset_id_rejects_before_freeze(self):
+        changes=[('tag_name','foreign'),('id',13),('target_commitish','c'*40),('draft',False),('immutable',True)]
+        for stage in ('core','final'):
+            cases=[]
+            for key,value in changes:
+                r=copy.deepcopy(self.complete);r[key]=value;cases.append(r)
+            for key,value in [('id',999),('updated_at','changed'),('digest','sha256:'+'0'*64)]:
+                r=copy.deepcopy(self.complete);r['assets'][0][key]=value;cases.append(r)
+            for drift in cases:
+                returned=[self.draft,drift] if stage=='core' else [self.draft,self.complete,drift]
+                with self.subTest(stage=stage,drift=drift),patch.object(self.client,'get_release',side_effect=returned), \
+                     patch.object(self.client,'resolve_tag_commit',return_value=None), \
+                     patch.object(self.client,'request',return_value={'enabled':True}) as request, \
+                     patch.object(self.client,'upload_asset'):
+                    with self.assertRaises(ValueError):self.client.resume_draft(self.plan,12)
+                    self.assertTrue(all(c.args[0]=='GET' for c in request.call_args_list))
+
+    def test_tag_drift_or_immutability_disable_after_upload_prevents_freeze(self):
+        for targets,settings in [([None,'c'*40],[{'enabled':True}]),([None,None],[{'enabled':True},{'enabled':False}])]:
+            with patch.object(self.client,'get_release',side_effect=[self.draft,self.complete,self.complete]), \
+                 patch.object(self.client,'resolve_tag_commit',side_effect=targets), \
+                 patch.object(self.client,'request',side_effect=settings) as request, \
+                 patch.object(self.client,'upload_asset'):
+                with self.assertRaises(ValueError):self.client.resume_draft(self.plan,12)
+                self.assertTrue(all(c.args[0]=='GET' for c in request.call_args_list))
+
+    def test_case_insensitive_local_asset_collision_fails_before_api(self):
+        alias=dict(self.plan['assets'][0],name=self.plan['assets'][0]['name'].upper())
+        plan=dict(self.plan,assets=[self.plan['assets'][0],alias])
+        with patch.object(self.client,'get_release') as remote:
+            with self.assertRaisesRegex(ValueError,'Duplicate'):self.client.resume_draft(plan,12)
+            remote.assert_not_called()
+
 if __name__=='__main__':unittest.main()

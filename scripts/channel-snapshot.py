@@ -458,7 +458,7 @@ def restore_online(pointer,expected,repository,public_key,usign,output):
     return output
 
 
-def publish_generation(raw,expected_profile,archive,checksum,repository,key,public_key,usign,output):
+def publish_generation(raw,expected_profile,archive,checksum,repository,key,public_key,usign,output,*,resume_draft_id=None):
     raw=Path(raw);output=fresh(output);signing_key(key,public_key)
     # A broken SDK relocation wrapper must fail before creating a remote draft.
     with tempfile.TemporaryDirectory(prefix='ax6000-signer-preflight-') as temporary:
@@ -501,7 +501,8 @@ def publish_generation(raw,expected_profile,archive,checksum,repository,key,publ
             (work/'downloads.json').write_bytes(canonical_json(catalog))
             sign(work/'downloads.json',work/'downloads.sig',key,public_key,usign)
             return [asset_record(work/name) for name in ('downloads.json','downloads.sig')]
-        release=api.publish_release(plan,finalize=finalize)
+        release=(api.publish_release(plan,finalize=finalize) if resume_draft_id is None
+                 else api.resume_draft(plan,resume_draft_id,finalize=finalize))
         (work/'release.json').write_bytes(canonical_json(release))
         (work/'generation-pointer.json').write_bytes(canonical_json({'repository':repository,'release_id':release['id'],
                                                                   'tag':release['tag_name'],'build_id':profile['build_id']}))
@@ -705,6 +706,7 @@ def main():
     pack=sub.add_parser('pack');common(pack,secret=True)
     pack.add_argument('--channel',choices=CHANNELS,required=True);pack.add_argument('--input',type=Path,required=True);pack.add_argument('--recipe-commit',required=True)
     gen=sub.add_parser('publish-generation');common(gen,secret=True)
+    gen.add_argument('--resume-draft-id',type=int,help='Complete only this exact validated partial draft; never replace assets')
     for name in ('raw','expected-profile','raw-archive','checksum'):gen.add_argument('--'+name,type=Path,required=True)
     pub=sub.add_parser('publish-snapshot');common(pub);pub.add_argument('--plan',type=Path,required=True)
     restore=sub.add_parser('restore');common(restore);restore.add_argument('--pointer',type=Path,required=True);restore.add_argument('--expected-profile',type=Path,required=True)
@@ -728,7 +730,7 @@ def main():
         elif args.command=='fetch-generation':fetch_generation(args.release_tag,args.repository,args.public_key,args.usign,args.output)
         elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap)
         elif args.command=='pack':pack_snapshot(args.input,args.channel,args.repository,args.recipe_commit,args.key,args.public_key,args.usign,args.output)
-        elif args.command=='publish-generation':publish_generation(args.raw,args.expected_profile,args.raw_archive,args.checksum,args.repository,args.key,args.public_key,args.usign,args.output)
+        elif args.command=='publish-generation':publish_generation(args.raw,args.expected_profile,args.raw_archive,args.checksum,args.repository,args.key,args.public_key,args.usign,args.output,resume_draft_id=args.resume_draft_id)
         elif args.command=='publish-snapshot':publish_snapshot(args.plan,args.repository,args.public_key,args.usign,args.output)
         elif args.command=='restore':
             pointer=read_json(args.pointer);expected=read_json(args.expected_profile)

@@ -82,8 +82,8 @@ class ReleaseAPI:
         names=set()
         for asset in assets:
             name=asset.get('name','');path=Path(asset['path'])
-            if not re.fullmatch(r'[A-Za-z0-9_.+~-]+',name) or name in names:raise ValueError('Duplicate/unsafe release asset')
-            names.add(name)
+            if not re.fullmatch(r'[A-Za-z0-9_.+~-]+',name) or name.casefold() in names:raise ValueError('Duplicate/unsafe release asset')
+            names.add(name.casefold())
             if path.is_symlink() or not path.is_file() or any(p.is_symlink() for p in path.parents):
                 raise ValueError('Release assets must be bounded regular files')
             if path.stat().st_size!=asset.get('size') or not 0<=path.stat().st_size<=MAX_ASSET or sha256_file(path)!=asset.get('sha256'):
@@ -161,6 +161,58 @@ class ReleaseAPI:
             raise
         return destination
 
+    def resume_draft(self,plan,identity,finalize=None):
+        """Complete an explicitly selected exact draft without replacing any asset."""
+        self.preflight_assets(plan['assets'])
+        if type(identity) is not int or identity <= 0:raise ValueError('Explicit positive draft ID required')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',plan.get('tag','')) or not re.fullmatch(r'[a-f0-9]{40}',plan.get('recipe_commit','')):
+            raise ValueError('Invalid release tag/recipe commit')
+        release=self.get_release(identity)
+        def require_draft(candidate,previous=None):
+            if (candidate is None or candidate.get('id')!=identity or candidate.get('tag_name')!=plan['tag']
+                    or candidate.get('draft') is not True or candidate.get('immutable') is not False
+                    or candidate.get('target_commitish')!=plan['recipe_commit']):
+                raise ValueError('Selected draft identity or recipe differs')
+            if previous is not None:
+                def records(value):
+                    return {a['name']:(a.get('id'),a.get('size'),a.get('digest'),a.get('updated_at'),a.get('state'))
+                            for a in value.get('assets',[])}
+                old,current=records(previous),records(candidate)
+                if any(current.get(name)!=record for name,record in old.items()):
+                    raise ValueError('Previously verified draft asset identity changed')
+        require_draft(release)
+        target=self.resolve_tag_commit(plan['tag'],missing_ok=True)
+        if target not in (None,plan['recipe_commit']):raise ValueError('Draft tag points to another recipe')
+        if self.request('GET','/immutable-releases').get('enabled') is not True:
+            raise ValueError('Enable immutable releases before publication')
+        expected={a['name']:a for a in plan['assets']}
+        actual={a['name']:a for a in release.get('assets',[])}
+        if len(actual)!=len(release.get('assets',[])) or not set(actual)<=set(expected):
+            raise ValueError('Draft has duplicate or unexpected assets')
+        # Compare every existing asset before performing the first mutation.
+        self.verify_assets(release,[expected[name] for name in actual],draft=True)
+        for record in plan['assets']:
+            if record['name'] not in actual:self.upload_asset(release,record)
+        uploaded=self.get_release(identity)
+        require_draft(uploaded,release)
+        self.verify_assets(uploaded,plan['assets'],draft=True)
+        extras=[] if finalize is None else finalize(uploaded,reuse=False)
+        if extras:self.preflight_assets(plan['assets']+extras)
+        for record in extras:self.upload_asset(release,record)
+        final_draft=self.get_release(identity)
+        require_draft(final_draft,uploaded)
+        self.verify_assets(final_draft,plan['assets']+extras,draft=True)
+        if self.resolve_tag_commit(plan['tag'],missing_ok=True) not in (None,plan['recipe_commit']):
+            raise ValueError('Draft tag changed before publication')
+        if self.request('GET','/immutable-releases').get('enabled') is not True:
+            raise ValueError('Immutable releases disabled before publication')
+        self.request('PATCH',f'/releases/{identity}',{'draft':False})
+        published=self.get_release(identity)
+        self.verify_assets(published,plan['assets']+extras)
+        if published.get('id')!=identity or published.get('tag_name')!=plan['tag'] or self.resolve_tag_commit(plan['tag'])!=plan['recipe_commit']:
+            raise ValueError('Published release identity differs')
+        return published
+
     def publish_release(self,plan,finalize=None):
         self.preflight_assets(plan['assets'])
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',plan.get('tag','')) or not re.fullmatch(r'[a-f0-9]{40}',plan.get('recipe_commit','')):
@@ -183,7 +235,7 @@ class ReleaseAPI:
         for asset in plan['assets']:self.upload_asset(release,asset)
         uploaded=self.get_release(release['id']);self.verify_assets(uploaded,plan['assets'],draft=True)
         extras=[] if finalize is None else finalize(uploaded,reuse=False)
-        self.preflight_assets(extras) if extras else None
+        self.preflight_assets(plan['assets']+extras) if extras else None
         for asset in extras:self.upload_asset(release,asset)
         self.verify_assets(self.get_release(release['id']),plan['assets']+extras,draft=True)
         self.request('PATCH',f'/releases/{release["id"]}',{'draft':False})
