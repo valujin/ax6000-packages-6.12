@@ -83,6 +83,7 @@ jobs:
             file wget curl zstd xz-utils perl patch libelf-dev swig \
             subversion g++-multilib gcc-multilib
       - name: Build firmware, SDK and kernel modules
+        id: firmware_build
         run: |
           mkdir -p logs
           python3 scripts/hosted-publication.py -- bash scripts/build-firmware.sh --profile "$PROFILE" --lock state/firmware-lock.json \
@@ -94,6 +95,7 @@ jobs:
             --source "$RUNNER_TEMP/firmware-build/source" --raw raw \
             --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/firmware-verification.json"
       - name: Upload complete firmware and SDK artifacts
+        if: always() && steps.firmware_build.conclusion == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ax6000-firmware-sdk-packages-${{ github.run_id }}
