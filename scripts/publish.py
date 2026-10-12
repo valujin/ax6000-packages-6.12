@@ -283,7 +283,8 @@ def main():
     state = args.output / 'state'
     state.mkdir()
     shutil.copy2(args.lock, state / 'lock.json')
-    (args.output / 'profile.json').write_text(json.dumps(profile, indent=2) + '\n')
+    # The lock fingerprints these exact bytes; snapshots must preserve that identity.
+    shutil.copyfile(args.profile, args.output / 'profile.json')
     for name in ('build-selection.json', 'build-provenance.json', 'firmware-manifest.json', 'build.config'):
         if (args.input / name).is_file():
             shutil.copy2(args.input / name, args.output / name)

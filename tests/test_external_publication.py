@@ -38,6 +38,30 @@ class ExternalPublication(unittest.TestCase):
         feed=output/'feeds'/profile['id']/profile['firmware']['kernel_version']
         subprocess.run([USIGN,'-V','-m',str(feed/'Packages'),'-p',str(self.public),'-x',str(feed/'Packages.sig')],check=True,capture_output=True)
 
+    def test_external_publication_pack_restore_preserves_exact_profile_identity(self):
+        tree,profile=self.channel('recommended');output=self.root/'publication'
+        original=(tree/'profile.json').read_bytes()
+        result=self.publish(tree,output,self.metadata(tree))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((output/'profile.json').read_bytes(),original)
+        snapshot=fixtures.snapshot
+        lock=snapshot.read_json(output/'state/lock.json')
+        self.assertEqual(lock['profile_sha256'],snapshot.sha256_file(output/'profile.json'))
+        packed=self.root/'packed'
+        plan=snapshot.pack_snapshot(output,'recommended',self.repository,self.recipe,self.key,self.public,USIGN,packed)
+        archive=packed/'channel.tar.zst'
+        pointer={'channel':'recommended','profile_id':profile['id'],'build_id':profile['build_id'],
+                 'kernel_version':profile['firmware']['kernel_version'],'release_id':20,'tag':plan['tag'],
+                 'asset_id':21,'archive_sha256':snapshot.sha256_file(archive),
+                 'archive_size':archive.stat().st_size,'manifest_sha256':plan['manifest_sha256']}
+        metadata={'id':20,'tag_name':plan['tag'],'draft':False,'immutable':True,'assets':[
+            {'id':21+i,'name':asset['name'],'size':asset['size'],'digest':'sha256:'+asset['sha256'],
+             'state':'uploaded','updated_at':'2026-10-12T00:00:00Z'} for i,asset in enumerate(plan['assets'])]}
+        restored=self.root/'restored'
+        snapshot.restore_snapshot(archive,pointer,metadata,metadata,profile,self.public,USIGN,restored)
+        self.assertEqual((restored/'channel/profile.json').read_bytes(),original)
+        self.assertEqual(snapshot.read_json(restored/'channel/state/lock.json')['profile_sha256'],snapshot.sha256_file(restored/'channel/profile.json'))
+
     def test_mutable_generation_refuses_before_output(self):
         tree,_=self.channel('recommended');metadata=self.metadata(tree);metadata['immutable']=False
         output=self.root/'publication';result=self.publish(tree,output,metadata)
