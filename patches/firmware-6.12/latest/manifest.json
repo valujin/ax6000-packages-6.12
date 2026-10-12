@@ -40,6 +40,14 @@
       "sha256": "d49d4d5074111ba326b31b7565a88917e8f782064d2c326a8c9b75f576ffab07",
       "before_sha256": "bbaf34425009736eb81ea371e38284ed048ded112d912bfc1327f3ad6e012af6",
       "after_sha256": "8039846f555f0a3c142b568a271ef8cdbebe1c83ec357e62aee6f2f4d7a4f08e"
+    },
+    {
+      "patch": "150-rtl8812au-ct-self-append.patch",
+      "path": "package/kernel/rtl8812au-ct/patches/120-fix-mp-ioctl-sprintf-self-append.patch",
+      "operation": "add",
+      "sha256": "f3d68ad979b56f21f3f5db557e4d621e22ce7edf1776a895c175986164f7c291",
+      "before_sha256": null,
+      "after_sha256": "1ed634ab4875877dfd7f0bfc0c7ff83a0c92b3370b42dc27df4d7d31620c46c3"
     }
   ]
 }

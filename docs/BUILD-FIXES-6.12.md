@@ -1,6 +1,6 @@
 # Проверяемые исправления сборки Linux 6.12
 
-Оба канала применяют пять исправлений через отдельные закреплённые
+Оба канала применяют шесть исправлений через отдельные закреплённые
 [recommended manifest](../patches/firmware-6.12/recommended/manifest.json) и
 [latest manifest](../patches/firmware-6.12/latest/manifest.json). Manifest хранит
 SHA-256 патча и исходного/полученного файла; для нового файла исходный hash равен
@@ -13,6 +13,7 @@ SHA-256 патча и исходного/полученного файла; дл
 | `120` | Vendor-патчи добавляют pressure sensors `ZTS8032` и `ZTS8232`, а generic config не задаёт их значения. При `ALL_KMODS` native `syncconfig` запрашивает ввод и останавливается с `FAIL_ON_UNCONFIGURED=1`. Явные `n` устраняют только два запроса, не меняя остальные значения. |
 | `130` | Vendor Ethernet безусловно включает `mtk_eth_ptp.o`. При встроенном Ethernet и модульном PTP ядро не линкуется. Добавленный kernel patch выбирает `PTP_1588_CLOCK` вместе с драйвером при `POSIX_TIMERS`, сохраняя встроенный Ethernet, модульный вариант и dummy helpers при отключённых timers. |
 | `140` | Vendor-патч PHY v1.9.2 создаёт составной модуль `aeon_as21xxx.ko`, но рецепт ожидает `as21xxx.ko`. Исправлены только `FILES` и `AUTOLOAD`; имя пакета, firmware/libphy зависимости и `CONFIG_AS21XXX_PHY` сохранены. |
+| `150` | `rtl8812au-ct` дописывает MP ioctl строки через `sprintf(extra, "%s…", extra, …)`, что нарушает правила перекрытия буферов и останавливает GCC 14 с `-Werror=restrict`. Новый package patch использует `extra + strlen(extra)` для 54 таких вызовов, по примеру существующего патча `011`; форматы, аргументы и политика предупреждений сохранены. |
 
 Патч `130` добавляется как
 `target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch`,
@@ -35,6 +36,17 @@ Kconfig MediaTek реконструирован из upstream 6.12.108/6.12.112 
 правила: прежний `FILES` завершается ошибкой, исправленный устанавливает файл
 модуля и `etc/modules.d/18-phy-aeonsemi-as21xxx` со строкой `aeon_as21xxx`.
 Этот packaging patch не меняет исходники или конфигурацию ядра.
+
+Для `150` оба source commits используют одинаковый recipe с драйвером
+`9b2b203a217e1320602a0eb07c338a1bfca0f5a6`. Файл `ioctl_linux.c` из проверенного
+архива совпал побайтно с подготовленным исходником после штатных package patches.
+Новый патч добавляется в `package/kernel/rtl8812au-ct/patches/120-fix-mp-ioctl-sprintf-self-append.patch`.
+Тест компилирует все 54 изменённых вызова, включая условные Bluetooth-ветки,
+с `-Werror=restrict`. Прежние вызовы отклоняются, исправленные дают 432 результата,
+совпадающих с независимым форматированием hex/decimal значений, пробелов, табов
+и переводов строки для пустого буфера и существующего префикса.
+Изменяется только каталог patches внешнего package: штатный `STAMP_PREPARED`
+заново готовит этот драйвер; патчи, конфигурация и build context ядра не меняются.
 
 Штатный расчёт `.vermagic` по `.config.set` сохраняется. После полной сборки
 проверяется окончательный kernel context из шести файлов в SDK; hash или
