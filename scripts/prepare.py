@@ -213,8 +213,8 @@ PKG_LICENSE:=BSD-3-Clause
 
 include $(INCLUDE_DIR)/package.mk
 
-# The official prebuilt Go binaries are already stripped. Preserve their exact
-# verified bytes; native sstrip processing can corrupt Go ELF section headers.
+# Preserve the verified official prebuilt Go executable bytes; native sstrip
+# processing can corrupt Go ELF section headers.
 RSTRIP:=:
 
 define Package/tailscale

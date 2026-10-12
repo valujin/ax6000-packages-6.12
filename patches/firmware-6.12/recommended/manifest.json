@@ -48,6 +48,13 @@
       "sha256": "f3d68ad979b56f21f3f5db557e4d621e22ce7edf1776a895c175986164f7c291",
       "before_sha256": null,
       "after_sha256": "1ed634ab4875877dfd7f0bfc0c7ff83a0c92b3370b42dc27df4d7d31620c46c3"
+    },
+    {
+      "patch": "160-stock-initramfs-factory-partition-limit.patch",
+      "path": "target/linux/mediatek/image/filogic.mk",
+      "sha256": "a20d232052d9cb26085fde170c3067aace554fe7e81c685813ead36d7f49f6a8",
+      "before_sha256": "bc095625fc8cc66c2cd1f6a864ad6a1070746a7ebb990bc805f0fd952b18964a",
+      "after_sha256": "2d9e21421f98817ad3ef4de72907f07ecfd9950eb13d4deb8d2bb85c1a6a34c7"
     }
   ]
 }
