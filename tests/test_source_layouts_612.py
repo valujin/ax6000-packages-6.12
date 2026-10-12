@@ -90,6 +90,7 @@ class Source612Tests(unittest.TestCase):
         for relative, payload in [('include/kernel-defaults.mk', gzip.decompress((ROOT/'tests/fixtures/ax6000-612-kernel-defaults.gz').read_bytes())),
                                   ('target/linux/generic/config-6.12',gzip.decompress((ROOT/f'tests/fixtures/ax6000-612-{channel}-generic-config.gz').read_bytes())),
                                   ('target/linux/mediatek/Makefile',b'KERNEL_PATCHVER:=6.12\n'),
+                                  ('package/kernel/linux/modules/netdevices.mk',gzip.decompress((ROOT/'tests/fixtures/ax6000-612-netdevices.gz').read_bytes())),
                                   ('feeds/packages/net/openvswitch/Makefile',gzip.decompress((ROOT/'tests/fixtures/openvswitch-packages-52ddbd1-Makefile.gz').read_bytes()))]:
             target=self.source/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(payload)
 
@@ -125,7 +126,7 @@ class Source612Tests(unittest.TestCase):
                 output=(self.source/'include/kernel-defaults.mk').read_text()
                 self.assertIn('/bin/xz -T1 -9 -fz --check=crc32',output)
                 self.assertNotIn('-T$(if',output)
-                self.assertEqual(len(patches),4)
+                self.assertEqual(len(patches),5)
                 firmware.vendor_fixes(profile(channel),self.source,check_only=True)
                 firmware.vendor_fixes(profile(channel),self.source)
         target=self.source/'include/kernel-defaults.mk';target.write_text(target.read_text()+'# unexpected drift\n')

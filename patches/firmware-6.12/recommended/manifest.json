@@ -33,6 +33,13 @@
       "sha256": "7b07552afa9a8c8d08aae00830a4d95c3f24d0d30bde79fea2f9438cddf4a34b",
       "before_sha256": null,
       "after_sha256": "c4edbd8a2b08d60748f1c12dccdcd5dfda8854d32d6a4e36b2c05fd50d3194a2"
+    },
+    {
+      "patch": "140-aeonsemi-as21xxx-module-name.patch",
+      "path": "package/kernel/linux/modules/netdevices.mk",
+      "sha256": "d49d4d5074111ba326b31b7565a88917e8f782064d2c326a8c9b75f576ffab07",
+      "before_sha256": "bbaf34425009736eb81ea371e38284ed048ded112d912bfc1327f3ad6e012af6",
+      "after_sha256": "8039846f555f0a3c142b568a271ef8cdbebe1c83ec357e62aee6f2f4d7a4f08e"
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Проверяемые исправления сборки Linux 6.12
 
-Оба канала применяют четыре исправления через отдельные закреплённые
+Оба канала применяют пять исправлений через отдельные закреплённые
 [recommended manifest](../patches/firmware-6.12/recommended/manifest.json) и
 [latest manifest](../patches/firmware-6.12/latest/manifest.json). Manifest хранит
 SHA-256 патча и исходного/полученного файла; для нового файла исходный hash равен
@@ -12,8 +12,9 @@ SHA-256 патча и исходного/полученного файла; дл
 | `110` | Шесть Open vSwitch `*-intree` вариантов поддерживают ядра не выше 5.5, но их metadata ошибочно допускает 6.12. Условие `@!LINUX_6_12` исключает только эти варианты; четыре современных варианта остаются доступны. Патч требует точный packages feed commit из manifest. |
 | `120` | Vendor-патчи добавляют pressure sensors `ZTS8032` и `ZTS8232`, а generic config не задаёт их значения. При `ALL_KMODS` native `syncconfig` запрашивает ввод и останавливается с `FAIL_ON_UNCONFIGURED=1`. Явные `n` устраняют только два запроса, не меняя остальные значения. |
 | `130` | Vendor Ethernet безусловно включает `mtk_eth_ptp.o`. При встроенном Ethernet и модульном PTP ядро не линкуется. Добавленный kernel patch выбирает `PTP_1588_CLOCK` вместе с драйвером при `POSIX_TIMERS`, сохраняя встроенный Ethernet, модульный вариант и dummy helpers при отключённых timers. |
+| `140` | Vendor-патч PHY v1.9.2 создаёт составной модуль `aeon_as21xxx.ko`, но рецепт ожидает `as21xxx.ko`. Исправлены только `FILES` и `AUTOLOAD`; имя пакета, firmware/libphy зависимости и `CONFIG_AS21XXX_PHY` сохранены. |
 
-Последний патч добавляется как
+Патч `130` добавляется как
 `target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch`,
 после исходных vendor Ethernet/Kconfig патчей обоих закреплённых деревьев.
 `NET` уже требуется через `NETDEVICES`; условие `POSIX_TIMERS` покрывает вторую
@@ -26,6 +27,14 @@ SHA-256 патча и исходного/полученного файла; дл
 Kconfig MediaTek реконструирован из upstream 6.12.108/6.12.112 и vendor-патчей
 обоих исходных commits: итоговые файлы совпали побайтно. Регрессионный тест
 дополнительно покрывает Ethernet `y`/`m`, отсутствие timers и отсутствие `NET`.
+
+Для `140` исходный recipe и vendor-патч переименования совпадают побайтно в
+обоих source commits. Реальный модуль из сборки recommended имеет ELF AArch64,
+`name=aeon_as21xxx` и `vermagic=6.12.108 SMP mod_unload aarch64`.
+Регрессионный тест исполняет закреплённые native GNU Make `KernelPackage`
+правила: прежний `FILES` завершается ошибкой, исправленный устанавливает файл
+модуля и `etc/modules.d/18-phy-aeonsemi-as21xxx` со строкой `aeon_as21xxx`.
+Этот packaging patch не меняет исходники или конфигурацию ядра.
 
 Штатный расчёт `.vermagic` по `.config.set` сохраняется. После полной сборки
 проверяется окончательный kernel context из шести файлов в SDK; hash или
