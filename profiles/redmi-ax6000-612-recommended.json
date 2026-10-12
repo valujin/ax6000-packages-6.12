@@ -1,0 +1,147 @@
+{
+  "all_kmods": false,
+  "build_id": "redmi-ax6000-612-recommended-ae65e1de6997-96f60860edff",
+  "build_source": {
+    "defconfig": "defconfig/mt7986-ax6000.config",
+    "device": "xiaomi_redmi-router-ax6000-stock",
+    "publication_url": "https://valujin.github.io/ax6000-packages-6.12/channels/recommended"
+  },
+  "channel": "recommended",
+  "enabled": true,
+  "feeds": [
+    {
+      "commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+      "name": "base",
+      "root": "package",
+      "url": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git"
+    },
+    {
+      "commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8",
+      "monitor_ref": "refs/heads/openwrt-25.12",
+      "name": "packages",
+      "url": "https://github.com/immortalwrt/packages.git"
+    },
+    {
+      "commit": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+      "monitor_ref": "refs/heads/openwrt-25.12",
+      "name": "luci",
+      "url": "https://github.com/immortalwrt/luci.git"
+    },
+    {
+      "commit": "23912fb99fc2fd0888466eb5f4f550651bc12aa3",
+      "monitor_ref": "refs/heads/openwrt-25.12",
+      "name": "routing",
+      "url": "https://github.com/openwrt/routing.git"
+    },
+    {
+      "commit": "2618106d5846a4a542fdf5809f0d3ed228ce439b",
+      "monitor_ref": "refs/heads/openwrt-25.12",
+      "name": "telephony",
+      "url": "https://github.com/openwrt/telephony.git"
+    },
+    {
+      "commit": "094bf58da6682f895255a35a84349a79dab4bf95",
+      "monitor_ref": "refs/heads/openwrt-25.12",
+      "name": "video",
+      "url": "https://github.com/openwrt/video.git"
+    },
+    {
+      "commit": "3f3ec68d594c8e965c988af75ac5314616229c88",
+      "monitor_ref": "refs/heads/master",
+      "name": "amneziawg",
+      "url": "https://github.com/2Grey/awg-openwrt.git"
+    }
+  ],
+  "firmware": {
+    "architecture": "aarch64_cortex-a53",
+    "commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+    "device": "xiaomi_redmi-router-ax6000-stock",
+    "devices": [
+      {
+        "device": "xiaomi_redmi-router-ax6000-stock",
+        "layout": "stock"
+      },
+      {
+        "device": "xiaomi_redmi-router-ax6000-mtkuboot",
+        "layout": "mtkuboot"
+      },
+      {
+        "device": "xiaomi_redmi-router-ax6000-ubootmod",
+        "layout": "ubootmod"
+      }
+    ],
+    "kernel_version": "6.12.108~942ed17ba3e2c90bc1373619dd44dedc-r1",
+    "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git",
+    "subtarget": "filogic",
+    "target": "mediatek"
+  },
+  "id": "redmi-ax6000-612-recommended",
+  "image_packages": [
+    "tailscale",
+    "kmod-amneziawg",
+    "amneziawg-tools",
+    "luci-proto-amneziawg",
+    "wireguard-tools",
+    "luci-proto-wireguard",
+    "pbr",
+    "luci-app-pbr",
+    "luci",
+    "luci-ssl",
+    "luci-i18n-base-ru",
+    "luci-i18n-pbr-ru",
+    "luci-app-package-manager",
+    "luci-i18n-package-manager-ru",
+    "luci-i18n-amneziawg-ru"
+  ],
+  "luci_languages": [
+    "ru"
+  ],
+  "packages": [
+    "tailscale",
+    "kmod-amneziawg",
+    "amneziawg-tools",
+    "luci-proto-amneziawg",
+    "kmod-wireguard",
+    "wireguard-tools",
+    "luci-proto-wireguard",
+    "pbr",
+    "luci-app-pbr",
+    "mwan3",
+    "luci-app-mwan3",
+    "banip",
+    "luci-app-banip",
+    "openvpn-openssl",
+    "luci-app-openvpn",
+    "xl2tpd",
+    "ppp-mod-pptp",
+    "kmod-tun",
+    "ip-full",
+    "resolveip",
+    "luci",
+    "luci-ssl",
+    "luci-i18n-base-ru",
+    "luci-i18n-pbr-ru",
+    "luci-i18n-mwan3-ru",
+    "strongswan",
+    "strongswan-default",
+    "strongswan-swanctl",
+    "luci-app-package-manager",
+    "luci-i18n-package-manager-ru",
+    "luci-i18n-banip-ru",
+    "luci-i18n-openvpn-ru",
+    "luci-i18n-amneziawg-ru",
+    "geoip-shell",
+    "geoview",
+    "geoipupdate"
+  ],
+  "publication": {
+    "firmware_assets": "github-release",
+    "repository": "valujin/ax6000-packages-6.12",
+    "site_url": "https://valujin.github.io/ax6000-packages-6.12"
+  },
+  "schema_version": 1,
+  "sdk": {
+    "sha256": "96f60860edffe3df512cb268c62c3dcc9d4770e53c1ba8906e7ffe02de62e620",
+    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-96f60860edff/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+  }
+}
