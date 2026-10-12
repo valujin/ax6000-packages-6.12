@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import importlib.util
 import io
+import json
 import lzma
 from pathlib import Path
 import struct
@@ -85,6 +86,66 @@ class FirmwareVerificationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def manifest_inputs(self):
+        target = self.root/'export'; target.mkdir()
+        source = self.root/'native'; source.mkdir()
+        profile = {'firmware': {'kernel_version':'6.12.108~'+'a'*32+'-r1',
+                               'architecture':'aarch64_cortex-a53','commit':verify.PINS['recommended']}}
+        native = {'target':'mediatek/filogic','arch_packages':'aarch64_cortex-a53',
+                  'version_code':'r0+38427-ae65e1de69',
+                  'linux_kernel':{'version':'6.12.108','vermagic':'a'*32,'release':'1'},'profiles':{}}
+        images = {}
+        for layout, device in verify.DEVICES.items():
+            prefix = 'immortalwrt-mediatek-filogic-'+device
+            image = target/(prefix+'-squashfs-sysupgrade'+('.itb' if layout=='ubootmod' else '.bin'))
+            image.write_bytes(('independent '+layout+' image fixture').encode()); images[layout]=image
+            native['profiles'][device] = {'image_prefix':prefix,
+                'supported_devices':['xiaomi,redmi-router-ax6000-'+layout],
+                'images':[{'name':image.name,'type':'sysupgrade','filesystem':'squashfs',
+                           'size':image.stat().st_size,'sha256':hashlib.sha256(image.read_bytes()).hexdigest()}]}
+        for directory in (target,source):
+            (directory/'profiles.json').write_text(json.dumps(native))
+            (directory/'immortalwrt-mediatek-filogic.manifest').write_text('kernel - '+profile['firmware']['kernel_version']+'\nopkg - 1-r1\n')
+        return target,source,profile,native,images
+
+    def test_authenticated_common_manifest_is_selected_for_all_three_layouts(self):
+        target,source,profile,native,images = self.manifest_inputs()
+        for layout in verify.DEVICES:
+            path = verify.resolve_device_manifest(target,layout,profile,images[layout],source)
+            self.assertEqual(path.name,'immortalwrt-mediatek-filogic.manifest')
+            self.assertEqual(verify.device_manifest(path),{'kernel':profile['firmware']['kernel_version'],'opkg':'1-r1'})
+        device = verify.DEVICES['stock']
+        specific = target/('immortalwrt-mediatek-filogic-'+device+'.manifest'); specific.write_text('opkg - 1-r1\n')
+        self.assertEqual(verify.resolve_device_manifest(target,'stock',profile,images['stock'],source),specific)
+        (target/('other-'+device+'.manifest')).write_text('opkg - 1-r1\n')
+        with self.assertRaisesRegex(ValueError,'Ambiguous'):
+            verify.resolve_device_manifest(target,'stock',profile,images['stock'],source)
+
+    def test_common_manifest_rejects_native_identity_and_export_drift(self):
+        target,source,profile,native,images = self.manifest_inputs()
+        mutations = [lambda p:p.update(target='mediatek/other'),
+                     lambda p:p.update(arch_packages='wrong'),
+                     lambda p:p.update(version_code='r1-deadbeef'),
+                     lambda p:p['linux_kernel'].update(vermagic='b'*32),
+                     lambda p:p['profiles'].pop(verify.DEVICES['mtkuboot']),
+                     lambda p:p['profiles'][verify.DEVICES['stock']].update(supported_devices=['foreign']),
+                     lambda p:p['profiles'][verify.DEVICES['stock']]['images'][0].update(sha256='b'*64),
+                     lambda p:p['profiles'][verify.DEVICES['stock']]['images'][0].update(size=1)]
+        for mutation in mutations:
+            changed=json.loads(json.dumps(native)); mutation(changed)
+            # Even synchronized export/source metadata must match trusted profile/image.
+            for directory in (source,target): (directory/'profiles.json').write_text(json.dumps(changed))
+            with self.assertRaises(ValueError):
+                verify.resolve_device_manifest(target,'stock',profile,images['stock'],source)
+        for directory in (source,target): (directory/'profiles.json').write_text(json.dumps(native))
+        common=target/'immortalwrt-mediatek-filogic.manifest'
+        original=common.read_bytes();common.write_bytes(original+b'extra - 1\n')
+        with self.assertRaisesRegex(ValueError,'native'):
+            verify.resolve_device_manifest(target,'stock',profile,images['stock'],source)
+        common.unlink()
+        with self.assertRaises(ValueError):
+            verify.resolve_device_manifest(target,'stock',profile,images['stock'],source)
 
     def tar(self, extra=None, control=None):
         p = self.root / 'image.tar'
@@ -333,6 +394,14 @@ class FirmwareVerificationTests(unittest.TestCase):
         record = inspect()
         self.assertEqual(len(record['modules']), 4)
         self.assertEqual(record['installed_kernel']['Version'], profile['firmware']['kernel_version'])
+        manifest['unexpected'] = '1-r1'
+        with self.assertRaisesRegex(ValueError, 'external device package manifest'):
+            inspect()
+        manifest.pop('unexpected')
+        manifest['opkg'] = 'different-r1'
+        with self.assertRaisesRegex(ValueError, 'IPK identity'):
+            inspect()
+        manifest['opkg'] = '1-r1'
         installer = tree / 'usr/sbin/ax6000-install-feed'
         installer.chmod(0o644)
         with self.assertRaisesRegex(ValueError, '0755'):

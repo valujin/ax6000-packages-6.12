@@ -650,6 +650,48 @@ def device_manifest(path):
     return result
 
 
+def resolve_device_manifest(target, layout, profile, image, source_target):
+    """Native MULTI_PROFILE exports one common manifest from TARGET_DIR_ORIG.
+
+    Accept it only with matching native metadata and files. inspect_root still
+    compares the complete embedded package/version inventory for every layout.
+    """
+    matches = list(target.glob('*-' + DEVICES[layout] + '.manifest'))
+    require(len(matches) <= 1, 'Ambiguous device package manifest: ' + layout)
+    if matches:
+        return matches[0]
+    native = read_json(safe_path(target, 'profiles.json'))
+    require(sha256(target / 'profiles.json') == sha256(regular(source_target / 'profiles.json', 16 * MIB)),
+            'Exported profiles differ from native build')
+    firmware = profile['firmware']
+    kernel = native.get('linux_kernel', {})
+    require(native.get('target') == 'mediatek/filogic'
+            and native.get('arch_packages') == firmware['architecture']
+            and firmware['kernel_version'] == str(kernel.get('version')) + '~' + str(kernel.get('vermagic')) + '-r' + str(kernel.get('release')),
+            'Common manifest native target/architecture/kernel ABI differs')
+    revision = re.fullmatch(r'r[0-9]+(?:\+[0-9]+)?-([0-9a-f]{7,40})', native.get('version_code', ''))
+    require(revision and firmware['commit'].startswith(revision[1]), 'Common manifest native source revision differs')
+    profiles = native.get('profiles', {})
+    require(isinstance(profiles, dict) and set(profiles) == set(DEVICES.values()),
+            'Common manifest native device inventory differs')
+    prefix = 'immortalwrt-mediatek-filogic'
+    for board_layout, device in DEVICES.items():
+        board = profiles[device]
+        require(board.get('image_prefix') == prefix + '-' + device
+                and board.get('supported_devices') == ['xiaomi,redmi-router-ax6000-' + board_layout],
+                'Common manifest native supported device differs')
+    images = profiles[DEVICES[layout]].get('images', [])
+    require(isinstance(images, list), 'Common manifest native image records invalid')
+    sysupgrades = [r for r in images if r.get('type') == 'sysupgrade' and r.get('filesystem') == 'squashfs']
+    require(len(sysupgrades) == 1 and sysupgrades[0].get('name') == image.name
+            and sysupgrades[0].get('size') == image.stat().st_size and sysupgrades[0].get('sha256') == sha256(image),
+            'Common manifest native sysupgrade identity differs')
+    common = safe_path(target, prefix + '.manifest')
+    require(sha256(regular(common, 4 * MIB)) == sha256(regular(source_target / common.name, 4 * MIB)),
+            'Exported common manifest differs from native build')
+    return common
+
+
 def main(args):
     repo, source, raw = (Path(getattr(args, key)).resolve() for key in ('repo', 'source', 'raw'))
     require(all(p.is_dir() for p in (repo, source, raw)), 'Trusted repo/source/raw directories must exist')
@@ -817,10 +859,10 @@ def main(args):
         kernel_record = verify_kernel(fit['kernel']['path'], fit['kernel']['compression'], expected_kernel,
                                       location / 'kernel.Image')
         dt_record = verify_dtb(fit['fdt']['path'], layout)
-        manifests = list(target.glob('*-' + device + '.manifest'))
-        require(len(manifests) == 1, 'Cannot identify exact device package manifest: ' + layout)
+        package_manifest = resolve_device_manifest(target, layout, profile, image, source / 'bin/targets/mediatek/filogic')
         root_record = inspect_root(root, layout, tools['unsquashfs4'], profile, controls, ipks,
-                                   expected_files, fingerprint, kernel_config, device_manifest(manifests[0]))
+                                   expected_files, fingerprint, kernel_config, device_manifest(package_manifest))
+        root_record['package_manifest'] = {'filename': package_manifest.name, 'sha256': sha256(package_manifest)}
         fit_record = {k: {key: value for key, value in v.items() if key != 'path'} for k, v in fit.items()}
         records[layout] = {'image': image.name, 'image_sha256': before, 'image_size': image.stat().st_size,
                            'stripped_sha256': sha256(stripped), 'stripped_size': stripped.stat().st_size,
