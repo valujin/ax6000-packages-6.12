@@ -298,7 +298,7 @@ all:
         shutil.copy2(ROOT / "scripts/build-firmware.sh", scripts / "build-firmware.sh")
         (scripts / "prepare-firmware.py").write_text('''import argparse, importlib.util, json, os, pathlib, subprocess, sys
 p = argparse.ArgumentParser()
-for name in ("profile", "lock", "source-dir", "output-dir", "phase"):
+for name in ("profile", "lock", "source-dir", "output-dir", "cleanup-receipt", "phase"):
     p.add_argument("--" + name)
 a = p.parse_args()
 real = pathlib.Path(os.environ["REAL_FIRMWARE_PREPARE"])
@@ -316,6 +316,10 @@ elif a.phase == "verify":
         raise SystemExit("verify ran before defconfig")
     f.verify_ssl(json.loads(pathlib.Path(a.profile).read_text()), (source / ".config").read_text())
     (source / "verified").touch()
+elif a.phase == "reset-cached-images":
+    if not (source / "verified").is_file():
+        raise SystemExit("cache reset ran before verification")
+    (source / "cache-reset").touch()
 elif a.phase == "export":
     if not (source / "world-complete").is_file():
         raise SystemExit("export ran before world")
@@ -335,6 +339,7 @@ if "defconfig" in sys.argv:
     pathlib.Path("normalized").touch()
 elif "world" in sys.argv:
     assert pathlib.Path("verified").is_file()
+    assert pathlib.Path("cache-reset").is_file()
     pathlib.Path("world-complete").touch()
 else:
     raise SystemExit("unexpected build target")

@@ -293,6 +293,77 @@ def overrides(profile, lock, source):
     prepare.apply_overrides(lock, source, profile)
 
 
+def reset_cached_images(profile, source, receipt):
+    """Remove only the stock factory outputs/catalog that an ignored copy could retain."""
+    source = Path(source).absolute()
+    prepare.require(source.is_dir() and source == source.resolve(), "image cache source has symlink ancestors")
+    channel = profile.get("channel")
+    prepare.require(channel in ("recommended", "latest"), "image cache cleanup requires a reviewed 6.12 channel")
+    devices = firmware_layouts.validate_devices(profile)
+    firmware = profile["firmware"]
+    reviewed = json.loads((Path(__file__).resolve().parents[1] /
+                           "patches/firmware-6.12" / channel / "manifest.json").read_text())
+    prepare.require(profile.get("enabled") is True and isinstance(profile.get("build_source"), dict)
+                    and firmware["commit"] == reviewed["source_commit"]
+                    and devices.get("xiaomi_redmi-router-ax6000-stock") == "stock"
+                    and firmware["architecture"] == "aarch64_cortex-a53"
+                    and firmware["target"] == "mediatek" and firmware["subtarget"] == "filogic",
+                    "image cache cleanup requires the reviewed stock source profile")
+    actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+    prepare.require(actual == firmware["commit"], "image cache source HEAD differs from pinned channel")
+    prepare.require(receipt is not None, "--cleanup-receipt is required")
+    receipt = Path(receipt).absolute()
+    prepare.require(not receipt.resolve().is_relative_to(source), "cleanup receipt must be outside source")
+    prepare.require(receipt.parent.is_dir() and receipt.parent == receipt.parent.resolve()
+                    and not receipt.is_symlink(), "cleanup receipt has symlink ancestors or missing parent")
+    name = "immortalwrt-mediatek-filogic-xiaomi_redmi-router-ax6000-stock-initramfs-factory.ubi"
+    build = Path("build_dir/target-aarch64_cortex-a53_musl")
+    relative = [Path("bin/targets/mediatek/filogic") / name,
+                build / "linux-mediatek_filogic/tmp" / name,
+                build / "json_info_files" / (name + ".json"),
+                Path("bin/targets/mediatek/filogic/profiles.json")]
+    files = {}
+    targets = []
+    for path in relative:
+        target = source / path
+        prepare.require(not any(parent.is_symlink() for parent in (target, *target.parents)),
+                        f"image cache contains symlink: {path}")
+        if not target.exists():
+            continue
+        prepare.require(target.is_file() and target.stat().st_size <= 128 * 1024**2,
+                        f"unexpected image cache file: {path}")
+        with target.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        files[path.as_posix()] = {"sha256": digest, "size": target.stat().st_size}
+        targets.append(target)
+    report = {"schema_version": 1, "operation": "reset-stock-factory-cache",
+              "source_commit": firmware["commit"], "source_dir": str(source), "channel": channel,
+              "devices": profile["firmware"]["devices"], "files": files}
+    if receipt.exists():
+        prepare.require(receipt.is_file() and receipt.stat().st_size <= 16384,
+                        "unexpected cleanup receipt")
+        previous = json.loads(receipt.read_text())
+        prepare.require(isinstance(previous, dict)
+                        and {k: previous.get(k) for k in report if k != "files"}
+                        == {k: v for k, v in report.items() if k != "files"}
+                        and isinstance(previous.get("files"), dict)
+                        and set(previous["files"]) <= {p.as_posix() for p in relative}
+                        and all(isinstance(item, dict) and set(item) == {"sha256", "size"}
+                                and isinstance(item["sha256"], str) and prepare.SHA256.fullmatch(item["sha256"])
+                                and type(item["size"]) is int and 0 <= item["size"] <= 128 * 1024**2
+                                for item in previous["files"].values()),
+                        "foreign cleanup receipt")
+        prepare.require(not targets, "cleanup receipt already exists; use a fresh receipt for a new rebuild")
+        return previous
+    # Reserve and write the external receipt before deleting any source output.
+    # A denied receipt write leaves every cached artifact intact.
+    with receipt.open("x") as stream:
+        stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    for target in targets:
+        target.unlink()
+    return report
+
+
 def select(profile, source):
     available = prepare.available_packages(source)
     requested = set(profile["packages"])
@@ -719,7 +790,8 @@ def main():
     parser.add_argument("--lock", required=True, type=Path)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--phase", choices=("validate", "configure", "repository-files", "check-feeds", "vendor-fixes", "overrides", "select", "ssl-selection", "verify", "export"), default="validate")
+    parser.add_argument("--cleanup-receipt", type=Path)
+    parser.add_argument("--phase", choices=("validate", "configure", "repository-files", "check-feeds", "vendor-fixes", "overrides", "reset-cached-images", "select", "ssl-selection", "verify", "export"), default="validate")
     args = parser.parse_args()
     try:
         profile, lock = json.loads(args.profile.read_text()), json.loads(args.lock.read_text())
@@ -739,6 +811,7 @@ def main():
                        "check-feeds": lambda: prepare.verify_feeds(profile, lock, args.source_dir),
                        "vendor-fixes": lambda: vendor_fixes(profile, args.source_dir),
                        "overrides": lambda: overrides(profile, lock, args.source_dir),
+                       "reset-cached-images": lambda: reset_cached_images(profile, args.source_dir, args.cleanup_receipt),
                        "select": lambda: select(profile, args.source_dir),
                        "ssl-selection": lambda: ssl_selection(profile, args.source_dir),
                        "verify": lambda: verify(profile, args.source_dir)}

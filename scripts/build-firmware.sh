@@ -91,6 +91,9 @@ PY
     cd -- "$source_dir"
     make -j"$BUILD_JOBS" defconfig
     "${prepare[@]}" --phase verify
+    # Native ignored copy/catalog merging can retain an obsolete stock factory.
+    image_cache_receipts=$(mktemp -d "$work/image-cache-reset.XXXXXX")
+    "${prepare[@]}" --phase reset-cached-images --cleanup-receipt "$image_cache_receipts/receipt.json"
     make -j"$BUILD_JOBS" world V=s
     "${prepare[@]}" --phase export --output-dir "$output"
     exit 0
