@@ -84,6 +84,60 @@ class LayoutsTests(unittest.TestCase):
                 with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                     layouts.validate_download_catalog(broken, profile)
 
+    def test_identical_checksum_aliases_publish_only_uppercase_and_validate_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, _, manifest = fixture(root)
+            target = root / 'bin/targets/mediatek/filogic'
+            contents = b'0123456789abcdef  actual-image.bin\n'
+            for name in ('SHA256SUMS', 'sha256sums'):
+                path = target / name
+                path.write_bytes(contents)
+                manifest['files'].append({'path': path.relative_to(root).as_posix(),
+                    'size': len(contents), 'sha256': hashlib.sha256(contents).hexdigest()})
+            assets = layouts.collect_firmware_assets(root, profile, manifest)
+            self.assertEqual({x['filename'] for x in assets if x['filename'].lower() == 'sha256sums'}, {'SHA256SUMS'})
+            self.assertEqual((target / 'SHA256SUMS').read_bytes(), contents)
+            self.assertEqual((target / 'sha256sums').read_bytes(), contents)
+            catalog = {'schema_version': 1, 'channel': profile['channel'], 'profile_id': profile['id'],
+                'build_id': profile['build_id'], 'firmware': profile['firmware'], 'sdk': profile['sdk'],
+                'assets': [{**{k: v for k, v in x.items() if k != 'path'},
+                    'url': layouts.firmware_release_url(profile, x['filename'])} for x in assets]}
+            self.assertEqual(layouts.validate_download_catalog(catalog, profile), catalog)
+            alias = copy.deepcopy(next(x for x in catalog['assets'] if x['filename'] == 'SHA256SUMS'))
+            alias['filename'] = 'sha256sums'
+            alias['url'] = layouts.firmware_release_url(profile, 'sha256sums')
+            catalog['assets'].append(alias)
+            with self.assertRaisesRegex(ValueError, 'case-insensitive'):
+                layouts.validate_download_catalog(catalog, profile)
+
+    def test_divergent_checksum_aliases_fail_even_when_both_manifest_hashes_are_valid(self):
+        for contents in (b'canonical checksum??', b'different length'):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(contents=contents):
+                root = Path(directory)
+                profile, _, manifest = fixture(root)
+                target = root / 'bin/targets/mediatek/filogic'
+                original = b'canonical checksum!!'
+                for name, blob in [('SHA256SUMS', original), ('sha256sums', contents)]:
+                    path = target / name
+                    path.write_bytes(blob)
+                    manifest['files'].append({'path': path.relative_to(root).as_posix(),
+                        'size': len(blob), 'sha256': hashlib.sha256(blob).hexdigest()})
+                with self.assertRaisesRegex(ValueError, 'checksum aliases differ'):
+                    layouts.collect_firmware_assets(root, profile, manifest)
+
+    def test_single_checksum_alias_keeps_its_existing_filename(self):
+        for name in ('SHA256SUMS', 'sha256sums'):
+            with tempfile.TemporaryDirectory() as directory, self.subTest(name=name):
+                root = Path(directory)
+                profile, _, manifest = fixture(root)
+                path = root / 'bin/targets/mediatek/filogic' / name
+                path.write_bytes(b'only native checksum file\n')
+                manifest['files'].append({'path': path.relative_to(root).as_posix(),
+                    'size': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+                assets = layouts.collect_firmware_assets(root, profile, manifest)
+                self.assertEqual({x['filename'] for x in assets if x['filename'].lower() == 'sha256sums'}, {name})
+
     def test_missing_layout_wrong_native_identity_and_tampered_bytes_reject(self):
         for problem in ('missing', 'device', 'kernel', 'bytes', 'unlisted', 'symlink'):
             with tempfile.TemporaryDirectory() as directory, self.subTest(problem=problem):

@@ -83,6 +83,8 @@ def classify_filename(filename, profile):
 def _mandatory(records, profile):
     names = [record['filename'] for record in records]
     require(len(names) == len(set(names)), 'duplicate firmware download filename')
+    require(len(names) == len({name.casefold() for name in names}),
+            'case-insensitive firmware download filename collision')
     for device, layout in validate_devices(profile).items():
         require(sum(x.get('device') == device and x.get('kind') == 'sysupgrade' for x in records) == 1,
                 f'firmware downloads require exactly one {layout} sysupgrade')
@@ -161,6 +163,18 @@ def collect_firmware_assets(raw, profile, firmware_manifest):
         if policy['kind'] == 'sdk':
             require(digest == profile['sdk']['sha256'], 'SDK checksum mismatch')
         records.append({'path': relative, 'filename': path.name, **policy, 'size': size, 'sha256': digest})
+    # GitHub Release names are case-insensitive. Native export retains both
+    # checksum aliases; publish one only after authenticating both raw files.
+    checksums = {x['filename']: x for x in records if x['filename'] in ('SHA256SUMS', 'sha256sums')}
+    if len(checksums) == 2:
+        upper, lower = checksums['SHA256SUMS'], checksums['sha256sums']
+        require(upper['size'] == lower['size'] and upper['sha256'] == lower['sha256'],
+                'checksum aliases differ')
+        with (raw / upper['path']).open('rb') as canonical, (raw / lower['path']).open('rb') as alias:
+            while chunk := canonical.read(1024 * 1024):
+                require(chunk == alias.read(len(chunk)), 'checksum aliases differ')
+            require(not alias.read(1), 'checksum aliases differ')
+        records = [x for x in records if x['filename'] != 'sha256sums']
     require(set(native_images) <= {x['filename'] for x in records}, 'native image artifact is missing')
     _mandatory(records, profile)
     return records
