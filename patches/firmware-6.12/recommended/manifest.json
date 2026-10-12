@@ -18,6 +18,13 @@
       "after_sha256": "c62fee2efd4d2e3a2303619d7bf9bfde7fab22edd0241ea76fa71e367420bb60",
       "feed_name": "packages",
       "feed_commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8"
+    },
+    {
+      "patch": "120-pressure-sensor-stable-config-defaults.patch",
+      "path": "target/linux/generic/config-6.12",
+      "sha256": "b7dd533c7c9ff8f78719d1430dd04068c416af7e6dc3db03aa7dc28da18236fa",
+      "before_sha256": "16c2007aca36170a3cec42bb3a15b4daf77c8d6cb2882558ec390845067333de",
+      "after_sha256": "87899ed4320ad9853022694d7e07d2832ede2c9513cbc77c9806df67a4dae7e5"
     }
   ]
 }

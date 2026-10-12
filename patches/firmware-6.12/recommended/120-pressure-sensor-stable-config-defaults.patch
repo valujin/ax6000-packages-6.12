@@ -1,0 +1,9 @@
+diff --git a/target/linux/generic/config-6.12 b/target/linux/generic/config-6.12
+--- a/target/linux/generic/config-6.12
++++ b/target/linux/generic/config-6.12
+@@ -7836,3 +7836,5 @@
+ # CONFIG_ZSMALLOC is not set
+ CONFIG_ZSMALLOC_CHAIN_SIZE=8
+ # CONFIG_ZSWAP is not set
++# CONFIG_ZTS8032 is not set
++# CONFIG_ZTS8232 is not set

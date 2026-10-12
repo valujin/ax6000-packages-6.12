@@ -19,6 +19,7 @@ class OpenVSwitch612Tests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.source=Path(self.temp.name)
         for relative,data in [('include/kernel-defaults.mk',gzip.decompress((ROOT/'tests/fixtures/ax6000-612-kernel-defaults.gz').read_bytes())),
+            ('target/linux/generic/config-6.12',gzip.decompress((ROOT/'tests/fixtures/ax6000-612-recommended-generic-config.gz').read_bytes())),
             ('target/linux/mediatek/Makefile',b'KERNEL_PATCHVER:=6.12\n'),
             ('feeds/packages/net/openvswitch/Makefile',gzip.decompress((ROOT/'tests/fixtures/openvswitch-packages-52ddbd1-Makefile.gz').read_bytes()))]:
             p=self.source/relative;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)

@@ -88,6 +88,7 @@ class Source612Tests(unittest.TestCase):
 
     def patch_fixture(self, channel='recommended'):
         for relative, payload in [('include/kernel-defaults.mk', gzip.decompress((ROOT/'tests/fixtures/ax6000-612-kernel-defaults.gz').read_bytes())),
+                                  ('target/linux/generic/config-6.12',gzip.decompress((ROOT/f'tests/fixtures/ax6000-612-{channel}-generic-config.gz').read_bytes())),
                                   ('target/linux/mediatek/Makefile',b'KERNEL_PATCHVER:=6.12\n'),
                                   ('feeds/packages/net/openvswitch/Makefile',gzip.decompress((ROOT/'tests/fixtures/openvswitch-packages-52ddbd1-Makefile.gz').read_bytes()))]:
             target=self.source/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(payload)
@@ -119,12 +120,12 @@ class Source612Tests(unittest.TestCase):
         self.patch_fixture()
         for channel in ('recommended','latest'):
             with self.subTest(channel=channel):
-                self.patch_fixture()
+                self.patch_fixture(channel)
                 patches=firmware.vendor_fixes(profile(channel),self.source)
                 output=(self.source/'include/kernel-defaults.mk').read_text()
                 self.assertIn('/bin/xz -T1 -9 -fz --check=crc32',output)
                 self.assertNotIn('-T$(if',output)
-                self.assertEqual(len(patches),2)
+                self.assertEqual(len(patches),3)
                 firmware.vendor_fixes(profile(channel),self.source,check_only=True)
                 firmware.vendor_fixes(profile(channel),self.source)
         target=self.source/'include/kernel-defaults.mk';target.write_text(target.read_text()+'# unexpected drift\n')
