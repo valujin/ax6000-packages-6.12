@@ -6,11 +6,20 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 MAX_ASSET=2*1024**3-1
+
+
+
+class APIRequestError(ValueError):
+    """HTTP failure identity without response bodies, headers or credentials."""
+    def __init__(self,method,endpoint,status):
+        self.method,self.endpoint,self.status=method,endpoint,status
+        super().__init__(f'GitHub API {method} {endpoint} failed: HTTP {status}')
 
 
 def sha256_file(path):
@@ -48,9 +57,23 @@ class ReleaseAPI:
             with urllib.request.urlopen(request,timeout=60) as response:data=response.read(8*1024**2+1)
         except urllib.error.HTTPError as error:
             if missing_ok and error.code==404:return None
-            raise ValueError(f'GitHub API request failed: HTTP {error.code}') from None
+            raise APIRequestError(method,endpoint,error.code) from None
         if len(data)>8*1024**2:raise ValueError('GitHub API response bound exceeded')
         return json.loads(data) if data else None
+
+    def immutable_preflight(self):
+        # This settings endpoint needs Administration:read. A contents:write
+        # token may publish releases while its settings read is forbidden.
+        try:
+            settings=self.request('GET','/immutable-releases')
+        except APIRequestError as error:
+            if (error.method,error.endpoint,error.status)!=('GET','/immutable-releases',403):raise
+            print('GET /immutable-releases: HTTP 403; settings unreadable. '
+                  'Published immutable=true remains mandatory.',file=sys.stderr)
+            return None
+        if not isinstance(settings,dict) or settings.get('enabled') is not True:
+            raise ValueError('Enable immutable releases before publication')
+        return True
 
     def get_release(self,identity):
         endpoint='/releases/'+(str(identity) if type(identity) is int else 'tags/'+urllib.parse.quote(identity,safe=''))
@@ -183,8 +206,7 @@ class ReleaseAPI:
         require_draft(release)
         target=self.resolve_tag_commit(plan['tag'],missing_ok=True)
         if target not in (None,plan['recipe_commit']):raise ValueError('Draft tag points to another recipe')
-        if self.request('GET','/immutable-releases').get('enabled') is not True:
-            raise ValueError('Enable immutable releases before publication')
+        self.immutable_preflight()
         expected={a['name']:a for a in plan['assets']}
         actual={a['name']:a for a in release.get('assets',[])}
         if len(actual)!=len(release.get('assets',[])) or not set(actual)<=set(expected):
@@ -204,8 +226,7 @@ class ReleaseAPI:
         self.verify_assets(final_draft,plan['assets']+extras,draft=True)
         if self.resolve_tag_commit(plan['tag'],missing_ok=True) not in (None,plan['recipe_commit']):
             raise ValueError('Draft tag changed before publication')
-        if self.request('GET','/immutable-releases').get('enabled') is not True:
-            raise ValueError('Immutable releases disabled before publication')
+        self.immutable_preflight()
         self.request('PATCH',f'/releases/{identity}',{'draft':False})
         published=self.get_release(identity)
         self.verify_assets(published,plan['assets']+extras)
@@ -228,8 +249,7 @@ class ReleaseAPI:
         target=self.resolve_tag_commit(plan['tag'],missing_ok=True)
         if target is not None and target!=plan['recipe_commit']:
             raise ValueError('Existing tag points to another recipe')
-        setting=self.request('GET','/immutable-releases')
-        if setting.get('enabled') is not True:raise ValueError('Enable immutable releases before publication')
+        self.immutable_preflight()
         release=self.request('POST','/releases',{'tag_name':plan['tag'],'target_commitish':plan['recipe_commit'],
                                               'name':plan.get('title',plan['tag']),'body':plan.get('notes',''),'draft':True})
         for asset in plan['assets']:self.upload_asset(release,asset)

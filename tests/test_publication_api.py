@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import urllib.error
 import unittest
 from unittest.mock import patch
 
@@ -222,5 +223,99 @@ class ExplicitDraftResume(unittest.TestCase):
         with patch.object(self.client,'get_release') as remote:
             with self.assertRaisesRegex(ValueError,'Duplicate'):self.client.resume_draft(plan,12)
             remote.assert_not_called()
+
+class ImmutableSettingsPrivileges(unittest.TestCase):
+    def setUp(self):
+        ImmutableReleaseAPI.setUp(self)
+        self.draft = copy.deepcopy(self.release)
+        self.draft.update(draft=True, immutable=False, target_commitish=self.plan['recipe_commit'])
+
+    def test_request_error_reports_only_method_endpoint_and_status(self):
+        error = urllib.error.HTTPError(self.client.base + '/immutable-releases', 403,
+            'private response text', {'Authorization': 'Bearer secret-not-logged'}, None)
+        with patch.object(api.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaises(api.APIRequestError) as captured:
+                self.client.request('GET', '/immutable-releases')
+        failure = captured.exception
+        self.assertEqual((failure.method, failure.endpoint, failure.status), ('GET', '/immutable-releases', 403))
+        self.assertIn('GET /immutable-releases', str(failure))
+        self.assertIn('HTTP 403', str(failure))
+        self.assertNotIn('secret-not-logged', str(failure))
+        self.assertNotIn('private response text', str(failure))
+        with patch.object(api.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError(
+                self.client.base + '/releases/999', 404, 'missing', {}, None)):
+            self.assertIsNone(self.client.request('GET', '/releases/999', missing_ok=True))
+
+    def test_known_settings_true_and_false_are_distinct_from_exact_403_unknown(self):
+        with patch.object(self.client, 'request', return_value={'enabled': True}):
+            self.assertIs(self.client.immutable_preflight(), True)
+        with patch.object(self.client, 'request', return_value={'enabled': False}):
+            with self.assertRaises(ValueError): self.client.immutable_preflight()
+        with patch.object(self.client, 'request', side_effect=api.APIRequestError('GET', '/immutable-releases', 403)):
+            self.assertIsNone(self.client.immutable_preflight())
+
+    def test_other_errors_and_malformed_settings_fail_before_draft_creation(self):
+        failures = [api.APIRequestError('GET', '/immutable-releases', status) for status in (401, 404, 429, 500)]
+        failures += [api.APIRequestError('GET', '/releases', 403),
+                     api.APIRequestError('POST', '/immutable-releases', 403), ValueError('generic error')]
+        for failure in failures:
+            writes = []
+            def request(method, endpoint, body=None, **kwargs):
+                if method != 'GET': writes.append((method, endpoint))
+                raise failure
+            with self.subTest(failure=str(failure)), patch.object(self.client, 'get_release', return_value=None), \
+                 patch.object(self.client, 'resolve_tag_commit', return_value=None), \
+                 patch.object(self.client, 'request', side_effect=request):
+                with self.assertRaises(ValueError): self.client.publish_release(self.plan)
+                self.assertEqual(writes, [])
+        for settings in ({'enabled': False}, {'enabled': 1}, {}, None):
+            with self.subTest(settings=settings), patch.object(self.client, 'get_release', return_value=None), \
+                 patch.object(self.client, 'resolve_tag_commit', return_value=None), \
+                 patch.object(self.client, 'request', return_value=settings) as request:
+                with self.assertRaises(ValueError): self.client.publish_release(self.plan)
+                self.assertTrue(all(call.args[0] == 'GET' for call in request.call_args_list))
+
+    def test_unknown_settings_allows_publish_only_with_actual_immutable_final_release(self):
+        for immutable in (True, False, None):
+            published = copy.deepcopy(self.release)
+            published['immutable'] = immutable
+            writes = []; pointer = self.root / ('pointer-' + str(immutable) + '.json')
+            def request(method, endpoint, body=None, **kwargs):
+                if method == 'GET' and endpoint == '/immutable-releases':
+                    raise api.APIRequestError(method, endpoint, 403)
+                writes.append((method, endpoint, body))
+                if method == 'POST': return self.draft
+            with self.subTest(immutable=immutable), patch.object(self.client, 'get_release',
+                    side_effect=[None, self.draft, self.draft, published]), \
+                 patch.object(self.client, 'resolve_tag_commit', side_effect=[None, self.plan['recipe_commit']]), \
+                 patch.object(self.client, 'request', side_effect=request), patch.object(self.client, 'upload_asset'):
+                def publish_and_point():
+                    result = self.client.publish_release(self.plan)
+                    pointer.write_text(json.dumps({'release_id': result['id']}))
+                if immutable is True:
+                    publish_and_point(); self.assertTrue(pointer.is_file())
+                else:
+                    with self.assertRaises(ValueError): publish_and_point()
+                    self.assertFalse(pointer.exists(), 'Mutable release must never produce an authoritative pointer')
+                self.assertEqual([m[0] for m in writes], ['POST', 'PATCH'])
+
+    def test_resume_unknown_settings_preserves_assets_and_checks_final_immutable_flag(self):
+        for immutable in (True, False):
+            published = copy.deepcopy(self.release); published['immutable'] = immutable
+            writes = []
+            def request(method, endpoint, body=None, **kwargs):
+                if method == 'GET' and endpoint == '/immutable-releases':
+                    raise api.APIRequestError(method, endpoint, 403)
+                writes.append((method, endpoint, body))
+            with self.subTest(immutable=immutable), patch.object(self.client, 'get_release',
+                    side_effect=[self.draft, self.draft, self.draft, published]), \
+                 patch.object(self.client, 'resolve_tag_commit', side_effect=[None, None, self.plan['recipe_commit']]), \
+                 patch.object(self.client, 'request', side_effect=request), patch.object(self.client, 'upload_asset') as upload:
+                if immutable:
+                    self.assertEqual(self.client.resume_draft(self.plan, 12)['id'], 12)
+                else:
+                    with self.assertRaises(ValueError): self.client.resume_draft(self.plan, 12)
+                upload.assert_not_called()
+                self.assertEqual(writes, [('PATCH', '/releases/12', {'draft': False})])
 
 if __name__=='__main__':unittest.main()
