@@ -15,6 +15,11 @@ on:
         description: Exact immutable firmware-BUILD_ID release in this repository
         required: true
         type: string
+      replace_build_id:
+        description: Exact authenticated live build ID to replace within the same source/kernel ABI/layouts
+        required: false
+        default: ''
+        type: string
       bootstrap:
         description: Allow an absent live site only for the first publication
         required: false
@@ -74,6 +79,7 @@ jobs:
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
           PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
           BOOTSTRAP: ${{ inputs.bootstrap }}
+          REPLACE_BUILD_ID: ${{ inputs.replace_build_id }}
         run: |
           [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
@@ -89,6 +95,7 @@ jobs:
             --work-root "$RUNNER_TEMP/channel-publication" --output public --key "$key" \
             --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign")
           if [[ "$BOOTSTRAP" == true ]]; then args+=(--bootstrap); fi
+          if [[ -n "$REPLACE_BUILD_ID" ]]; then args+=(--replace-build-id "$REPLACE_BUILD_ID"); fi
           python3 scripts/hosted-publication.py -- python3 scripts/channel-snapshot.py publish-channel "${args[@]}"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

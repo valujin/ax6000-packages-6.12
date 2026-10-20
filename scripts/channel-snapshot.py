@@ -101,6 +101,38 @@ def cohort(profile):
     return {key:profile[key] for key in ('id','channel','build_id','firmware','sdk')}
 
 
+
+def validate_generation_replacement(old,new,expected_build_id):
+    """Authorize one same-ABI cohort replacement, never a moving kernel update."""
+    if not expected_build_id or old.get('build_id')!=expected_build_id:
+        raise ValueError('Replacement predecessor build ID differs from explicit authorization')
+    if new.get('build_id')==expected_build_id or new.get('sdk')==old.get('sdk'):
+        raise ValueError('Replacement must have a new build ID and SDK')
+    allowed={'build_id','sdk','image_packages','package_only'}
+    if {k:v for k,v in old.items() if k not in allowed}!={k:v for k,v in new.items() if k not in allowed}:
+        raise ValueError('Replacement changes profile/source/kernel ABI/architecture/layouts or requested packages')
+    if old.get('package_only',[]) not in ([],['tailscale']) or new.get('package_only')!=['tailscale']:
+        raise ValueError('Replacement must preserve the reviewed Tailscale package-only policy')
+    images=old.get('image_packages')
+    if not isinstance(images,list) or new.get('image_packages')!=[name for name in images if name!='tailscale']:
+        raise ValueError('Replacement changes image packages beyond removing Tailscale')
+    if 'tailscale' not in new.get('packages',[]):
+        raise ValueError('Replacement must retain the downloadable Tailscale package')
+
+
+def restored_identity(restored,pointer,channel,repository,public_key,usign):
+    restored=Path(restored)
+    verify(restored/'snapshot-manifest.json',restored/'snapshot-manifest.sig',public_key,usign)
+    manifest=read_json(restored/'snapshot-manifest.json')
+    validate_pointer(pointer,read_json(restored/'release.json'))
+    profile,lock,files=validate_channel(restored/'channel',channel,repository,public_key,usign)
+    if manifest.get('files')!=files or sha256_file(restored/'snapshot-manifest.json')!=pointer.get('manifest_sha256'):
+        raise ValueError('Restored channel/pointer mismatch')
+    if any(pointer.get(k)!=manifest.get(k) for k in ('channel','profile_id','build_id','kernel_version')):
+        raise ValueError('Restored channel identity differs from pointer')
+    return profile,files
+
+
 def catalog_identity(tree,profile,public_key,usign):
     verify(tree/'downloads.json',tree/'downloads.sig',public_key,usign)
     catalog=read_json(tree/'downloads.json')
@@ -343,7 +375,7 @@ def read_state(path,signature,repository,public_key,usign):
     return state
 
 
-def compose_site(live_state,live_signature,channels,repository,key,public_key,usign,output,*,bootstrap=False):
+def compose_site(live_state,live_signature,channels,repository,key,public_key,usign,output,*,bootstrap=False,replacements=None):
     output=fresh(output);signing_key(key,public_key)
     if live_state is None:
         if not bootstrap or live_signature is not None:raise ValueError('Explicit bootstrap required')
@@ -352,6 +384,8 @@ def compose_site(live_state,live_signature,channels,repository,key,public_key,us
         if bootstrap:raise ValueError('Cannot bootstrap over existing site')
         previous=read_state(live_state,live_signature,repository,public_key,usign)
     if set(channels)-set(CHANNELS):raise ValueError('Unknown publication channel')
+    replacements=replacements or {}
+    if set(replacements)-set(channels):raise ValueError('Replacement channel is absent')
     state={'schema_version':1,'repository':repository,'channels':{c:None for c in CHANNELS}}
     total=0
     for channel in CHANNELS:
@@ -360,15 +394,15 @@ def compose_site(live_state,live_signature,channels,repository,key,public_key,us
             if old is not None:raise ValueError('Cannot remove an existing channel')
             continue
         restored,pointer=channels[channel];restored=Path(restored)
-        verify(restored/'snapshot-manifest.json',restored/'snapshot-manifest.sig',public_key,usign)
-        manifest=read_json(restored/'snapshot-manifest.json')
-        validate_pointer(pointer,read_json(restored/'release.json'))
-        profile,lock,files=validate_channel(restored/'channel',channel,repository,public_key,usign)
-        if manifest.get('files')!=files or sha256_file(restored/'snapshot-manifest.json')!=pointer.get('manifest_sha256'):
-            raise ValueError('Restored channel/pointer mismatch')
-        if any(pointer.get(k)!=manifest.get(k) for k in ('channel','profile_id','build_id','kernel_version')):
-            raise ValueError('Restored channel identity differs from pointer')
-        if old is not None and any(old.get(k)!=pointer.get(k) for k in ('profile_id','build_id','kernel_version')):
+        profile,files=restored_identity(restored,pointer,channel,repository,public_key,usign)
+        if channel in replacements:
+            predecessor,expected_build_id=replacements[channel]
+            old_tree,old_pointer=predecessor
+            if old is None or old_pointer!=old:
+                raise ValueError('Replacement predecessor differs from authenticated live pointer')
+            old_profile,_=restored_identity(old_tree,old_pointer,channel,repository,public_key,usign)
+            validate_generation_replacement(old_profile,profile,expected_build_id)
+        elif old is not None and any(old.get(k)!=pointer.get(k) for k in ('profile_id','build_id','kernel_version')):
             raise ValueError('Daily publication cannot switch firmware generation')
         total+=sum(item['size'] for item in files)
         state['channels'][channel]=pointer
@@ -644,13 +678,20 @@ def fetch_generation(tag,repository,public_key,usign,output):
     return output
 
 
-def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,work,key,public_key,usign,output,*,bootstrap=False):
+def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,work,key,public_key,usign,output,*,bootstrap=False,replace_build_id=None):
     work=fresh(work);output=fresh(output);work.mkdir(parents=True)
     profile=read_json(Path(raw)/'profile.json');channel=profile['channel']
     previous=fetch_live(site_url,repository,public_key,usign,work/'live',bootstrap=bootstrap)
     restored=restore_live_channels(previous,profiles,repository,public_key,usign,work)
     old=restored.get(channel)
-    if old and cohort(read_json(old[0]/'channel/profile.json'))!=cohort(profile):raise ValueError('Manual generation migration requires explicit retention design')
+    replacements={}
+    if replace_build_id is not None:
+        if bootstrap or old is None:raise ValueError('Replacement requires an authenticated live predecessor')
+        old_profile,_=restored_identity(old[0],old[1],channel,repository,public_key,usign)
+        validate_generation_replacement(old_profile,profile,replace_build_id)
+        replacements[channel]=(old,replace_build_id)
+    elif old and cohort(read_json(old[0]/'channel/profile.json'))!=cohort(profile):
+        raise ValueError('Manual generation migration requires --replace-build-id')
     subprocess.run(['python3',str(ROOT/'scripts/publish.py'),'--profile',str(Path(raw)/'profile.json'),
                     '--input',str(raw),'--output',str(work/'staged'),'--lock',str(Path(raw)/'lock.json'),
                     '--key',str(key),'--public-key',str(public_key),'--usign',str(usign),
@@ -663,7 +704,7 @@ def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,
     restore_online(pointer,profile,repository,public_key,usign,restored_channel)
     restored[channel]=(restored_channel,pointer)
     compose_site(None if previous is None else work/'live/site-state.json',None if previous is None else work/'live/site-state.sig',
-                 restored,repository,key,public_key,usign,output,bootstrap=previous is None)
+                 restored,repository,key,public_key,usign,output,bootstrap=previous is None,replacements=replacements)
     latest=fetch_live(site_url,repository,public_key,usign,work/'live-recheck',bootstrap=previous is None)
     if latest!=previous:raise ValueError('Live predecessor changed; do not deploy')
     deployment_record(work,output,site_url,previous is None)
@@ -722,13 +763,14 @@ def main():
     fetched=sub.add_parser('fetch-generation');common(fetched);fetched.add_argument('--release-tag',required=True)
     publish=sub.add_parser('publish-channel');common(publish,secret=True)
     for name in ('raw','external-assets','external-assets-signature','generation-release-metadata','work-root'):publish.add_argument('--'+name,type=Path,required=True)
+    publish.add_argument('--replace-build-id',help='Replace exactly this authenticated live build, preserving source/kernel ABI/layouts')
     publish.add_argument('--site-url',required=True);publish.add_argument('--profiles',type=Path,default=ROOT/'profiles');publish.add_argument('--bootstrap',action='store_true')
     check=sub.add_parser('verify-deployment');check.add_argument('--check',type=Path,required=True);check.add_argument('--phase',choices=('before','after'),required=True)
     args=parser.parse_args()
     try:
         if args.command=='verify-deployment':verify_deployment(args.check,args.phase)
         elif args.command=='fetch-generation':fetch_generation(args.release_tag,args.repository,args.public_key,args.usign,args.output)
-        elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap)
+        elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap,replace_build_id=args.replace_build_id)
         elif args.command=='pack':pack_snapshot(args.input,args.channel,args.repository,args.recipe_commit,args.key,args.public_key,args.usign,args.output)
         elif args.command=='publish-generation':publish_generation(args.raw,args.expected_profile,args.raw_archive,args.checksum,args.repository,args.key,args.public_key,args.usign,args.output,resume_draft_id=args.resume_draft_id)
         elif args.command=='publish-snapshot':publish_snapshot(args.plan,args.repository,args.public_key,args.usign,args.output)
