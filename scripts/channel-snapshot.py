@@ -723,17 +723,53 @@ def verify_deployment(check,phase):
     import urllib.error
     import urllib.parse
     import urllib.request
-    check=read_json(check);expected=check[phase];site=check['site_url']
+    check=read_json(check);names=('site-state.json','site-state.sig')
+    if phase not in ('before','after') or check.get('schema_version')!=1:
+        raise ValueError('Invalid authenticated deployment expectation')
+    for label in ('before','after'):
+        pair=check.get(label)
+        if pair is None and label=='before':continue
+        if (not isinstance(pair,dict) or set(pair)!=set(names)
+                or any(not isinstance(value,str) or not re.fullmatch(r'[a-f0-9]{64}',value) for value in pair.values())):
+            raise ValueError('Invalid authenticated deployment expectation')
+    expected=check[phase];site=check['site_url']
     if urllib.parse.urlsplit(site).scheme!='https':raise ValueError('Deployment URL must use HTTPS')
-    for name in ('site-state.json','site-state.sig'):
-        request=urllib.request.Request(site.rstrip('/')+'/'+name+'?verify='+str(time.time_ns()),headers={'Cache-Control':'no-cache'})
-        try:
-            with urllib.request.urlopen(request,timeout=30) as response:body=response.read(1024*1024+1)
-        except urllib.error.HTTPError as error:
-            if expected is None and error.code==404:continue
-            raise
-        if expected is None or len(body)>1024*1024 or hashlib.sha256(body).hexdigest()!=expected[name]:
-            raise ValueError('Live site differs from authenticated deployment expectation')
+    # Pages may briefly serve either authenticated generation, including a mixed
+    # state/signature pair. Unknown bytes are never a propagation retry.
+    deadline=time.monotonic()+60 if phase=='after' else None
+    for attempt in range(12 if phase=='after' else 1):
+        complete=True
+        for name in names:
+            timeout=30
+            if deadline is not None:
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise ValueError('Live site differs from authenticated deployment expectation')
+                timeout=min(timeout,remaining)
+            request=urllib.request.Request(site.rstrip('/')+'/'+name+'?verify='+str(time.time_ns()),headers={'Cache-Control':'no-cache'})
+            try:
+                with urllib.request.urlopen(request,timeout=timeout) as response:body=response.read(1024*1024+1)
+            except urllib.error.HTTPError as error:
+                if check['before'] is None and error.code==404:
+                    complete=phase=='before' and complete
+                    continue
+                raise
+            if len(body)>1024*1024:raise ValueError('Live site differs from authenticated deployment expectation')
+            digest=hashlib.sha256(body).hexdigest()
+            if phase=='before':
+                if expected is None or digest!=expected[name]:
+                    raise ValueError('Live site differs from authenticated deployment expectation')
+            else:
+                allowed={expected[name]}
+                if check['before'] is not None:allowed.add(check['before'][name])
+                if digest not in allowed:raise ValueError('Live site differs from authenticated deployment expectation')
+                complete=complete and digest==expected[name]
+        if complete:
+            if deadline is not None and time.monotonic()>deadline:
+                raise ValueError('Live site differs from authenticated deployment expectation')
+            return
+        if attempt==11 or deadline-time.monotonic()<=5:break
+        time.sleep(5)
+    raise ValueError('Live site differs from authenticated deployment expectation')
 
 
 
