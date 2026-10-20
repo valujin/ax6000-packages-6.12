@@ -66,7 +66,8 @@ class Source612Tests(unittest.TestCase):
         packages = set(self.profile['packages']) | set(firmware.source_symbols(self.profile))
         packages = {p.removeprefix('PACKAGE_') for p in packages if p.startswith('PACKAGE_')} | set(self.profile['packages'])
         packages |= {'kmod-test-compatible', 'kmod-test-incompatible'}
-        (self.source/'tmp/.packageinfo').write_text(''.join('Package: '+p+'\n' for p in sorted(packages)))
+        (self.source/'tmp/.packageinfo').write_text(''.join(
+            'Source-Makefile: package/fixture/'+p+'/Makefile\nPackage: '+p+'\n' for p in sorted(packages)))
         (self.source/'tmp/.config-package.in').write_text('config LUCI_LANG_ru\n' + ''.join('config PACKAGE_'+p+'\n' for p in sorted(packages)))
         (self.source/'tmp/.config-target.in').write_text(''.join('config TARGET_DEVICE_mediatek_filogic_DEVICE_'+d+'\n' for d in [x['device'] for x in self.profile['firmware']['devices']] + ['foreign_router']))
         self.patch_fixture()
@@ -76,6 +77,7 @@ class Source612Tests(unittest.TestCase):
         self.assertIn('# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_foreign_router is not set',config)
         self.assertIn('CONFIG_PACKAGE_kmod-test-compatible=m',config)
         self.assertIn('CONFIG_PACKAGE_kmod-leds-ws2812b=y',config)
+        self.assertIn('CONFIG_PACKAGE_tailscale=m',config)
         # Independent post-defconfig fixture: one unavailable kmod is legitimately discarded.
         config=firmware.set_symbols(config, {'TARGET_ARCH_PACKAGES':'"aarch64_cortex-a53"','PACKAGE_kmod-test-incompatible':'n'})
         (self.source/'.config').write_text(config)

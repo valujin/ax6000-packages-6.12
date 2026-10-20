@@ -112,7 +112,6 @@
     "publication_url": "https://valujin.github.io/ax6000-packages-6.12/channels/recommended"
   },
   "image_packages": [
-    "tailscale",
     "kmod-amneziawg",
     "amneziawg-tools",
     "luci-proto-amneziawg",
@@ -136,5 +135,8 @@
     "repository": "valujin/ax6000-packages-6.12",
     "site_url": "https://valujin.github.io/ax6000-packages-6.12",
     "firmware_assets": "github-release"
-  }
+  },
+  "package_only": [
+    "tailscale"
+  ]
 }

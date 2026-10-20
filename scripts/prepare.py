@@ -28,6 +28,25 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def package_only_packages(profile):
+    """Packages built as IPKs but explicitly excluded from native images."""
+    packages = profile.get("package_only", [])
+    require(isinstance(packages, list) and all(isinstance(name, str) and NAME.fullmatch(name)
+            for name in packages) and len(set(packages)) == len(packages),
+            "package_only must be a unique list of package names")
+    requested = set(profile.get("packages", []))
+    require(set(packages) <= requested, "package_only must be a subset of requested packages")
+    require(not set(packages) & set(profile.get("image_packages", [])),
+            "package_only and image_packages must be disjoint")
+    protected = {"kernel", "libc", "base-files", "busybox", "opkg", "procd", "fstools", "netifd",
+                 "ubox", "ubus", "usign", "openwrt-keyring", "mtwifi-cfg", "mtwifi-cfg-ucode",
+                 "iwinfo", "iwinfo-ucode", "ucode-mod-iwinfo", "ucode-mod-datconf",
+                 "ucode-mod-l1parser", "wifi-dats", "libiwinfo", "luci-app-mtwifi-cfg"}
+    require(not any(name.startswith("kmod-") or name in protected for name in packages),
+            "package_only cannot demote kernel, vendor or required base packages")
+    return set(packages)
+
+
 def https_url(value, label):
     require(isinstance(value, str) and not re.search(r"[\s'\"\\^;]", value),
             f"{label} must be an unambiguous HTTPS URL")
@@ -137,6 +156,7 @@ def validate(profile, lock):
         isinstance(name, str) and NAME.fullmatch(name) for name in packages),
         "packages must be a nonempty list of OpenWrt package names")
     require(len(set(packages)) == len(packages), "duplicate requested package")
+    package_only_packages(profile)
     require(isinstance(profile.get("all_kmods", True), bool), "all_kmods must be boolean")
     languages = profile.get("luci_languages", [])
     require(isinstance(languages, list) and all(isinstance(language, str) and

@@ -72,8 +72,22 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -v
           for script in scripts/*.sh; do bash -n "$script"; done
-      - name: Resolve locked feed and Tailscale versions
-        run: python3 scripts/monitor.py --profile "$PROFILE" --output state/firmware-lock.json
+      - name: Resolve Tailscale and keep reviewed firmware feed pins
+        run: |
+          python3 scripts/monitor.py --profile "$PROFILE" --output state/firmware-lock.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          # Native source patches are reviewed against these exact feed commits.
+          # Moving feeds remain the responsibility of the daily SDK workflow.
+          profile = json.loads(Path(os.environ['PROFILE']).read_text())
+          path = Path('state/firmware-lock.json')
+          lock = json.loads(path.read_text())
+          lock['feeds'] = {feed['name']: feed['commit'] for feed in profile['feeds']}
+          path.write_text(json.dumps(lock, indent=2, sort_keys=True) + '\n')
+          PY
       - name: Install build prerequisites
         run: |
           sudo apt-get update

@@ -419,6 +419,27 @@ class FirmwareVerificationTests(unittest.TestCase):
         write('usr/lib/opkg/status', status.replace(profile['firmware']['kernel_version'].encode(), b'6.6.133~old-r1'))
         with self.assertRaisesRegex(ValueError, 'kernel ABI'):
             inspect()
+        write('usr/lib/opkg/status', status)
+        profile['packages'] = ['tailscale']
+        profile['package_only'] = ['tailscale']
+        self.assertEqual(inspect()['package_only_absent'], ['tailscale'])
+        write('usr/sbin/tailscale', b'unexpected retained executable', 0o755)
+        with self.assertRaisesRegex(ValueError, 'package_only payload'):
+            inspect()
+        (tree / 'usr/sbin/tailscale').unlink()
+        write('usr/lib/opkg/info/tailscale.list', b'/usr/sbin/tailscale\n')
+        with self.assertRaisesRegex(ValueError, 'package_only metadata'):
+            inspect()
+        (tree / 'usr/lib/opkg/info/tailscale.list').unlink()
+        link = tree / 'etc/rc.d/S90unexpected'
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to('../init.d/tailscale')
+        with self.assertRaisesRegex(ValueError, 'package_only payload'):
+            inspect()
+        link.unlink()
+        write('usr/lib/opkg/status', status + b'\nPackage: tailscale\nVersion: 1-r1\nArchitecture: aarch64_cortex-a53\nStatus: install ok installed\n')
+        with self.assertRaisesRegex(ValueError, 'package_only is installed'):
+            inspect()
 
 
 if __name__ == '__main__':

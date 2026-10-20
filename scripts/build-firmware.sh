@@ -88,6 +88,7 @@ PY
     "${prepare[@]}" --phase repository-files
     "${prepare[@]}" --phase check-feeds
     "${prepare[@]}" --phase ssl-selection
+    "${prepare[@]}" --phase package-only-selection
     cd -- "$source_dir"
     make -j"$BUILD_JOBS" defconfig
     "${prepare[@]}" --phase verify

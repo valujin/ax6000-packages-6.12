@@ -222,6 +222,91 @@ def verify_ssl(profile, config):
                         f"SSL provider selection requires {symbol}={value}")
 
 
+def package_only_stamps(profile, source):
+    """Preflight exact recipe/variant image stamps; never touch package archives."""
+    packages = prepare.package_only_packages(profile)
+    if not packages:
+        return []
+    root = source.resolve()
+    metadata = source / "tmp/.packageinfo"
+    prepare.require(metadata.is_file() and not metadata.is_symlink()
+                    and metadata.resolve().is_relative_to(root), "package_only metadata is missing or outside source")
+    owners = {}
+    recipe, name, variant = None, None, "default"
+    def record():
+        if name not in packages:
+            return
+        path = PurePosixPath(recipe or "")
+        prepare.require(path.as_posix() == recipe and not path.is_absolute() and ".." not in path.parts
+                        and path.name == "Makefile" and prepare.NAME.fullmatch(path.parent.name)
+                        and prepare.NAME.fullmatch(variant), "package_only recipe/variant is unsafe")
+        stamp = path.parent.name + "." + variant + ".install"
+        prepare.require(not any(name in names for names in owners.values()), "package_only metadata has duplicate package owners")
+        owners.setdefault(stamp, set()).add(name)
+    for line in metadata.read_text().splitlines():
+        if line.startswith("Source-Makefile:"):
+            record(); recipe = line.split(":", 1)[1].strip(); name = None; variant = "default"
+        elif line.startswith("Package:"):
+            record(); name = line.split(":", 1)[1].strip(); variant = "default"
+        elif line.startswith("Build-Variant:"):
+            variant = line.split(":", 1)[1].strip() or "default"
+    record()
+    prepare.require(set().union(*owners.values()) == packages if owners else False,
+                    "package_only requested package has no native recipe metadata")
+    staging = source / "staging_dir"
+    prepare.require(not staging.is_symlink(), "package_only staging directory is a symlink")
+    stale = []
+    for target in sorted(staging.glob("target-*")):
+        prepare.require(target.is_dir() and not target.is_symlink() and target.resolve().is_relative_to(root),
+                        "package_only target staging directory is outside source or a symlink")
+        info = target / "pkginfo"
+        if not info.exists() and not info.is_symlink():
+            continue
+        prepare.require(info.is_dir() and not info.is_symlink() and info.resolve().is_relative_to(root),
+                        "package_only install stamp directory is outside source or a symlink")
+        for filename, expected in sorted(owners.items()):
+            stamp = info / filename
+            for path in (stamp, stamp.with_name(stamp.name + ".flags")):
+                if not path.exists() and not path.is_symlink():
+                    continue
+                prepare.require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(root)
+                                and path.stat().st_size <= 65536, "package_only install stamp is not a bounded regular source file")
+                if path == stamp:
+                    data = path.read_bytes()
+                    lines = data.splitlines()
+                    prepare.require(bool(lines) and data == b"\n".join(lines) + b"\n"
+                                    and len(lines) == len(set(lines)) and set(lines) <= {p.encode() for p in expected},
+                                    "package_only install stamp has unexpected package owners")
+                stale.append(path)
+    return stale
+
+
+def package_only_selection(profile, source):
+    packages = prepare.package_only_packages(profile)
+    if not packages:
+        return
+    config = source / ".config"
+    prepare.require(not source.is_symlink() and config.is_file() and not config.is_symlink()
+                    and config.resolve().is_relative_to(source.resolve()), "package_only configuration is missing or a symlink")
+    updated = set_symbols(config.read_text(), {"PACKAGE_" + name: "m" for name in packages})
+    stale = package_only_stamps(profile, source)
+    # All owners, paths and the replacement config pass preflight before mutation.
+    for path in stale:
+        path.unlink()
+    config.write_text(updated)
+
+
+def verify_package_only(profile, source):
+    packages = prepare.package_only_packages(profile)
+    if not packages:
+        return
+    config = (source / ".config").read_text()
+    for name in packages:
+        values = re.findall(r"^CONFIG_PACKAGE_" + re.escape(name) + r"=([my])$", config, re.M)
+        prepare.require(values == ["m"], f"package_only requires PACKAGE_{name}=m after defconfig")
+    prepare.require(not package_only_stamps(profile, source), "package_only has stale native image install stamps")
+
+
 def apply_source_patch(source, spec, patch, check_only=False):
     """Apply only the reviewed source revision; an exact patched file is idempotent."""
     relative = Path(spec["path"])
@@ -389,6 +474,7 @@ def select(profile, source):
     prepare.require(installed <= available, "pinned source is missing vendor/opkg packages: " + ", ".join(sorted(installed - available)))
     values.update(required)
     values.update(ssl_symbols(profile))
+    values.update({"PACKAGE_" + name: "m" for name in prepare.package_only_packages(profile)})
     config_path.write_text(set_symbols(config, values))
     report = {"profile": profile["id"], "requested": sorted(requested), "candidate_kmods": kmods,
               "source_commit": profile["firmware"]["commit"], "device": profile["build_source"]["device"],
@@ -411,6 +497,7 @@ def verify(profile, source):
     prepare.require(report.get("source_patches") == patches, "selection report omits vendor patch provenance")
     config = (source / ".config").read_text()
     verify_ssl(profile, config)
+    verify_package_only(profile, source)
     enabled = set(re.findall(r"^CONFIG_TARGET_DEVICE_(.+)=y$", config, re.M))
     expected = {"mediatek_filogic_DEVICE_" + device for device in firmware_layouts.validate_devices(profile)}
     prepare.require(enabled == expected, "firmware selection includes another device or omits a requested AX6000 layout")
@@ -791,7 +878,7 @@ def main():
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--cleanup-receipt", type=Path)
-    parser.add_argument("--phase", choices=("validate", "configure", "repository-files", "check-feeds", "vendor-fixes", "overrides", "reset-cached-images", "select", "ssl-selection", "verify", "export"), default="validate")
+    parser.add_argument("--phase", choices=("validate", "configure", "repository-files", "check-feeds", "vendor-fixes", "overrides", "reset-cached-images", "select", "ssl-selection", "package-only-selection", "verify", "export"), default="validate")
     args = parser.parse_args()
     try:
         profile, lock = json.loads(args.profile.read_text()), json.loads(args.lock.read_text())
@@ -814,6 +901,7 @@ def main():
                        "reset-cached-images": lambda: reset_cached_images(profile, args.source_dir, args.cleanup_receipt),
                        "select": lambda: select(profile, args.source_dir),
                        "ssl-selection": lambda: ssl_selection(profile, args.source_dir),
+                       "package-only-selection": lambda: package_only_selection(profile, args.source_dir),
                        "verify": lambda: verify(profile, args.source_dir)}
             actions[args.phase]()
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:

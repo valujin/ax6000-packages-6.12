@@ -285,7 +285,15 @@ all:
         work.mkdir()
         tree = work / "source"
         tree.mkdir()
-        (tree / ".config").write_text(BASE)
+        (tree / ".config").write_text(BASE + "CONFIG_PACKAGE_tailscale=y\n")
+        self.profile["packages"].append("tailscale")
+        self.profile["package_only"] = ["tailscale"]
+        (tree / "tmp").mkdir()
+        (tree / "tmp/.packageinfo").write_text(
+            "Source-Makefile: package/ax6000-overrides/tailscale/Makefile\n\nPackage: tailscale\n")
+        info = tree / "staging_dir/target-fixture/pkginfo"
+        info.mkdir(parents=True)
+        (info / "tailscale.default.install").write_text("tailscale\n")
         profile_path, lock_path = work / "profile.json", work / "lock.json"
         profile_path.write_text(json.dumps(self.profile))
         lock_path.write_text(json.dumps(self.lock))
@@ -307,7 +315,7 @@ spec = importlib.util.spec_from_file_location("real_firmware", real)
 f = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(f)
 source = pathlib.Path(a.source_dir) if a.source_dir else None
-if a.phase in ("validate", "repository-files", "ssl-selection"):
+if a.phase in ("validate", "repository-files", "ssl-selection", "package-only-selection"):
     subprocess.run([sys.executable, str(real)] + sys.argv[1:], check=True)
 elif a.phase == "check-feeds":
     pass
@@ -315,6 +323,7 @@ elif a.phase == "verify":
     if not (source / "normalized").is_file():
         raise SystemExit("verify ran before defconfig")
     f.verify_ssl(json.loads(pathlib.Path(a.profile).read_text()), (source / ".config").read_text())
+    f.verify_package_only(json.loads(pathlib.Path(a.profile).read_text()), source)
     (source / "verified").touch()
 elif a.phase == "reset-cached-images":
     if not (source / "verified").is_file():
@@ -335,6 +344,8 @@ import pathlib, sys
 config = pathlib.Path(".config").read_text()
 assert "CONFIG_PACKAGE_libustream-openssl=m\\n" in config
 assert "CONFIG_PACKAGE_libustream-mbedtls=y\\n" in config
+assert "CONFIG_PACKAGE_tailscale=m\\n" in config
+assert not pathlib.Path("staging_dir/target-fixture/pkginfo/tailscale.default.install").exists()
 if "defconfig" in sys.argv:
     pathlib.Path("normalized").touch()
 elif "world" in sys.argv:

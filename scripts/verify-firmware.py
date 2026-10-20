@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 import zlib
 
 from fit_payload import MIB, cell, extract_fit, read_fdt, require, stringlist, text
+import stock_factory
 
 PINS = {'recommended': 'ae65e1de69971b5a2e3cf7e39390ee93f274d488',
         'latest': 'a99b0888b88f134f56bcb2a7d93027b5d20638a9'}
@@ -444,6 +445,21 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
         while chunk := stream.read(MIB):
             require(not any(chunk), 'Nonzero bytes after SquashFS filesystem')
     status = parse_status(squash_read(binary, root, 'usr/lib/opkg/status', 4 * MIB))
+    package_only = stock_factory.package_policy(profile)
+    if package_only:
+        listing = run_bounded([str(binary), '-processors', '1', '-data-queue', '8', '-frag-queue', '8',
+                               '-no-wildcards', '-lln', str(root)], 4 * MIB)
+        actual_paths, symlinks = {}, {}
+        for line in listing.decode('utf-8').splitlines():
+            match = re.search(r'\ssquashfs-root/(.+?)(?: -> (.*))?$', line)
+            if match:
+                name = stock_factory.canonical(match[1])
+                require(name not in actual_paths, 'Duplicate actual SquashFS file listing')
+                actual_paths[name] = True
+                if match[2] is not None:
+                    symlinks[name] = match[2].encode('utf-8')
+        require(actual_paths and len(actual_paths) <= 30000, 'Cannot enumerate actual SquashFS file inventory')
+        stock_factory.assert_absent(package_only, status, actual_paths, symlinks)
     required = VENDOR | UCODE | {'kernel', 'opkg'} | set(profile.get('image_packages', []))
     require(required <= status.keys(), 'Actual root omits required packages: ' + ', '.join(sorted(required - status.keys())))
     forbidden = {'apk-openssl', 'apk-mbedtls', 'apk', 'kmod-mt7915e', 'kmod-mt7986-firmware',
@@ -513,7 +529,8 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
             'installed_kernel': status['kernel'], 'installed_packages': sorted(status),
             'vendor_packages': sorted(VENDOR), 'ucode_packages': sorted(UCODE),
             'modules': modules, 'firmware': firmware, 'trusted_key_fingerprint': fingerprint,
-            'repository_files': overlay, 'active_feeds': 0, 'apk_executable_present': False}
+            'repository_files': overlay, 'active_feeds': 0, 'apk_executable_present': False,
+            'package_only_absent': package_only}
 
 
 class PipeReader:
@@ -714,8 +731,9 @@ def main(args):
     require((firmware.get('target'), firmware.get('subtarget'), firmware.get('architecture')) ==
             ('mediatek', 'filogic', 'aarch64_cortex-a53'), 'Profile target/architecture differs')
     approved = read_json(repo / 'profiles' / ('redmi-ax6000-612-' + channel + '-new.json'))
-    for field in ('id', 'channel', 'packages', 'image_packages', 'luci_languages', 'publication', 'build_source'):
+    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source'):
         require(profile.get(field) == approved.get(field), 'Exported profile differs from reviewed recipe: ' + field)
+    package_only = stock_factory.package_policy(profile)
     require({k: v for k, v in firmware.items() if k != 'kernel_version'} ==
             {k: v for k, v in approved['firmware'].items() if k != 'kernel_version'},
             'Exported firmware identity differs from reviewed recipe')
@@ -740,6 +758,9 @@ def main(args):
         require(b'# CONFIG_' + symbol.encode() + b' is not set\n' in config, 'Required configuration disabled-state absent: ' + symbol)
     for symbol in ('SDK', 'DEVEL', 'ALL_KMODS', 'SIGNED_PACKAGES', 'SIGNATURE_CHECK', 'TARGET_MULTI_PROFILE', 'TARGET_PER_DEVICE_ROOTFS'):
         require(b'CONFIG_' + symbol.encode() + b'=y\n' in config, 'Required configuration lost: ' + symbol)
+    for package in package_only:
+        require(b'CONFIG_PACKAGE_' + package.encode() + b'=m\n' in config,
+                'package_only must be compiled as a downloadable module: ' + package)
     vendor_symbols = (b'CONFIG_MTK_CHIP_MT7986=y', b'CONFIG_MTK_WARP_V2=y',
                       b'CONFIG_MTK_WIFI_SKU_TYPE="AX6000"', b'CONFIG_WARP_CHIPSET="mt7986"',
                       b'CONFIG_WARP_VERSION=2')
@@ -879,6 +900,7 @@ def main(args):
             regular(path, 64 * MIB)
             optional_inputs[path.relative_to(source).as_posix()] = {'sha256': sha256(path), 'size': path.stat().st_size}
     optional_sizes = {}
+    stock_factory_proof = None
     for layout, device in DEVICES.items():
         limit = PARTITIONS[layout]['ubi_kernel' if layout == 'stock' else 'ubi'][1]
         factories = list(target.glob('*-' + device + '-initramfs-factory.ubi'))
@@ -889,6 +911,20 @@ def main(args):
             regular(path, limit)
             optional_sizes[path.name] = {'size': path.stat().st_size, 'partition_upper_bound': limit,
                                          'payload_verified': False}
+            if layout == 'stock':
+                ram_images = list(target.glob('*-' + device + '-initramfs-kernel.bin'))
+                require(len(ram_images) == 1, 'Stock factory requires exactly one corresponding native RAM FIT')
+                ram_image = regular(ram_images[0], 64 * MIB)
+                require(sha256(ram_image) == sha256(regular(source / 'bin/targets/mediatek/filogic' / ram_image.name, 64 * MIB)),
+                        'Stock RAM FIT differs from actual native build')
+                kernel_inputs = sorted(kernel.parent.glob('Image-initramfs*'))
+                stock_factory_proof = stock_factory.verify_native_factory(ram_image, path,
+                    package_only=package_only,
+                    expected_packages={name: controls[name] for name in records['stock']['root']['installed_packages']},
+                    expected_dtb_sha256=records['stock']['device_tree']['sha256'], kernel_inputs=kernel_inputs)
+                optional_sizes[path.name]['payload_verified'] = True
+    if 'tailscale' in package_only:
+        require(stock_factory_proof is not None, 'Native stock factory UBI is mandatory for package_only Tailscale')
     result = {'schema_version': 1, 'ok': True, 'channel': channel, 'build_id': build_id,
               'source_commit': commit, 'kernel_abi': firmware['kernel_version'], 'layouts': records,
               'sdk_context': context, 'sysupgrade_input': {'path': str(expected_kernel),
@@ -897,6 +933,7 @@ def main(args):
               'trusted_tools': {n: {'path': str(p), 'sha256': sha256(p)} for n, p in tools.items()},
               'vendor_source_symbols': [v.decode() for v in vendor_symbols],
               'post_initramfs_inputs': optional_inputs, 'optional_factory_size_checks': optional_sizes,
+              'stock_factory': stock_factory_proof,
               'recovery_payloads_verified': False,
               'work_dir': str(work), 'hardware_boot_verified': False, 'flash_verified': False,
               'sdk_compile_verified': False}

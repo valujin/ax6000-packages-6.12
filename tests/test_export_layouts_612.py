@@ -29,7 +29,7 @@ class Export612Tests(unittest.TestCase):
         source=root/'source'; generated_native,_,_=fixture(source)
         target=source/'bin/targets/mediatek/filogic'
         (target/'immortalwrt-sdk-mediatek-filogic.tar.zst').unlink()
-        p=profile();p['packages']=['kmod-wireguard','kmod-amneziawg'];p['image_packages']=[]
+        p=profile();p['packages']=['kmod-wireguard','kmod-amneziawg'];p['image_packages']=[];p['package_only']=[]
         packages=source/'bin/packages/base';packages.mkdir(parents=True)
         for name,deps in [('kernel',''),('kmod-wireguard','kernel (= '+ABI+')'),('kmod-amneziawg','kernel (= '+ABI+')'),
                           ('vendor-ui','libvendor'),('libvendor','')]:
