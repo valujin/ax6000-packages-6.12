@@ -306,14 +306,20 @@ def status_packages(data):
         fields = {}
         for line in block.splitlines():
             if line.startswith((' ', '\t')):
+                need(fields, 'Orphan initramfs status continuation')
                 continue
-            need(': ' in line, 'Malformed initramfs status line')
-            key, value = line.split(': ', 1)
+            # opkg writes a bare Conffiles: header before continuation rows.
+            match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)', line)
+            need(match is not None, 'Malformed initramfs status line')
+            key, value = match.groups()
             need(key not in fields, 'Duplicate initramfs status field'); fields[key] = value
         name = fields.get('Package')
         need(name and name not in result and fields.get('Version') and fields.get('Architecture'),
              'Missing/duplicate initramfs status identity')
-        need(fields.get('Status') == 'install ok installed', 'Initramfs package is not installed')
+        # Native toolchain packages carry PKG_FLAGS:=hold. This opkg flag is
+        # independent of the third token, which records installation state.
+        need(fields.get('Status') in ('install ok installed', 'install hold installed'),
+             'Initramfs package is not installed with an approved flag: ' + name)
         result[name] = fields
     need(result, 'Empty initramfs package status')
     return result

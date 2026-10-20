@@ -119,6 +119,30 @@ class NativeFactoryTests(unittest.TestCase):
         self.before, self.entries = roots()
         self.fit = fit(compressed(self.entries)); self.ubi = raw_ubi(self.fit)
 
+    def test_native_held_toolchain_package_is_installed(self):
+        held = status(['libc']).replace(b'install ok installed', b'install hold installed')
+        self.assertEqual(v.status_packages(held)['libc']['Status'], 'install hold installed')
+        item = next(i for i in self.entries if i['name'] == 'usr/lib/opkg/status')
+        item['data'] += b'\n' + held
+        ram = fit(compressed(self.entries))
+        self.assertIn('libc', self.verify(ram=ram, ubi=raw_ubi(ram))['installed_packages'])
+
+    def test_noninstalled_or_unapproved_status_is_rejected(self):
+        for state in ('install hold unpacked', 'install hold half-installed', 'deinstall hold installed',
+                      'install reinstreq installed', 'install arbitrary installed', 'install installed'):
+            with self.subTest(state=state):
+                self.assertRaises(ValueError, v.status_packages,
+                    status(['libc']).replace(b'install ok installed', state.encode()))
+
+    def test_native_empty_conffiles_header_and_continuation(self):
+        data = status(['opkg']).rstrip(b'\n') + b'\nConffiles:\n /etc/opkg.conf abc123\n\n'
+        parsed = v.status_packages(data)
+        self.assertEqual(parsed['opkg']['Conffiles'], '')
+        self.assertEqual(parsed['opkg']['Status'], 'install ok installed')
+        for bad in (b' orphan\n' + data, data.replace(b'Conffiles:', b'Conffiles'),
+                    data.replace(b'Conffiles:', b'Conffiles:\nConffiles:')):
+            self.assertRaises(ValueError, v.status_packages, bad)
+
     def verify(self, ram=None, ubi=None, expected=None, kernel=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / 'ram.bin').write_bytes(ram or self.fit); (root / 'factory.ubi').write_bytes(ubi or self.ubi)
