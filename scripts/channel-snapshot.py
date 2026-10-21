@@ -24,6 +24,8 @@ MAX_MEMBERS = 100000
 METADATA = {'profile.json','repository.pub','downloads.json','downloads.sig','index.html','.nojekyll',
             'build-selection.json','build-provenance.json','firmware-manifest.json','build.config'}
 APK_METADATA = {'profile.sig', 'repository-apk.pem', 'native-providers.json'}
+_MIGRATION_IMAGE_CACHE = {}
+_MIGRATION_DOWNLOAD_BUDGET = {'used': 0}
 
 
 def apk_options(apk):
@@ -188,11 +190,24 @@ def validate_migration_proof(old,new,proof):
     """
     if not isinstance(proof,dict):
         raise ValueError('ASU/APK migration requires an explicit native migration proof')
-    expected={'schema_version':1,'kind':'asu-apk-native-migration',
+    version=proof.get('schema_version')
+    expected={'schema_version':2 if version==2 else 1,'kind':'asu-apk-native-migration',
               'predecessor_build_id':old['build_id'],'successor_build_id':new['build_id'],
               'source_commit':old['firmware']['commit'],'kernel_version':old['firmware']['kernel_version']}
     if any(proof.get(key)!=value for key,value in expected.items()):
         raise ValueError('Native migration proof differs from the exact authorized generations')
+    if version==2:
+        module('kernel_migration').validate_receipt(old,new,proof)
+    else:
+        validate_equal_kernel_context(proof)
+    patches=proof.get('source_patches')
+    if (not isinstance(patches,dict) or set(patches)!={'before','after'}
+            or not isinstance(patches['before'],list) or patches['before']!=patches['after']):
+        raise ValueError('Native migration proof source patches differ')
+
+
+def validate_equal_kernel_context(proof):
+    """Legacy v1 keeps every original complete-byte equality requirement."""
     context=proof.get('kernel_context')
     required={'.config','Module.symvers','arch/arm64/boot/Image'}
     if not isinstance(context,dict) or not required <= set(context) or set(context)-required-{'vmlinux'}:
@@ -205,10 +220,6 @@ def validate_migration_proof(old,new,proof):
                 or not re.fullmatch(r'[a-f0-9]{64}',identity.get('sha256',''))
                 or type(identity.get('size')) is not int or identity['size']<=0):
             raise ValueError('Invalid native kernel comparison identity: '+name)
-    patches=proof.get('source_patches')
-    if (not isinstance(patches,dict) or set(patches)!={'before','after'}
-            or not isinstance(patches['before'],list) or patches['before']!=patches['after']):
-        raise ValueError('Native migration proof source patches differ')
 
 
 def validate_migration_manifests(old_tree,new_tree,proof):
@@ -219,6 +230,10 @@ def validate_migration_manifests(old_tree,new_tree,proof):
                 or manifest.get('kernel_version')!=proof['kernel_version']
                 or manifest.get('source_patches',[])!=proof['source_patches'][phase]):
             raise ValueError('Native migration proof differs from actual '+phase+' firmware manifest')
+    if proof.get('schema_version')==2:
+        module('kernel_migration').validate_payloads(
+            [('before',old_tree),('after',new_tree)],proof,read_json,module('publication_api'),
+            _MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
 
 
 def restored_identity(restored,pointer,channel,repository,public_key,usign,*,apk=None):
