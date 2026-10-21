@@ -1,4 +1,5 @@
 'use strict';
+'require baseclass';
 
 /* AX6000 cohort identity is read from a root-owned image file, never UCI. */
 const urls = {
@@ -46,7 +47,7 @@ function target(local, remote) {
 		throw Error('Changing OPKG/APK requires an explicit firmware migration');
 	return remote;
 }
-return {
+return baseclass.extend({
 	identity: identity,
 	manager: manager,
 	runtime: function(local, apkDatabase, opkgDatabase) {
@@ -100,4 +101,4 @@ return {
 		return { ax6000: remote, packages: packages, profile: selectedProfile,
 			installed_packages: names.sort(), installed_package_manager: manager(local), diff_packages: false };
 	}
-};
+});

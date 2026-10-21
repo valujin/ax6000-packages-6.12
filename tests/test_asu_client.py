@@ -3,6 +3,7 @@
 Never execute ARM code or send a real router upgrade request.
 """
 import importlib.util
+import gzip
 import hashlib
 import os
 import re
@@ -44,11 +45,70 @@ class AsuClientTests(unittest.TestCase):
     def node(self, code, view=None):
         if not shutil.which('node'):
             self.fail('node required to execute actual LuCI behavior tests')
-        context = {'module': (ROOT / 'files/asu-client/ax6000_asu.js').read_text(), 'view': view}
-        program = "const input = JSON.parse(require('fs').readFileSync(0,'utf8'));\n" + code
+        context = {'module': (ROOT / 'files/asu-client/ax6000_asu.js').read_text(), 'view': view,
+                   'luci': gzip.decompress((ROOT / 'tests/fixtures/asu-client/612/luci.js.gz').read_bytes()).decode()}
+        program = "const input = JSON.parse(require('fs').readFileSync(0,'utf8'));\n" + r"""
+String.prototype.format=function(...args){let i=0;return this.replace(/%[sd]/g,()=>args[i++]);};
+// Execute the pinned Class implementation and complete LuCI require() method.
+// Only module transport and device dependencies are supplied by this harness.
+const classStart=input.luci.indexOf('\tconst toCamelCase =');
+const classEnd=input.luci.indexOf('\n\n\t/**\n\t * @class headers');
+const requireStart=input.luci.indexOf('\t\trequire(name, from = []) {');
+const requireEnd=input.luci.indexOf('\n\t\t/* DOM setup */',requireStart);
+if(classStart<0 || classEnd<0 || requireStart<0 || requireEnd<0)throw Error('Pinned LuCI anchors differ');
+const classSource=input.luci.slice(classStart,classEnd);
+const requireSource=input.luci.slice(requireStart,requireEnd).trim().replace(/,$/,'');
+const loaderFactory=new Function('source','dependencies',classSource+`
+ const window={},document={},env={base_url:'/luci-static/resources'};
+ const classes=Object.assign({baseclass:Class,view:Class.extend({})},dependencies);
+ const Request={get:url=>Promise.resolve({ok:true,text:()=>source,url})};
+ const LuCI=Class.extend({${requireSource},
+   error(type,message,...args){throw new globalThis[type](message.format(...args));},
+   raise(type,message,...args){throw new globalThis[type](message.format(...args));}
+ });
+ const instance=new LuCI();
+ instance.resolveDefault=(p,d)=>Promise.resolve(p).catch(()=>d);
+ instance.bind=(fn,obj,...args)=>fn.bind(obj,...args);
+ instance.env={cgi_base:'/cgi-bin'};
+ return {Class,instance};
+`);
+async function loadLuCI(source,name,dependencies={}) {
+ const loader=loaderFactory(source,dependencies);
+ const instance=await loader.instance.require(name);
+ if(!(instance instanceof loader.Class))throw Error('LuCI did not instantiate a class');
+ return instance;
+}
+(async()=>{
+""" + code + "\n})().catch(e=>{console.error(e);process.exitCode=1;});\n"
         process = subprocess.run(['node', '-e', program], input=json.dumps(context), text=True,
                                  capture_output=True, timeout=20)
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+
+    def test_actual_pinned_loader_rejects_object_and_instantiates_policy(self):
+        source = ROOT / 'tests/fixtures/asu-client/612/luci.js.gz'
+        # Actual AE LuCI feed d6167ea0645cbd1327708d85f94824f42d0eb872.
+        self.assertEqual(hashlib.sha256(gzip.decompress(source.read_bytes())).hexdigest(),
+                         'a8fd2e9100249f54e64def80bf96d43a03b5af6a3f86a9f151d898994a1e1966')
+        self.node(r"""
+const assert=require('assert/strict');
+await assert.rejects(loadLuCI("'use strict'; return {};",'invalid'), /factory yields invalid constructor/);
+const a=await loadLuCI(input.module,'ax6000_asu');
+assert.equal(typeof a.constructor,'function');
+const Constructor=a.constructor;
+assert.throws(()=>Constructor(), /Constructor must not be called without/);
+assert.equal(Object.hasOwn(a,'runtime'),false); // method inherited from real Class prototype
+assert.equal(a.runtime({schema_version:1,cohort:'612-recommended',package_manager:'apk',seed:'1'.repeat(64)},true,false),'apk');
+""")
+
+    def test_only_app_revisions_increase_and_common_revisions_stay_unchanged(self):
+        self.assertEqual(client.release(self.profile('612-recommended')), '3')
+        self.assertEqual(client.release(self.profile('66')), '2.ax6000asu3')
+        original=client._originals('612')
+        self.assertIn(b'PKG_RELEASE:=3\n',client._app_makefile(original['Makefile'],'apk'))
+        self.assertIn(b'PKG_RELEASE:=2\n',client._common_makefile(original['common.Makefile'],'apk'))
+        original=client._originals('66')
+        self.assertIn(b'PKG_RELEASE:=2.ax6000asu3\n',client._app_makefile(original['Makefile'],'opkg'))
+        self.assertIn(b'PKG_RELEASE:=2.ax6000asu2\n',client._common_makefile(original['common.Makefile'],'opkg'))
 
     def test_pinned_patches_all_cohorts_idempotent_and_sdk(self):
         for cohort in client.URLS:
@@ -90,7 +150,7 @@ class AsuClientTests(unittest.TestCase):
                 return subprocess.check_output(['make', '-s', '-f', str(make)], text=True, timeout=10).strip()
             self.assertEqual(evaluate(client._release(original)), '26.123.12345~legacy')
             value = evaluate(client._app_makefile(original, manager))
-            expected = client.APP_VERSION + '-r' + ('2' if manager == 'apk' else client.RELEASE)
+            expected = client.APP_VERSION + '-r' + (client.APP_APK_RELEASE if manager == 'apk' else client.APP_OPKG_RELEASE)
             self.assertEqual(value, expected)
             self.assertGreater(int(client.APP_VERSION.split('.')[0]), 26)
             if manager == 'apk':
@@ -155,7 +215,7 @@ class AsuClientTests(unittest.TestCase):
     def test_actual_policy_generation_snapshot_tail_and_layout(self):
         self.node(r"""
 const assert = require('assert/strict');
-const a = new Function(input.module)();
+const a = await loadLuCI(input.module,'ax6000_asu');
 const local = {schema_version:1,cohort:'612-recommended',package_manager:'apk',seed:'1'.repeat(64)};
 const remote = {...local,build_id:'build-one',catalog_sha256:'a'.repeat(64),snapshot_sha256:'b'.repeat(64),kernel_version:'6.12.108~'+'a'.repeat(32)+'-r1'};
 assert(a.hasUpgrade(local,remote));
@@ -208,7 +268,7 @@ assert.throws(()=>a.profile('xiaomi,redmi-router-ax6000-mtkuboot',{...local,coho
             status = client.patch_status(client._originals(series)['status.js']).decode()
             self.node(r"""
 const assert=require('assert/strict');
-const a=new Function(input.module)();
+const a=await loadLuCI(input.module,'ax6000_asu');
 const local={schema_version:1,cohort:'612-recommended',package_manager:'apk',seed:'1'.repeat(64)};
 const remote={...local,build_id:'build-one',catalog_sha256:'a'.repeat(64),snapshot_sha256:'b'.repeat(64),kernel_version:'6.12.108~'+'a'.repeat(32)+'-r1'};
 let enabled=true,notifications=0,urls=[];
@@ -218,9 +278,10 @@ const fs={read:()=>Promise.resolve(JSON.stringify(local)),stat:path=>Promise.res
 const uci={load:()=>Promise.resolve(),get_bool:()=>enabled,get_first:()=> 'https://asu.ezon.by/612/recommended'};
 const fetch=async url=>{urls.push(url);return {ok:true,json:async()=>({ax6000:remote})};};
 const ui={addTimeLimitedNotification:()=>{notifications++;}};
-const L={resolveDefault:(p,d)=>Promise.resolve(p).catch(()=>d)};const E=()=>({});const baseclass={extend:x=>x};
-const code=input.view.replace(/^'require [^']+';?\n/gm,'');
-const v=new Function('baseclass','fs','rpc','uci','ui','ax6000_asu','L','E','_','fetch',code)(baseclass,fs,rpc,uci,ui,a,L,E,x=>x,fetch);
+const E=()=>({});
+const source=input.view+"\n";
+globalThis.E=E;globalThis._=x=>x;globalThis.fetch=fetch;
+const v=await loadLuCI(source,'status',{fs,rpc,uci,ui,ax6000_asu:a});
 (async()=>{
  const data=await v.load();await v.oneshot(data);
  assert.equal(notifications,1);
@@ -237,7 +298,7 @@ const v=new Function('baseclass','fs','rpc','uci','ui','ax6000_asu','L','E','_',
                 self.node(r"""
 const assert=require('assert/strict');
 String.prototype.format=function(...args){let i=0;return this.replace(/%[sd]/g,()=>args[i++]);};
-const policy=new Function(input.module)();
+const policy=await loadLuCI(input.module,'ax6000_asu');
 const local={schema_version:1,cohort:'612-recommended',package_manager:'apk',seed:'1'.repeat(64)};
 const remote={...local,build_id:'build-one',catalog_sha256:'a'.repeat(64),snapshot_sha256:'b'.repeat(64),kernel_version:'6.12.108~'+'a'.repeat(32)+'-r1'};
 let uploaded=false, validated=false, tested=false, upgrades=0, valid=true, testCode=0;
@@ -259,10 +320,10 @@ const request={get:(url,opts)=>{
  if(opts && opts.responseType==='blob')return Promise.resolve({blob:()=>({})});
  return Promise.resolve({ok:true,json:()=>({revision:'r0+38427-ae65e1d',ax6000:remote})});
 },request:(url,opts)=>{requestBody=opts.content;return Promise.resolve({status:202,json:()=>({request_hash:'hash',imagebuilder_status:'init'})});}};
-const L={resolveDefault:(p,d)=>Promise.resolve(p).catch(()=>d),bind:(fn,obj,...args)=>fn.bind(obj,...args),env:{cgi_base:'/cgi-bin'}};
-const view={extend:obj=>obj};
-const code=input.view.replace(/^'require [^']+';\n/gm,'');
-const actual=new Function('view','form','uci','rpc','ui','poll','request','dom','fs','ax6000_asu','E','_','L','FormData','setTimeout',code)(view,form,uci,rpc,ui,poll,request,{},fs,policy,E,x=>x,L,class{append(){}},()=>{});
+globalThis.fixtureFormData=class{append(){}};
+const source=input.view;
+globalThis.E=E;globalThis._=x=>x;globalThis.FormData=globalThis.fixtureFormData;globalThis.setTimeout=()=>{};
+const actual=await loadLuCI(source,'attendedsysupgrade',{form,uci,rpc,ui,poll,request,dom:{},fs,ax6000_asu:policy});
 const flush=()=>new Promise(r=>setImmediate(r));
 (async()=>{
  const [data,firmware]=await actual.load();

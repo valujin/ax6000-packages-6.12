@@ -45,6 +45,24 @@ class ImageFeatureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'package version'):
                 verify()
 
+    def test_app_hotfix_and_unchanged_common_versions_are_independent(self):
+        for cohort, manager, common, app in [('66','opkg','9-r2.ax6000asu2','20261021.2-r2.ax6000asu3'),
+                                             ('612-recommended','apk','10-r2','20261021.2-r3')]:
+            with self.subTest(cohort=cohort):
+                profile={'package_manager':manager,'asu':{'enabled':True,'cohort':cohort,
+                         'seed':'a'*64,'server_url':asu_client.URLS[cohort]}}
+                expected=features.expected(profile,{})
+                self.assertEqual(expected['versions']['attendedsysupgrade-common'],common)
+                self.assertEqual(expected['versions']['luci-app-attendedsysupgrade'],app)
+                files={path:data for path,(data,_) in expected['files'].items()}
+                files['usr/lib/lua/luci/i18n/attendedsysupgrade.ru.lmo']=b'compiled LMO fixture'*2
+                installed={name:{'Version':version} for name,version in expected['versions'].items()}
+                installed['luci-i18n-attendedsysupgrade-ru']={'Version':'26.123'}
+                verify=lambda:features.verify(profile,{},installed,lambda path,cap:files[path],lambda path,mode:None)
+                self.assertEqual(verify()['package_manager'],manager)
+                installed['attendedsysupgrade-common']['Version']=common.rsplit('-r',1)[0]+'-r'+asu_client.release(profile)
+                with self.assertRaisesRegex(ValueError,'package version'):verify()
+
     def test_actual_pinned_luci_install_paths_and_native_compiled_translation_payloads(self):
         import re
         import subprocess
@@ -126,7 +144,7 @@ class ImageFeatureTests(unittest.TestCase):
                 (ROOT / 'tests/fixtures/vendor-country/66-wireless-mtk.js.gz').read_bytes()))
             files['usr/lib/lua/luci/i18n/attendedsysupgrade.ru.lmo'] = b'compiled LMO fixture' * 2
             installed = {name: {'Version': version} for name, version in expected['versions'].items()}
-            installed['luci-app-attendedsysupgrade'] = {'Version': asu_client.APP_VERSION + '-r' + asu_client.RELEASE}
+            installed['luci-app-attendedsysupgrade'] = {'Version': asu_client.APP_VERSION + '-r' + asu_client.release(profile)}
             installed['luci-i18n-attendedsysupgrade-ru'] = {'Version': '26.123'}
             def verify():
                 with patch.object(features, 'minified_js', side_effect=lambda data, source: b'minified fixture:' + data):

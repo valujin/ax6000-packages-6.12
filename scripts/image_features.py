@@ -76,7 +76,7 @@ def expected(profile, lock, source=None):
         files['usr/share/rpcd/acl.d/luci-app-attendedsysupgrade.json'] = (asu_client._acl(originals['acl.json']), 0o644)
         files['etc/uci-defaults/50-attendedsysupgrade'] = (
             originals['common.defaults'].replace(b'https://sysupgrade.kyarucloud.moe', asu['server_url'].encode()), 0o644)
-        versions['attendedsysupgrade-common'] = ('9' if series == '66' else '10') + '-r' + asu_client.release(profile)
+        versions['attendedsysupgrade-common'] = ('9' if series == '66' else '10') + '-r' + asu_client.common_release(profile)
         versions['luci-app-attendedsysupgrade'] = asu_client.APP_VERSION + '-r' + asu_client.release(profile)
         # Presence and native-control equality are checked even though LMO is
         # a compiled translation, not a byte-for-byte PO source copy.

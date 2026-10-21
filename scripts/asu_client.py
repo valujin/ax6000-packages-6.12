@@ -24,6 +24,9 @@ STATUS = Path('htdocs/luci-static/resources/view/status/include/11_upgrades.js')
 DEFAULTS = Path('files/attendedsysupgrade.defaults')
 RELEASE = '2.ax6000asu2'
 APP_VERSION = '20261021.2'
+APP_APK_RELEASE = '3'
+APP_OPKG_RELEASE = '2.ax6000asu3'
+COMMON_APK_RELEASE = '2'
 PREIMAGES = {
  '66': {'status.js': 'abd71b579331f63933355446648710d93f9ef87a681d2af3a16827c4a2abe47d',
         'overview.js': '0344c89fca79a908cae814e5f7940e24ed191dd82d89ac05d6a8b3cc089c8a13',
@@ -72,7 +75,11 @@ def package_manager(profile):
 
 def release(profile):
     # APK revision grammar permits a numeric -rN suffix only.
-    return '2' if package_manager(profile) == 'apk' else RELEASE
+    return APP_APK_RELEASE if package_manager(profile) == 'apk' else APP_OPKG_RELEASE
+
+
+def common_release(profile):
+    return COMMON_APK_RELEASE if package_manager(profile) == 'apk' else RELEASE
 
 
 def _replace(text, before, after):
@@ -171,7 +178,7 @@ def _release(data, release_value=RELEASE):
 
 
 def _app_makefile(data, manager='opkg'):
-    result = _release(data, '2' if manager == 'apk' else RELEASE)
+    result = _release(data, APP_APK_RELEASE if manager == 'apk' else APP_OPKG_RELEASE)
     result = _replace(result.decode(), 'PKG_RELEASE:=', 'PKG_VERSION:=' + APP_VERSION + '\nPKG_RELEASE:=').encode()
     if b'LUCI_MINIFY_JS:=' not in result:
         result = _replace(result.decode(), 'LUCI_TITLE:=LuCI support for attended sysupgrades\n',
@@ -180,7 +187,7 @@ def _app_makefile(data, manager='opkg'):
 
 
 def _common_makefile(data, manager):
-    result = _release(data, '2' if manager == 'apk' else RELEASE)
+    result = _release(data, COMMON_APK_RELEASE if manager == 'apk' else RELEASE)
     if manager == 'apk':
         # This historical common recipe still installs an OPKG/usign key. APK
         # repository RSA public keys are supplied by the immutable native key
