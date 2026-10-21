@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase",
+  "commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+  "path": "scripts/bundle-libraries.sh",
+  "sha256": "5cfe9a8dcd9c6cca60d94e8e51f15ae79ffb84dbd403d2d4f17d55d9063a3036",
+  "license": "GPL-2.0-or-later"
+}

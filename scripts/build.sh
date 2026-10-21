@@ -99,6 +99,10 @@ done
 "${prepare[@]}" --phase verify
 # Explicit targets exclude target/install and image generation.
 make -j"$BUILD_JOBS" package/compile V=s
+# Repacking userspace must not change the native package manager, host decoder
+# or prepared kernel inputs. Verify before invoking the SDK's index tool.
+"${prepare[@]}" --phase check-sdk
+"${prepare[@]}" --phase check-kernel
 make -j"$BUILD_JOBS" package/index V=s
 "${prepare[@]}" --phase export --output-dir "$output" --sdk-archive "$archive"
 printf 'Package build exported to %s\n' "$output"

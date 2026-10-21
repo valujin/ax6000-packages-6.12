@@ -25,7 +25,7 @@ class ImageCacheReset(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = self.root / 'source'
         self.source.mkdir()
-        self.profile = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended-new.json').read_text())
+        self.profile = json.loads((ROOT / 'tests/fixtures/legacy612-recommended-source-profile.json').read_text())
         self.receipt = self.root / 'cleanup.json'
         self.git_patch = mock.patch.object(firmware.subprocess, 'check_output', return_value=self.profile['firmware']['commit']+'\n')
         self.git = self.git_patch.start(); self.addCleanup(self.git_patch.stop)
@@ -60,7 +60,7 @@ class ImageCacheReset(unittest.TestCase):
         tools=self.root/'tools';tools.mkdir()
         git=tools/'git';git.write_text('#!/bin/sh\nprintf "%s\\n" "'+self.profile['firmware']['commit']+'"\n');git.chmod(0o755)
         subprocess.run([sys.executable, str(ROOT / 'scripts/prepare-firmware.py'),
-                        '--profile', str(ROOT / 'profiles/redmi-ax6000-612-recommended-new.json'),
+                        '--profile', str(ROOT / 'tests/fixtures/legacy612-recommended-source-profile.json'),
                         '--lock', str(lock),
                         '--source-dir', str(self.source), '--phase', 'reset-cached-images',
                         '--cleanup-receipt', str(self.receipt)], check=True, capture_output=True,
@@ -93,7 +93,7 @@ class ImageCacheReset(unittest.TestCase):
         self.assertTrue(all((self.source / p).exists() for p in self.paths))
 
     def test_latest_channel_and_other_layout_kernel_files_are_preserved(self):
-        self.profile=json.loads((ROOT/'profiles/redmi-ax6000-612-latest-new.json').read_text())
+        self.profile=json.loads((ROOT/'tests/fixtures/legacy612-latest-source-profile.json').read_text())
         self.git.return_value=self.profile['firmware']['commit']+'\n'
         untouched=[self.other,self.source/'.config',
                    self.source/'bin/targets/mediatek/filogic/immortalwrt-mediatek-filogic-xiaomi_redmi-router-ax6000-mtkuboot-squashfs-factory.bin',

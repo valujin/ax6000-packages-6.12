@@ -20,6 +20,16 @@ on:
         required: false
         default: ''
         type: string
+      allow_asu_apk_migration:
+        description: Explicitly permit the reviewed ASU/OPKG-to-APK migration; requires exact replace_build_id
+        required: false
+        default: false
+        type: boolean
+      migration_proof_base64:
+        description: Base64 JSON from the actual old/new native kernel-context verifier; required only for reviewed ASU/APK migration
+        required: false
+        default: ''
+        type: string
       bootstrap:
         description: Allow an absent live site only for the first publication
         required: false
@@ -48,7 +58,8 @@ jobs:
       - name: Install bounded import and host signing prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends zstd cmake build-essential libjson-c-dev
+          sudo apt-get install -y --no-install-recommends zstd cmake build-essential libjson-c-dev \
+            ninja-build pkg-config libssl-dev zlib1g-dev libzstd-dev python3 wget curl
       - name: Build pinned official host usign
         run: |
           pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
@@ -73,10 +84,92 @@ jobs:
           python3 scripts/import-release.py --archive release-download/raw.tar.zst \
             --checksum release-download/raw.tar.zst.sha256 --output raw \
             --expected-profile "profiles/redmi-ax6000-612-$CHANNEL-new.json"
+      - name: Detect imported and retained package managers
+        id: managers
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          import os
+          from pathlib import Path
+
+          incoming = json.loads(Path('raw/profile.json').read_text()).get('package_manager', 'opkg')
+          if incoming not in ('opkg', 'apk'):
+              raise SystemExit('Unsupported imported package manager')
+          needs_apk = incoming == 'apk'
+          for channel in ('recommended', 'latest'):
+              path = Path(f'profiles/redmi-ax6000-612-{channel}.json')
+              if path.is_file():
+                  profile = json.loads(path.read_text())
+                  needs_apk |= profile.get('package_manager', 'opkg') == 'apk'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'incoming={incoming}\n')
+              output.write(f'apk={str(needs_apk).lower()}\n')
+          PYCODE
+      - name: Prepare the operator-reviewed native migration receipt
+        id: migration
+        env:
+          ALLOW_ASU_APK_MIGRATION: ${{ inputs.allow_asu_apk_migration }}
+          REPLACE_BUILD_ID: ${{ inputs.replace_build_id }}
+          MIGRATION_PROOF_BASE64: ${{ inputs.migration_proof_base64 }}
+        run: |
+          python3 - <<'PYCODE'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          # This is explicit operator authorization, not a remote attestation.
+          # Generate it with the native verifier against the actual old/new
+          # .config, Module.symvers and arch/arm64/boot/Image before dispatch.
+          allowed = os.environ['ALLOW_ASU_APK_MIGRATION'] == 'true'
+          encoded = os.environ.get('MIGRATION_PROOF_BASE64', '')
+          if not allowed:
+              if encoded:
+                  raise SystemExit('Migration proof requires explicit allow_asu_apk_migration.')
+          else:
+              if not os.environ.get('REPLACE_BUILD_ID') or not encoded:
+                  raise SystemExit('Migration requires exact replace_build_id and the reviewed native comparison receipt.')
+              if len(encoded) > 4 * ((65536 + 2) // 3):
+                  raise SystemExit('Migration proof exceeds the 64 KiB decoded limit.')
+              try:
+                  decoded = base64.b64decode(encoded, validate=True)
+                  if len(decoded) > 65536:
+                      raise ValueError('decoded proof exceeds 64 KiB')
+                  def unique_object(pairs):
+                      result = {}
+                      for key, value in pairs:
+                          if key in result:
+                              raise ValueError('duplicate JSON field')
+                          result[key] = value
+                      return result
+                  def finite_constant(value):
+                      raise ValueError('non-finite JSON constant')
+                  proof = json.loads(decoded.decode('utf-8'), object_pairs_hook=unique_object, parse_constant=finite_constant)
+                  if not isinstance(proof, dict):
+                      raise ValueError('proof must be a JSON object')
+              except (ValueError, UnicodeError) as error:
+                  raise SystemExit('Invalid reviewed migration proof: ' + str(error))
+              path = Path(os.environ['RUNNER_TEMP']) / 'migration-proof.json'
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(descriptor, 'wb') as output:
+                  output.write(decoded)
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+                  output.write(f'path={path}\n')
+          PYCODE
+      - name: Build pinned independent host APK
+        if: steps.managers.outputs.apk == 'true'
+        run: |
+          python3 scripts/hosted-publication.py -- bash scripts/build-apk-host.sh --work-dir "$RUNNER_TEMP/apk-host"
+          printf 'AX6000_APK=%s\n' "$RUNNER_TEMP/apk-host/build/src/apk" >> "$GITHUB_ENV"
       - name: Publish a signed durable snapshot and compose both channels
         env:
           GH_TOKEN: ${{ github.token }}
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+          NEEDS_APK: ${{ steps.managers.outputs.apk }}
+          INCOMING_MANAGER: ${{ steps.managers.outputs.incoming }}
+          ALLOW_ASU_APK_MIGRATION: ${{ inputs.allow_asu_apk_migration }}
+          MIGRATION_PROOF: ${{ steps.migration.outputs.path }}
           PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
           BOOTSTRAP: ${{ inputs.bootstrap }}
           REPLACE_BUILD_ID: ${{ inputs.replace_build_id }}
@@ -84,7 +177,8 @@ jobs:
           [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
           key="$RUNNER_TEMP/opkg-signing.key"
-          trap 'rm -f "$key"' EXIT
+          apk_key="$RUNNER_TEMP/apk-signing.pem"
+          trap 'rm -f "$key" "$apk_key"' EXIT
           printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
           unset OPKG_SIGNING_KEY
           site="${PACKAGE_REPOSITORY_URL:-https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}}"
@@ -94,6 +188,20 @@ jobs:
             --site-url "$site" --repository "$GITHUB_REPOSITORY" --profiles profiles \
             --work-root "$RUNNER_TEMP/channel-publication" --output public --key "$key" \
             --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign")
+          if [[ "$NEEDS_APK" == true ]]; then
+            [[ -x "${AX6000_APK:-}" ]] || { echo 'Trusted APK tool is required.' >&2; exit 1; }
+            args+=(--apk "$AX6000_APK")
+          fi
+          if [[ "$INCOMING_MANAGER" == apk ]]; then
+            [[ -n "$APK_SIGNING_KEY" && -f keys/repository-apk.pem ]] || { echo 'Set APK_SIGNING_KEY and pin its public key before APK publication.' >&2; exit 1; }
+            printf '%s\n' "$APK_SIGNING_KEY" > "$apk_key"
+            args+=(--apk-key "$apk_key" --apk-public-key keys/repository-apk.pem)
+          fi
+          unset APK_SIGNING_KEY
+          if [[ "$ALLOW_ASU_APK_MIGRATION" == true ]]; then
+            [[ -n "$REPLACE_BUILD_ID" && -f "$MIGRATION_PROOF" ]] || { echo 'Reviewed native migration receipt and exact predecessor are required.' >&2; exit 1; }
+            args+=(--allow-asu-apk-migration --migration-proof "$MIGRATION_PROOF")
+          fi
           if [[ "$BOOTSTRAP" == true ]]; then args+=(--bootstrap); fi
           if [[ -n "$REPLACE_BUILD_ID" ]]; then args+=(--replace-build-id "$REPLACE_BUILD_ID"); fi
           python3 scripts/hosted-publication.py -- python3 scripts/channel-snapshot.py publish-channel "${args[@]}"

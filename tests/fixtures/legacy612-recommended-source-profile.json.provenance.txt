@@ -1,0 +1,2 @@
+Unmodified legacy source profile from git 4808d6424683e1e47400c08d97366baed02f623e:profiles/redmi-ax6000-612-recommended-new.json before ASU/PBR/APK opt-in.
+SHA256: ce792737030f8327de595de6ae59d2a379368088cb8b408d5e00bccacff10dae

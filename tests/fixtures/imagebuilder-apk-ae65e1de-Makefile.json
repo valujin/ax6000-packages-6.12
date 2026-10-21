@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase",
+  "commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+  "path": "target/imagebuilder/files/Makefile",
+  "sha256": "bd416789cb36c42e8367ddfbb3b98c9b121dfecf22cd55505b4b0a7dbf791153",
+  "license": "GPL-2.0-only"
+}

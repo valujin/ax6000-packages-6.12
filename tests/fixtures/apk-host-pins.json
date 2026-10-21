@@ -1,0 +1,19 @@
+{
+  "source_commit": "b5a31c0d865342ad80be10d68f1bb3d3ad9b0866",
+  "apk_version": "3.0.5",
+  "meson_version": "1.6.1",
+  "source": {
+    "apk": {
+      "url": "https://codeload.github.com/alpinelinux/apk-tools/tar.gz/b5a31c0d865342ad80be10d68f1bb3d3ad9b0866",
+      "sha256": "598056e338fa96af030b0f6f2127cc7df151e6f078b0e44a5cae95cc4bba1f79",
+      "size": 384352,
+      "filename": "apk-tools-b5a31c0.tar.gz"
+    },
+    "meson": {
+      "url": "https://files.pythonhosted.org/packages/d2/f3/9d53c24a7113e08879b14117f83e7105251e6ecf7e03bb7c04926888db9c/meson-1.6.1-py3-none-any.whl",
+      "sha256": "3f41f6b03df56bb76836cc33c94e1a404c3584d48b3259540794a60a21fad1f9",
+      "size": 974359,
+      "filename": "meson-1.6.1-py3-none-any.whl"
+    }
+  }
+}

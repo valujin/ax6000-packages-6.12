@@ -77,6 +77,8 @@ def validate_inventory(raw, profile, manifest):
         missing = sorted(set(inventory) - set(actual))
         extra = sorted(set(actual) - set(inventory))
         raise ValueError(f'Firmware manifest inventory differs: missing={missing[:10]}, extra={extra[:10]}')
+    if profile.get('package_manager', 'opkg') == 'apk' and any(path.endswith('.ipk') for path in actual):
+        raise ValueError('APK firmware inventory contains foreign IPK archives')
     for name, path in actual.items():
         entry = inventory[name]
         if path.stat().st_size != entry['size']:
@@ -109,6 +111,13 @@ def validate_metadata(raw, expected_profile):
     lock = read_json(raw / 'lock.json')
     expected = read_json(expected_profile)
     prepare.validate(profile, lock)
+    actual_manager = profile.get('package_manager', 'opkg')
+    if actual_manager not in ('opkg', 'apk') or actual_manager != expected.get('package_manager', 'opkg'):
+        raise ValueError('Imported package manager differs from source profile')
+    if actual_manager == 'apk':
+        if (profile.get('apk_key_sha256') != expected.get('apk_key_sha256')
+                or not re.fullmatch(r'[a-f0-9]{64}', profile.get('apk_key_sha256', ''))):
+            raise ValueError('Imported APK public key differs from source profile')
     for field in ('repository', 'commit', 'device', 'target', 'subtarget', 'architecture'):
         if profile['firmware'].get(field) != expected['firmware'].get(field):
             raise ValueError(f'Imported firmware {field} differs from the checked-in source profile')
@@ -133,9 +142,16 @@ def validate_metadata(raw, expected_profile):
         raise ValueError('Release lock firmware differs from profile')
     if lock.get('sdk') != profile['sdk']:
         raise ValueError('Release lock SDK differs from profile')
+    if actual_manager == 'apk' and (lock.get('package_manager') != 'apk'
+            or lock.get('apk_key_sha256') != profile['apk_key_sha256']):
+        raise ValueError('Release lock APK manager/key differs from profile')
     if lock.get('feeds', {}).get('base') != profile['firmware']['commit']:
         raise ValueError('Release lock base feed differs from firmware source commit')
     manifest = read_json(raw / 'firmware-manifest.json')
+    if actual_manager == 'apk' and manifest.get('package_manager') != 'apk':
+        raise ValueError('Release firmware manifest package manager differs from profile')
+    if actual_manager == 'apk' and manifest.get('apk_key_sha256') != profile['apk_key_sha256']:
+        raise ValueError('Release firmware manifest APK key differs from profile')
     if (manifest.get('source_commit') != profile['firmware']['commit'] or
             manifest.get('kernel_version') != profile['firmware']['kernel_version']):
         raise ValueError('Release firmware manifest source or kernel ABI differs from profile')

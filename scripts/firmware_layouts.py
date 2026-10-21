@@ -70,6 +70,8 @@ def classify_filename(filename, profile):
             require(suffix in SUFFIXES[layout], f'artifact is not allowed for {layout}: {filename}')
             return {'device': device, 'layout': layout, 'kind': SUFFIXES[layout][suffix],
                     'supported_devices': [device.replace('xiaomi_', 'xiaomi,')]}
+    if re.fullmatch(r'immortalwrt-imagebuilder(?:-[A-Za-z0-9_.+-]+)?-mediatek-filogic\.Linux-x86_64\.tar\.(?:xz|gz|zst)', filename):
+        return {'device': None, 'layout': None, 'kind': 'imagebuilder', 'supported_devices': []}
     if filename in BUILDINFO:
         return {'device': None, 'layout': None, 'kind': 'buildinfo', 'supported_devices': []}
     # Some releases name manifests per-device. Do not admit arbitrary *.manifest.
@@ -89,6 +91,10 @@ def _mandatory(records, profile):
         require(sum(x.get('device') == device and x.get('kind') == 'sysupgrade' for x in records) == 1,
                 f'firmware downloads require exactly one {layout} sysupgrade')
     require(sum(x.get('kind') == 'sdk' for x in records) == 1, 'firmware downloads require exactly one SDK')
+    if profile.get('asu', {}).get('enabled') is True:
+        require(sum(x.get('kind') == 'imagebuilder' for x in records) == 1, 'ASU firmware downloads require exactly one ImageBuilder')
+    else:
+        require(not any(x.get('kind') == 'imagebuilder' for x in records), 'ImageBuilder requires explicit ASU opt-in')
 
 
 def collect_firmware_assets(raw, profile, firmware_manifest):
@@ -110,6 +116,8 @@ def collect_firmware_assets(raw, profile, firmware_manifest):
     target = raw / 'bin/targets/mediatek/filogic'
     require(target.is_dir() and not target.is_symlink() and target.resolve().is_relative_to(raw.resolve()),
             'firmware target directory is absent or outside raw')
+    from imagebuilder import validate_artifact
+    validate_artifact(target, profile)
     native_path = target / 'profiles.json'
     require(native_path.is_file() and not native_path.is_symlink(), 'native firmware profiles.json missing')
     native = json.loads(native_path.read_text())
@@ -139,6 +147,11 @@ def collect_firmware_assets(raw, profile, firmware_manifest):
             native_images[name] = image
     sdk_filename = PurePosixPath(urlsplit(profile['sdk']['url']).path).name
     require(profile['sdk']['url'] == firmware_release_url(profile, sdk_filename), 'SDK URL is not this immutable generation')
+    ib = profile.get('imagebuilder')
+    if profile.get('asu', {}).get('enabled') is True:
+        require(isinstance(ib, dict) and set(ib) == {'url', 'sha256', 'size'}, 'ASU generation ImageBuilder identity missing')
+        ib_name = PurePosixPath(urlsplit(ib['url']).path).name
+        require(ib['url'] == firmware_release_url(profile, ib_name), 'ImageBuilder URL is not this immutable generation')
     records = []
     for path in sorted(target.iterdir()):
         if path.is_dir():
@@ -157,11 +170,15 @@ def collect_firmware_assets(raw, profile, firmware_manifest):
         require(0 < size < 2 * 1024 ** 3, f'download asset size outside Release limits: {path.name}')
         require(relative in inventory and inventory[relative].get('size') == size
                 and inventory[relative].get('sha256') == digest, f'firmware manifest hash/size mismatch: {path.name}')
-        if policy['kind'] not in ('sdk', 'buildinfo', 'manifest'):
+        if policy['kind'] not in ('sdk', 'imagebuilder', 'buildinfo', 'manifest'):
             require(path.name in native_images and native_images[path.name].get('sha256') == digest,
                     f'native image missing or checksum mismatch: {path.name}')
         if policy['kind'] == 'sdk':
             require(digest == profile['sdk']['sha256'], 'SDK checksum mismatch')
+        if policy['kind'] == 'imagebuilder':
+            require(profile.get('asu', {}).get('enabled') is True, 'ImageBuilder requires explicit ASU opt-in')
+            require(isinstance(ib, dict) and path.name == ib_name and digest == ib['sha256'] and size == ib['size'],
+                    'ImageBuilder checksum/size/generation mismatch')
         records.append({'path': relative, 'filename': path.name, **policy, 'size': size, 'sha256': digest})
     # GitHub Release names are case-insensitive. Native export retains both
     # checksum aliases; publish one only after authenticating both raw files.
@@ -183,12 +200,22 @@ def collect_firmware_assets(raw, profile, firmware_manifest):
 def validate_download_catalog(catalog, profile):
     validate_devices(profile)
     required = {'schema_version', 'channel', 'profile_id', 'build_id', 'firmware', 'sdk', 'assets'}
+    apk_fields = {'package_manager', 'apk_key_sha256'} if profile.get('package_manager') == 'apk' else set()
     require(isinstance(catalog, dict) and required <= catalog.keys()
-            and set(catalog) <= required | {'release'}, 'invalid download catalog fields')
+            and set(catalog) <= required | {'release', 'imagebuilder'} | apk_fields, 'invalid download catalog fields')
     require(catalog['schema_version'] == 1 and catalog['channel'] == profile['channel']
             and catalog['profile_id'] == profile['id'] and catalog['build_id'] == profile['build_id']
             and catalog['firmware'] == profile['firmware'] and catalog['sdk'] == profile['sdk'],
             'download catalog channel/source/ABI/SDK identity mismatch')
+    if apk_fields:
+        require(catalog.get('package_manager') == 'apk' and isinstance(profile.get('apk_key_sha256'), str)
+                and SHA.fullmatch(profile['apk_key_sha256']) and catalog.get('apk_key_sha256') == profile['apk_key_sha256'],
+                'download catalog APK manager/key identity mismatch')
+    if profile.get('asu', {}).get('enabled') is True:
+        require(catalog.get('imagebuilder') == profile.get('imagebuilder') and isinstance(catalog.get('imagebuilder'), dict),
+                'download catalog ImageBuilder identity mismatch')
+    else:
+        require('imagebuilder' not in catalog, 'legacy catalog must not add ImageBuilder')
     if 'release' in catalog:
         release = catalog['release']
         require(isinstance(release, dict) and set(release) == {'repository', 'id', 'tag', 'recipe_commit'}
@@ -213,6 +240,10 @@ def validate_download_catalog(catalog, profile):
             require(record['sha256'] == profile['sdk']['sha256'] and record['url'] == profile['sdk']['url'],
                     'catalog SDK identity mismatch')
         require(policy is not None and all(record[k] == v for k, v in policy.items()), 'foreign download artifact/layout')
+        if policy['kind'] == 'imagebuilder':
+            ib = profile.get('imagebuilder', {})
+            require(record['url'] == ib.get('url') and record['sha256'] == ib.get('sha256') and record['size'] == ib.get('size'),
+                    'catalog ImageBuilder identity mismatch')
         require(type(record['size']) is int and 0 < record['size'] < 2 * 1024 ** 3
                 and isinstance(record['sha256'], str) and SHA.fullmatch(record['sha256']), 'invalid download size/hash')
         require(record['url'] == firmware_release_url(profile, name), 'download URL is outside immutable generation')

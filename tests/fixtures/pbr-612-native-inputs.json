@@ -1,0 +1,41 @@
+{
+  "feeds": {
+    "amneziawg": "3f3ec68d594c8e965c988af75ac5314616229c88",
+    "luci": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+    "packages": "52ddbd11d66106615543af7352bf84ae20e5f1f8",
+    "routing": "23912fb99fc2fd0888466eb5f4f550651bc12aa3",
+    "telephony": "2618106d5846a4a542fdf5809f0d3ed228ce439b",
+    "video": "094bf58da6682f895255a35a84349a79dab4bf95"
+  },
+  "package_manager": "apk",
+  "pbr": {
+    "packages": {
+      "luci-app-pbr": {
+        "commit": "e49120a76b18b405bea795cccb1082628183dc02",
+        "repository": "https://github.com/mossdef-org/luci-app-pbr.git",
+        "sha256": "204548ec4bcff670e63436ccfd09b9f2ab0a97dae777b69a45113559fc213c84",
+        "url": "https://codeload.github.com/mossdef-org/luci-app-pbr/tar.gz/e49120a76b18b405bea795cccb1082628183dc02"
+      },
+      "pbr": {
+        "commit": "ea86bd467cbd5c11624c6d019fbd268227078640",
+        "repository": "https://github.com/mossdef-org/pbr.git",
+        "sha256": "f1140c8c9890cd5be282283b06a9d265a3a376354ea85ec082d6749c47f85032",
+        "url": "https://codeload.github.com/mossdef-org/pbr/tar.gz/ea86bd467cbd5c11624c6d019fbd268227078640"
+      }
+    },
+    "release": 2,
+    "translation_commit_timestamp": "2026-09-06T07:54:19Z",
+    "translation_package_manager": "apk",
+    "translation_version": "20260906.075419.1.2.4-r2",
+    "translations": {
+      "ru": {
+        "commit": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+        "feed": "luci",
+        "path": "applications/luci-app-pbr/po/ru/pbr.po",
+        "sha256": "ed1049819e3da2340d7a5202f850d5b77ac1df2d86682bf7ac56e66b4ec70c77"
+      }
+    },
+    "version": "1.2.4"
+  },
+  "schema_version": 1
+}

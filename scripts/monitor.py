@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Resolve compatible feed branches and official stable ARM64 Tailscale artifacts."""
+"""Resolve compatible feeds, official Tailscale and opt-in stable author PBR."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -60,7 +61,8 @@ def resolve_feed(feed):
 def recipe_digest():
     digest = hashlib.sha256()
     files = sorted([*ROOT.glob('scripts/*.py'), *ROOT.glob('scripts/*.sh'),
-                    *ROOT.glob('.github/workflows/*.yml')])
+                    *ROOT.glob('.github/workflows/*.yml'),
+                    *(path for path in (ROOT / 'files/asu-client').rglob('*') if path.is_file())])
     for path in files:
         digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
         digest.update(path.read_bytes() + b'\0')
@@ -71,7 +73,14 @@ def changed(previous, current):
     return previous != current
 
 
-def resolve(profile_path):
+def resolve_author_pbr(profile, feeds):
+    spec = importlib.util.spec_from_file_location('_ax6000_pbr_sources', ROOT / 'scripts/pbr_sources.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.resolve(profile, feeds)
+
+
+def resolve(profile_path, pinned_feeds=False):
     profile = json.loads(profile_path.read_text())
     if profile.get('schema_version') != 1:
         raise ValueError('Unsupported profile schema')
@@ -80,13 +89,29 @@ def resolve(profile_path):
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('Invalid Tailscale release manifest')
     checksum = fetch(f'https://pkgs.tailscale.com/stable/tailscale_{version}_arm64.tgz.sha256').decode()
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        feeds = dict(pool.map(resolve_feed, profile['feeds']))
-    return {'schema_version':1, 'profile_id':profile['id'],
+    if pinned_feeds:
+        # Native source patches and translation bytes must use the same reviewed
+        # pins. Resolve PBR only after these pins are fixed, never reset afterwards.
+        feeds = dict(resolve_feed(dict(feed, monitor_ref=None)) for feed in profile['feeds'])
+    else:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            feeds = dict(pool.map(resolve_feed, profile['feeds']))
+    result = {'schema_version':1, 'profile_id':profile['id'],
             'profile_sha256':hashlib.sha256(profile_path.read_bytes()).hexdigest(),
             'recipe_sha256':recipe_digest(), 'firmware':profile['firmware'],
             'sdk':profile['sdk'], 'feeds':feeds,
             'tailscale':tailscale_artifact(manifest, checksum)}
+    manager = profile.get('package_manager', 'opkg')
+    if manager not in ('opkg', 'apk'):
+        raise ValueError('Unsupported package manager')
+    if manager == 'apk':
+        key_hash = profile.get('apk_key_sha256')
+        if not isinstance(key_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', key_hash):
+            raise ValueError('APK profile requires a pinned public key SHA256')
+        result.update(package_manager='apk', apk_key_sha256=key_hash)
+    if profile.get('pbr_source') is not None:
+        result['pbr'] = resolve_author_pbr(profile, feeds)
+    return result
 
 
 def main():
@@ -94,8 +119,9 @@ def main():
     parser.add_argument('--profile', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--previous', type=Path)
+    parser.add_argument('--pinned-feeds', action='store_true', help='Use reviewed native feed commits before resolving package sources')
     args = parser.parse_args()
-    lock = resolve(args.profile)
+    lock = resolve(args.profile, pinned_feeds=args.pinned_feeds)
     previous = json.loads(args.previous.read_text()) if args.previous else None
     updated = changed(previous, lock)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +135,8 @@ def main():
                           f'Source inputs changed: **{updated}**.\n\n')
             for name, pin in lock['feeds'].items():
                 summary.write(f'- `{name}`: `{pin}`\n')
+            if 'pbr' in lock:
+                summary.write(f"- Author PBR/LuCI stable pair: **{lock['pbr']['version']}-r{lock['pbr']['release']}**\n")
     print(json.dumps({'changed':updated, 'tailscale':lock['tailscale']['version'], 'feeds':lock['feeds']}))
 
 

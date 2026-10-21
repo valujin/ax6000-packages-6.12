@@ -2,10 +2,13 @@
 """Validate exact-firmware SDK inputs and prepare package-only selections."""
 import argparse
 import hashlib
+import importlib.util
+from functools import lru_cache
 import json
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
+import platform
 import re
 import shutil
 import subprocess
@@ -23,9 +26,68 @@ CHANNEL_SOURCES = {
 }
 
 
+@lru_cache(maxsize=5)
+def optional_package_module(name):
+    # prepare.py is also imported by filename from publication tools/tests.
+    # Resolve the sibling explicitly instead of relying on global sys.path.
+    if name not in ('pbr_sources', 'vendor_country', 'asu_client', 'package_format', 'host_apk_bundle'):
+        raise ValueError('Unsupported optional package module')
+    spec = importlib.util.spec_from_file_location('_ax6000_' + name, Path(__file__).with_name(name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def pbr_source_module():
+    return optional_package_module('pbr_sources')
+
+
+def validate_package_hooks(profile):
+    if 'vendor_country_db' in profile:
+        require(type(profile['vendor_country_db']) is bool, 'vendor_country_db must be boolean')
+    if profile.get('asu') is not None:
+        return optional_package_module('asu_client').policy(profile)
+    return None
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def package_manager(profile):
+    value = profile.get('package_manager', 'opkg')
+    require(isinstance(value, str) and value in ('opkg', 'apk'), 'unsupported package_manager')
+    if value == 'apk':
+        return optional_package_module('package_format').manager(profile)
+    return value
+
+
+def read_package_control(path, apk=None):
+    if Path(path).suffix == '.apk':
+        control = dict(optional_package_module('package_format').read_control(path, apk=apk))
+        actual = control['Package']
+        control['APK-Name'] = actual
+        control['Package'] = control['Base-Package']
+        if actual != control['Package']:
+            provided = actual + ' (= ' + control['Version'] + ')'
+            control['Provides'] = ', '.join(filter(None, (control.get('Provides', ''), provided)))
+        return control
+    from publish import read_control
+    return read_control(path)
+
+
+def sdk_apk(profile, sdk):
+    """Return only the ABI-bound SDK's verified native HOST decoder, never a target apk."""
+    if package_manager(profile) != 'apk':
+        return None
+    manifest_path = sdk / 'ax6000-baseline/manifest.json'
+    require(manifest_path.is_file() and not manifest_path.is_symlink(), 'APK SDK requires its native baseline manifest')
+    manifest = json.loads(manifest_path.read_text())
+    require(manifest.get('package_manager') == 'apk', 'SDK baseline package manager differs from APK profile')
+    proof = manifest.get('host_apk')
+    return optional_package_module('host_apk_bundle').verify(sdk, proof)
+
 
 
 def package_only_packages(profile):
@@ -117,6 +179,7 @@ def validate_channel_inputs(profile, pins):
 
 def validate(profile, lock):
     require(isinstance(profile, dict), "profile must be an object")
+    package_manager(profile)
     require(profile.get("enabled") is True,
             "profile is disabled: collect the router ABI and exact firmware SDK before enabling")
     require(profile.get("schema_version") == 1, "unsupported profile schema_version")
@@ -163,6 +226,11 @@ def validate(profile, lock):
             re.fullmatch(r"[a-z]{2,3}(?:_[A-Za-z]{2,8})?", language) for language in languages)
             and len(set(languages)) == len(languages), "luci_languages must be a unique list of LuCI language codes")
     require(isinstance(lock, dict), "lock must be an object")
+    if 'package_manager' in lock:
+        require(lock['package_manager'] == package_manager(profile), 'lock package manager differs from its profile')
+    validate_package_hooks(profile)
+    if 'pbr_source' in profile or 'pbr' in lock:
+        pbr_source_module().validate(profile, lock)
     pins = feed_pins(profile, lock)
     validate_channel_inputs(profile, pins)
     overrides = package_overrides(lock)
@@ -271,6 +339,13 @@ $(eval $(call BuildPackage,tailscale))
 
 def apply_overrides(lock, sdk, profile):
     """Copy a pinned recipe, never rewrite the feed or global Go compiler."""
+    asu_policy = validate_package_hooks(profile)
+    if 'pbr_source' in profile or 'pbr' in lock:
+        pbr_source_module().apply(profile, lock, sdk)
+    if profile.get('vendor_country_db') is True:
+        optional_package_module('vendor_country').apply_vendor_country_patch(sdk)
+    if asu_policy is not None:
+        optional_package_module('asu_client').apply(profile, sdk)
     for name, override in package_overrides(lock).items():
         # Full source trees have feeds/base -> package and package/feeds aliases.
         # Count actual files once, while still rejecting two distinct recipes.
@@ -344,6 +419,23 @@ def check_kernel(profile, sdk):
     require((tree / "include/config/kernel.release").read_text().strip() == expected_version
             and vermagic == expected_vermagic,
             "SDK prepared kernel ABI differs from the running firmware; never force vermagic")
+    if package_manager(profile) == 'apk':
+        manifest_path = sdk / 'ax6000-baseline/manifest.json'
+        require(manifest_path.is_file() and not manifest_path.is_symlink(), 'APK SDK requires a native kernel context manifest')
+        context = json.loads(manifest_path.read_text()).get('kernel_context')
+        required = {'.config', 'Module.symvers', 'include/generated/autoconf.h', 'include/config/kernel.release'}
+        require(isinstance(context, dict) and context.get('path') == tree.relative_to(sdk).as_posix()
+                and isinstance(context.get('files'), dict) and set(context['files']) == required,
+                'APK SDK kernel context must bind the exact native tree and all four inputs')
+        for relative, expected in context['files'].items():
+            path = tree / relative
+            require(isinstance(expected, dict) and type(expected.get('size')) is int
+                    and isinstance(expected.get('sha256'), str) and SHA256.fullmatch(expected['sha256'])
+                    and path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(tree.resolve())
+                    and path.stat().st_size == expected['size'], 'APK SDK kernel context input differs: ' + relative)
+            with path.open('rb') as stream:
+                checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+            require(checksum == expected['sha256'], 'APK SDK kernel context checksum differs: ' + relative)
 
 
 def extract_sdk(archive, destination):
@@ -396,6 +488,9 @@ def luci_language_symbols(profile, sdk, value):
 
 def check_sdk_identity(profile, sdk):
     config = (sdk / ".config").read_text()
+    if package_manager(profile) == 'apk':
+        require(re.search(r'^CONFIG_USE_APK=y$', config, re.M), 'APK SDK must retain native CONFIG_USE_APK=y')
+        sdk_apk(profile, sdk)
     expected = {"TARGET_BOARD": profile["firmware"]["target"],
                 "TARGET_SUBTARGET": profile["firmware"]["subtarget"],
                 "TARGET_ARCH_PACKAGES": profile["firmware"]["architecture"]}
@@ -412,8 +507,11 @@ def baseline_packages(profile, sdk):
     directory = sdk / "ax6000-baseline"
     if not directory.exists():
         return {}
-    from publish import read_control, validate_package
+    from publish import validate_package
     manifest = json.loads((directory / "manifest.json").read_text())
+    manager = package_manager(profile)
+    require(manifest.get('package_manager', 'opkg') == manager, 'SDK baseline package manager differs from the exact profile')
+    apk = sdk_apk(profile, sdk)
     require(manifest.get("schema_version") == 1 and manifest.get("source_commit") == profile["firmware"]["commit"]
             and manifest.get("kernel_version") == profile["firmware"]["kernel_version"]
             and manifest.get("architecture") == profile["firmware"]["architecture"],
@@ -425,17 +523,24 @@ def baseline_packages(profile, sdk):
     require(isinstance(frozen_packages, list) and all(isinstance(name, str) and NAME.fullmatch(name)
             for name in frozen_packages) and len(frozen_packages) == len(set(frozen_packages))
             and set(frozen) <= set(frozen_packages), "invalid frozen package baseline list")
+    if manager == 'apk':
+        protected = manifest.get('protected_packages')
+        require(isinstance(protected, list) and all(isinstance(name, str) and NAME.fullmatch(name) for name in protected)
+                and len(protected) == len(set(protected)) and set(protected) <= set(frozen_packages)
+                and 'kernel' in protected, 'APK baseline must identify its protected native package bank')
     result = {}
     for entry in manifest["files"]:
         relative = PurePosixPath(entry["path"])
         require(not relative.is_absolute() and ".." not in relative.parts, "unsafe baseline package path")
         path = directory / relative
+        if manager == 'apk':
+            require(path.suffix == '.apk', 'APK baseline contains a foreign package format')
         require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(directory.resolve()),
                 "baseline package is missing or escapes SDK")
         with path.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         require(checksum == entry["sha256"], f"baseline checksum mismatch: {path.name}")
-        control = read_control(path)
+        control = read_package_control(path, apk=apk)
         require(control["Package"] == entry["package"] and control["Version"] == entry["version"],
                 f"baseline package identity mismatch: {path.name}")
         validate_package(control, profile)
@@ -449,6 +554,13 @@ def baseline_packages(profile, sdk):
     if "frozen_packages" in manifest:
         require(set(frozen_packages) == result.keys(), "baseline manifest omits listed frozen packages")
     return result
+
+
+def baseline_protected_packages(profile, sdk):
+    if package_manager(profile) != 'apk':
+        return set()
+    manifest = json.loads((sdk / 'ax6000-baseline/manifest.json').read_text())
+    return set(manifest['protected_packages'])
 
 
 def sdk_refresh_defaults(profile, sdk, baseline, selected):
@@ -484,7 +596,7 @@ def sdk_refresh_defaults(profile, sdk, baseline, selected):
         names = re.findall(r"^config PACKAGE_(\S+)\n\tdefault n\n\n", previous, re.M)
         require(set(names) <= baked_packages and len(names) == len(set(names))
                 and previous == header + declarations(names), "refusing foreign SDK refresh defaults file")
-    unwanted = baked_packages - set(profile["packages"]) - set(selected) - {"kernel"}
+    unwanted = baked_packages - set(profile["packages"]) - set(selected) - {"kernel"} - baseline_protected_packages(profile, sdk)
     if not includes:
         text = re.sub(r'^source "Config-build\.in"$', include + "\n" + original, text, flags=re.M)
     return output, header + declarations(unwanted), config, text
@@ -500,7 +612,8 @@ def select_packages(profile, sdk):
     # Frozen dependency packages remain available as fallback, but requested
     # userland packages must still refresh. Modules keep the exact prepared ABI.
     frozen_kmods = {name for name in baseline if name.startswith("kmod-")}
-    selected = sorted((requested | set(kmods)) - frozen_kmods - {"kernel"})
+    protected = baseline_protected_packages(profile, sdk)
+    selected = sorted((requested | set(kmods)) - frozen_kmods - protected - {"kernel"})
     config = sdk / ".config"
     require(config.is_file() and not config.is_symlink() and config.resolve().is_relative_to(sdk.resolve()),
             "SDK package configuration must be a regular file inside SDK")
@@ -527,7 +640,7 @@ def select_packages(profile, sdk):
     text = re.sub(r"^(?:CONFIG_PACKAGE_.*|# CONFIG_PACKAGE_.*)\n?", "", text, flags=re.M)
     if profile.get("channel") is not None:
         text = re.sub(r"^(?:CONFIG_USE_APK=.*|# CONFIG_USE_APK is not set)\n?", "", text, flags=re.M)
-        text += "\n# CONFIG_USE_APK is not set\n"
+        text += "\nCONFIG_USE_APK=y\n" if package_manager(profile) == 'apk' else "\n# CONFIG_USE_APK is not set\n"
     text = re.sub(r"^(?:CONFIG_(?:SDK|ALL|ALL_KMODS|ALL_NONSHARED|SIGNED_PACKAGES|BUILD_LOG|BUILDBOT|TARGET_ROOTFS_[A-Z0-9_]+)=.*|# CONFIG_(?:SDK|ALL|ALL_KMODS|ALL_NONSHARED|SIGNED_PACKAGES|BUILD_LOG|BUILDBOT|TARGET_ROOTFS_[A-Z0-9_]+) is not set)\n?", "", text, flags=re.M)
     if refresh:
         refresh_path, defaults, config_in, refreshed = refresh
@@ -547,29 +660,38 @@ def select_packages(profile, sdk):
     return report
 
 
-def native_dependency_groups(value, label):
+def native_dependency_groups(value, label, *, apk=False):
     groups = []
     if not value.strip():
         return groups
     for group in value.split(","):
         names = set()
         for alternative in group.split("|"):
-            match = re.fullmatch(r"\s*([A-Za-z0-9][A-Za-z0-9_.+\-]*)"
-                                 r"(?:\s*\((?:>=|<=|>>|<<|!=|=|>|<)\s*[^\s()]+\))?\s*", alternative)
+            conflict = apk and alternative.strip().startswith('!')
+            if conflict:
+                require('|' not in group and 'Provides' not in label,
+                        'APK conflict cannot be a dependency alternative or provider')
+                alternative = alternative.strip()[1:]
+            name_pattern = r'[A-Za-z0-9][A-Za-z0-9_.+:\-]*' if apk else r'[A-Za-z0-9][A-Za-z0-9_.+\-]*'
+            operators = r'>=|<=|>>|<<|!=|=|>|<|~' if apk else r'>=|<=|>>|<<|!=|=|>|<'
+            match = re.fullmatch(r'\s*(' + name_pattern + r')(?:\s*\((?:' + operators + r')\s*[^\s()]+\))?\s*', alternative)
             require(match is not None, f"invalid native {label}: {alternative!r}")
+            if conflict:
+                # APK conflicts constrain the solver but are not runtime dependency edges.
+                continue
             names.add(match[1])
-        groups.append(names)
+        if names:
+            groups.append(names)
     return groups
 
 
-def required_native_kmods(baseline, config):
+def required_native_kmods(baseline, config, *, apk=None):
     """Follow final verified controls: SDK menus omit native dependency edges."""
-    from publish import read_control
-    controls = {name: read_control(path) for name, path in baseline.items()}
+    controls = {name: read_package_control(path, apk=apk) for name, path in baseline.items()}
     providers = {}
     for name, control in controls.items():
         provided = {name}
-        for group in native_dependency_groups(control.get("Provides", ""), f"Provides for {name}"):
+        for group in native_dependency_groups(control.get("Provides", ""), f"Provides for {name}", apk=apk is not None):
             provided.update(group)
         for provided_name in provided:
             providers.setdefault(provided_name, set()).add(name)
@@ -584,7 +706,7 @@ def required_native_kmods(baseline, config):
         if name in closure:
             continue
         closure.add(name)
-        for group in native_dependency_groups(controls[name].get("Depends", ""), f"Depends for {name}"):
+        for group in native_dependency_groups(controls[name].get("Depends", ""), f"Depends for {name}", apk=apk is not None):
             if group & fixed:
                 continue
             candidates = set().union(*(providers.get(dependency, set()) for dependency in group))
@@ -605,7 +727,7 @@ def close_native(profile, sdk):
             and not report_path.is_symlink(), "native closure configuration/report must be regular SDK files")
     text = config.read_text()
     selected = set(re.findall(r"^CONFIG_PACKAGE_(.+)=[my]$", text, re.M))
-    required = required_native_kmods(baseline, text)
+    required = required_native_kmods(baseline, text, apk=sdk_apk(profile, sdk))
     refresh = sdk_refresh_defaults(profile, sdk, baseline, selected | required)
     snapshot = sdk / "Config-build.in"
     booleans = set(re.findall(r"^config (PACKAGE_[^\s]+)\n[ \t]+bool[ \t]*(?:\n|$)",
@@ -636,11 +758,15 @@ def verify_selection(profile, sdk):
     report = json.loads((sdk / "build-selection.json").read_text())
     config = (sdk / ".config").read_text()
     if profile.get("channel") is not None:
-        require("# CONFIG_USE_APK is not set\n" in config and not re.search(r"^CONFIG_USE_APK=[my]$", config, re.M),
-                "6.12 SDK must retain opkg/IPK; APK was enabled after defconfig")
+        if package_manager(profile) == 'apk':
+            require(bool(re.search(r'^CONFIG_USE_APK=y$', config, re.M))
+                    and '# CONFIG_USE_APK is not set\n' not in config, '6.12 APK SDK package manager changed after defconfig')
+        else:
+            require("# CONFIG_USE_APK is not set\n" in config and not re.search(r"^CONFIG_USE_APK=[my]$", config, re.M),
+                    "6.12 SDK must retain opkg/IPK; APK was enabled after defconfig")
     selected = set(re.findall(r"^CONFIG_PACKAGE_(.+)=[my]$", config, re.M))
     baseline = baseline_packages(profile, sdk)
-    required = required_native_kmods(baseline, config)
+    required = required_native_kmods(baseline, config, apk=sdk_apk(profile, sdk))
     require(required <= selected, "native dependency selection unresolved after defconfig: "
             + ", ".join(sorted(required - selected)))
     missing = sorted(set(profile["packages"]) - selected - baseline.keys())
@@ -659,18 +785,25 @@ def verify_selection(profile, sdk):
 
 
 def export_packages(profile, lock, sdk, output, sdk_archive=None):
-    """Merge frozen modules with freshly built packages by opkg package name."""
-    from publish import read_control, validate_package
+    """Merge exact frozen modules with fresh packages in the explicitly selected format."""
+    from publish import validate_package
     require(not output.exists(), "SDK output directory already exists")
     baseline = baseline_packages(profile, sdk)
-    built = list((sdk / "bin").rglob("*.ipk"))
-    require(bool(built), "SDK produced no .ipk packages")
+    manager = package_manager(profile)
+    apk = sdk_apk(profile, sdk)
+    extension = 'apk' if manager == 'apk' else 'ipk'
+    built = list((sdk / "bin").rglob('*.' + extension))
+    require(bool(built), 'SDK produced no .' + extension + ' packages')
+    if apk is not None:
+        require(not list((sdk / 'bin').rglob('*.ipk')), 'APK SDK output contains foreign IPK packages')
     packages = dict(baseline)
+    protected = baseline_protected_packages(profile, sdk)
     for path in sorted(built):
-        control = read_control(path)
+        control = read_package_control(path, apk=apk)
         validate_package(control, profile)
         name = control["Package"]
-        if name in baseline and (name.startswith("kmod-") or name == "kernel"):
+        if name in baseline and (name.startswith("kmod-") or name == "kernel"
+                                 or name in protected):
             continue
         packages[name] = path
     require(set(profile["packages"]) <= packages.keys(),
@@ -682,6 +815,23 @@ def export_packages(profile, lock, sdk, output, sdk_archive=None):
     for path in packages.values():
         shutil.copy2(path, package_dir / path.name)
     shutil.copy2(signer, output / "usign")
+    if apk is not None:
+        shutil.copy2(apk, output / 'apk')
+        baseline_manifest = sdk / 'ax6000-baseline/manifest.json'
+        proof = json.loads(baseline_manifest.read_text())['host_apk']
+        proof = dict(proof, sdk_sha256=profile['sdk']['sha256'], sdk_url=profile['sdk']['url'],
+                     baseline_manifest_sha256=hashlib.sha256(baseline_manifest.read_bytes()).hexdigest(),
+                     bundle_path='host-apk-bundle', exported_entrypoint_data_path='apk',
+                     executable_entrypoint_path=('apk' if proof['kind'] == 'native-elf-v1'
+                                                 else 'host-apk-bundle/' + proof['path']))
+        bundle = output / proof['bundle_path']
+        for entry in proof['files']:
+            target = bundle / entry['path']; target.parent.mkdir(parents=True, exist_ok=True)
+            if entry['type'] == 'symlink':
+                target.symlink_to(entry['target'])
+            else:
+                shutil.copy2(sdk / entry['path'], target)
+        (output / 'host-apk-proof.json').write_text(json.dumps(proof, indent=2, sort_keys=True) + '\n')
     shutil.copy2(sdk / "build-selection.json", output / "build-selection.json")
     firmware_assets = sdk / "ax6000-baseline/firmware"
     if firmware_assets.is_dir():
@@ -705,6 +855,10 @@ def export_packages(profile, lock, sdk, output, sdk_archive=None):
             (target / filename).write_text("".join(checksums))
     (output / "profile.json").write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n")
     generated_lock = dict(lock)
+    if manager == 'apk':
+        generated_lock['package_manager'] = 'apk'
+        if 'apk_key_sha256' in profile:
+            generated_lock['apk_key_sha256'] = profile['apk_key_sha256']
     generated_lock["profile_sha256"] = hashlib.sha256((output / "profile.json").read_bytes()).hexdigest()
     (output / "lock.json").write_text(json.dumps(generated_lock, indent=2, sort_keys=True) + "\n")
 

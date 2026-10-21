@@ -104,6 +104,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       enabled: ${{ steps.profiles.outputs.enabled }}
+      apk: ${{ steps.profiles.outputs.apk }}
+      apk_signing: ${{ steps.profiles.outputs.apk_signing }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -118,6 +120,8 @@ jobs:
           import subprocess
 
           enabled = False
+          apk = False
+          apk_signing = False
           for channel in ('recommended', 'latest'):
               generated = Path(f'profiles/redmi-ax6000-612-{channel}.json')
               profile = generated if generated.is_file() else Path(f'profiles/redmi-ax6000-612-{channel}-new.json')
@@ -128,6 +132,8 @@ jobs:
                   raise SystemExit('Channel/profile identity mismatch')
               active = generated.is_file() and data.get('enabled') is True
               enabled = enabled or active
+              apk = apk or (generated.is_file() and data.get("package_manager", "opkg") == "apk")
+              apk_signing = apk_signing or (active and data.get("package_manager", "opkg") == "apk")
               subprocess.run(['python3', 'scripts/monitor.py', '--profile', str(profile),
                               '--output', f'state/{channel}-monitored.json'], check=True)
               with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
@@ -135,6 +141,8 @@ jobs:
                       'publication disabled; verify firmware + exact SDK and initial signed snapshot before activation') + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'enabled={str(enabled).lower()}\n')
+              output.write(f'apk={str(apk).lower()}\n')
+              output.write(f'apk_signing={str(apk_signing).lower()}\n')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -162,7 +170,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang cmake flex bison gawk gettext git libjson-c-dev libncurses-dev \
-            libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev file wget curl zstd xz-utils
+            libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev file wget curl zstd xz-utils \
+            ninja-build pkg-config libzstd-dev
       - name: Build pinned official host usign
         run: |
           pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
@@ -174,24 +183,43 @@ jobs:
             -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
           python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
             --build "$RUNNER_TEMP/usign-build" --parallel 1
+      - name: Build pinned independent host APK
+        if: needs.monitor.outputs.apk == 'true'
+        run: |
+          python3 scripts/hosted-publication.py -- bash scripts/build-apk-host.sh --work-dir "$RUNNER_TEMP/apk-host"
+          printf 'AX6000_APK=%s\n' "$RUNNER_TEMP/apk-host/build/src/apk" >> "$GITHUB_ENV"
       - name: Refresh serial channel snapshots and compose the complete site
         id: refresh
         env:
           GH_TOKEN: ${{ github.token }}
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+          NEEDS_APK: ${{ needs.monitor.outputs.apk }}
+          NEEDS_APK_SIGNING: ${{ needs.monitor.outputs.apk_signing }}
           PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
           FORCE: ${{ inputs.force || false }}
         run: |
           [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
           key="$RUNNER_TEMP/opkg-signing.key"
-          trap 'rm -f "$key"' EXIT
+          apk_key="$RUNNER_TEMP/apk-signing.pem"
+          trap 'rm -f "$key" "$apk_key"' EXIT
           printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
           unset OPKG_SIGNING_KEY
           site="${PACKAGE_REPOSITORY_URL:-https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}}"
           args=(--site-url "$site" --repository "$GITHUB_REPOSITORY" \
             --profiles profiles --work-root "$RUNNER_TEMP/channel-refresh" --output public \
             --key "$key" --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign")
+          if [[ "$NEEDS_APK" == true ]]; then
+            [[ -x "${AX6000_APK:-}" ]] || { echo 'Trusted APK tool is required.' >&2; exit 1; }
+            args+=(--apk "$AX6000_APK")
+          fi
+          if [[ "$NEEDS_APK_SIGNING" == true ]]; then
+            [[ -n "$APK_SIGNING_KEY" && -f keys/repository-apk.pem ]] || { echo 'Set APK_SIGNING_KEY and pin its public key before APK publication.' >&2; exit 1; }
+            printf '%s\n' "$APK_SIGNING_KEY" > "$apk_key"
+            args+=(--apk-key "$apk_key" --apk-public-key keys/repository-apk.pem)
+          fi
+          unset APK_SIGNING_KEY
           if [[ "$FORCE" == true ]]; then args+=(--force); fi
           python3 scripts/hosted-publication.py -- python3 scripts/channel-snapshot.py refresh "${args[@]}"
       - name: Prepare Pages

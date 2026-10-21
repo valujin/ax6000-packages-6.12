@@ -191,8 +191,9 @@ def cpio(compressed):
         kind = stat.S_IFMT(mode)
         need(kind in (stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFIFO, stat.S_IFSOCK), 'CPIO member type')
         need(kind not in (stat.S_IFDIR, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFIFO, stat.S_IFSOCK) or size == 0, 'CPIO special member data')
-        capture = kind == stat.S_IFLNK or name == 'usr/lib/opkg/status' or (name.startswith('usr/lib/opkg/info/') and name.endswith('.list'))
-        need(not capture or size <= MIB, 'CPIO metadata cap')
+        capture = (kind == stat.S_IFLNK or name in ('usr/lib/opkg/status', 'lib/apk/db/installed')
+                   or (name.startswith(('usr/lib/opkg/info/', 'lib/apk/packages/')) and name.endswith('.list')))
+        need(not capture or size <= (4 * MIB if name == 'lib/apk/db/installed' else MIB), 'CPIO metadata cap')
         entries[name] = {'values': values, 'kind': kind, 'raw_sha256': sha(memoryview(data)[start:pos]),
                          'data_sha256': sha(content), 'size': size, 'data': bytes(content) if capture else None}
         total += size; need(total <= 256 * MIB, 'CPIO declared byte cap')
@@ -325,13 +326,60 @@ def status_packages(data):
     return result
 
 
+def apk_status_packages(data):
+    """Read APK's installed text DB offline, retaining actual ABI package names.
+
+    File ownership records (F/R/a/Z...) may repeat and are not package fields.
+    Logical aliases strip only the exact declared openwrt:abiversion suffix.
+    Neither apk scripts nor target APK executables are invoked.
+    """
+    need(isinstance(data, bytes) and 0 < len(data) <= 4 * MIB and data.endswith(b'\n\n'),
+         'APK installed database bounds/truncation')
+    result, bases = {}, set()
+    for paragraph in data.decode('utf-8').split('\n\n'):
+        if not paragraph.strip():
+            continue
+        fields, tags = {}, []
+        for line in paragraph.splitlines():
+            need(len(line) >= 2 and line[1] == ':' and line[0].isascii() and line[0].isalpha(),
+                 'Malformed APK installed database line')
+            key, value = line[0], line[2:]
+            if key in ('P', 'V', 'A', 'D', 'p'):
+                need(key not in fields, 'Duplicate APK installed identity field')
+                fields[key] = value
+            elif key == 'g':
+                tags.extend(value.split())
+        name, version, arch = (fields.get(key, '') for key in ('P', 'V', 'A'))
+        need(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+:-]*', name)
+             and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+~:-]*', version)
+             and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_+-]*', arch), 'Malformed APK installed identity')
+        need(name not in result, 'Duplicate APK installed Package')
+        abi = [tag.split('=', 1)[1] for tag in tags if tag.startswith('openwrt:abiversion=')]
+        need(len(abi) <= 1 and (not abi or (abi[0] and len(name) > len(abi[0]) and name.endswith(abi[0]))),
+             'APK installed ABI suffix tag mismatch')
+        base = name[:-len(abi[0])] if abi else name
+        need(base not in bases, 'Duplicate APK installed logical package')
+        bases.add(base)
+        record = {'Package': name, 'APK-Name': name, 'Base-Package': base,
+                  'Version': version, 'Architecture': arch, 'Status': 'install ok installed'}
+        if abi:
+            record['ABIVersion'] = abi[0]
+        if 'D' in fields:
+            record['APK-Depends'] = fields['D']
+        if 'p' in fields:
+            record['APK-Provides'] = fields['p']
+        result[name] = record
+    need(result, 'Empty APK installed database')
+    return result
+
+
 def assert_absent(package_names, installed, paths, symlinks=None):
     """Use actual file inventory/status, never infer absence from source selections."""
     paths = set(paths)
     for package in package_names:
         need(package in PACKAGE_PATHS and package not in installed, 'package_only is installed: ' + package)
         need(not paths & PACKAGE_PATHS[package], 'package_only payload remains in image: ' + package)
-        need(not any(name.startswith('usr/lib/opkg/info/' + package + '.') for name in paths),
+        need(not any(name.startswith(('usr/lib/opkg/info/' + package + '.', 'lib/apk/packages/' + package + '.')) for name in paths),
              'package_only metadata remains in image: ' + package)
         need(not any(name.startswith('etc/rc.d/') and name.rsplit('/', 1)[-1].endswith(package) for name in paths),
              'package_only service symlink remains in image: ' + package)
@@ -341,7 +389,7 @@ def assert_absent(package_names, installed, paths, symlinks=None):
 
 
 def verify_native_factory(ram_fit, factory_ubi, *, package_only=(), expected_packages=None,
-                          expected_dtb_sha256=None, kernel_inputs=None):
+                          expected_dtb_sha256=None, kernel_inputs=None, package_manager='opkg', expected_files=None, expected_hashes=None):
     """Require factory's one kernel volume to be the exact native full RAM FIT.
 
     kernel_inputs are trusted KDIR/Image-initramfs* snapshots, distinct from
@@ -352,11 +400,35 @@ def verify_native_factory(ram_fit, factory_ubi, *, package_only=(), expected_pac
     blobs = fit(ram)
     geometry = ubi(factory, ram, blobs['timestamp'])
     entries = cpio(blobs['ramdisk'])
-    need('usr/lib/opkg/status' in entries, 'Initramfs opkg status absent')
-    installed = status_packages(entries['usr/lib/opkg/status']['data'])
+    need(package_manager in ('opkg', 'apk'), 'Unsupported factory package manager')
+    database = 'lib/apk/db/installed' if package_manager == 'apk' else 'usr/lib/opkg/status'
+    other = 'usr/lib/opkg/status' if package_manager == 'apk' else 'lib/apk/db/installed'
+    need(database in entries and other not in entries, 'Initramfs package database absent or mixed manager')
+    installed = (apk_status_packages if package_manager == 'apk' else status_packages)(entries[database]['data'])
+    if package_manager == 'apk':
+        need('usr/bin/apk' in entries and not any(name in entries for name in ('bin/opkg', 'usr/bin/opkg')),
+             'Initramfs APK executable absent or OPKG executable retained')
+        need(any(name.startswith('etc/apk/keys/') and name.endswith('.pem') for name in entries),
+             'Initramfs APK PEM public key absent')
+        need('etc/apk/repositories.d/distfeeds.list' in entries, 'Initramfs APK repository list absent')
+        need('etc/apk/world' in entries, 'Initramfs APK world policy absent')
+    for name, (expected, mode) in (expected_files or {}).items():
+        need(name in entries, 'Initramfs trusted overlay absent: ' + name)
+        item = entries[name]
+        need(item['kind'] == stat.S_IFREG and item['data_sha256'] == sha(expected)
+             and item['size'] == len(expected) and item['values'][1] & 0o7777 == mode
+             and item['values'][2:4] == (0, 0), 'Initramfs trusted overlay differs: ' + name)
+    for name, digest in (expected_hashes or {}).items():
+        need(re.fullmatch(r'[0-9a-f]{64}', digest) and name in entries,
+             'Initramfs expected feature hash/path absent: ' + name)
+        item = entries[name]
+        need(item['kind'] == stat.S_IFREG and item['data_sha256'] == digest
+             and item['values'][2:4] == (0, 0) and not item['values'][1] & 0o022,
+             'Initramfs optional feature bytes/owner/mode differ: ' + name)
     symlinks = {name: item['data'] for name, item in entries.items() if item['kind'] == stat.S_IFLNK}
     assert_absent(package_only, installed, entries, symlinks)
-    for name in ESSENTIAL:
+    essential = ESSENTIAL + (('usr/bin/apk',) if package_manager == 'apk' else ())
+    for name in essential:
         need(name in entries, 'Initramfs essential absent: ' + name)
         item = entries[name]
         if item['kind'] == stat.S_IFLNK:
@@ -395,7 +467,10 @@ def verify_native_factory(ram_fit, factory_ubi, *, package_only=(), expected_pac
             'kernel_sha256': kernel_sha, 'compressed_kernel_sha256': sha(blobs['kernel']),
             'fdt_sha256': sha(blobs['flat_dt']), 'ramdisk_sha256': sha(blobs['ramdisk']),
             'kernel_inputs_matched': matched, 'installed_packages': sorted(installed),
-            'package_only_absent': list(package_only), 'essential_paths': list(ESSENTIAL),
+            'package_only_absent': list(package_only), 'essential_paths': list(essential),
+            'package_manager': package_manager, 'package_database': database,
+            'verified_overlay_files': sorted(expected_files or {}),
+            'verified_feature_files': sorted(expected_hashes or {}),
             'cpio_entries': len(entries), 'ubi_geometry': geometry,
             'hardware_boot_verified': False, 'flash_verified': False}
 

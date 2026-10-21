@@ -1,0 +1,33 @@
+{
+  "66": {
+    "commit": "ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8",
+    "files": {
+      "wireless-mtk.js": {
+        "path": "package/mtk/applications/luci-app-mtwifi-cfg/root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js",
+        "sha256": "8042a4d59f860be53a9af8f8ded10d1c84170541144c59ce08d4e283602ee78b"
+      },
+      "Makefile": {
+        "path": "package/mtk/applications/luci-app-mtwifi-cfg/Makefile",
+        "sha256": "05ac6b5bb37b89b46972f57cc7aaf257010a47cdafa2a5210682f7ab50b73be0"
+      }
+    },
+    "repository": "https://github.com/padavanonly/immortalwrt-mt798x-6.6",
+    "license": "GPL-2.0 (original package notices retained in fixture bytes)"
+  },
+  "612": {
+    "commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+    "files": {
+      "wireless-mtk.js": {
+        "path": "package/mtk/applications/luci-app-mtwifi-cfg/root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js",
+        "sha256": "08daedef19f06474ec8b196581ac617cd1157cdca2fc1120943f0ac6ab388cdf"
+      },
+      "Makefile": {
+        "path": "package/mtk/applications/luci-app-mtwifi-cfg/Makefile",
+        "sha256": "1dc93acd6bf75f9f6c20b302ec171af59b64254c3689cea5d2acbb685f2d697a"
+      }
+    },
+    "identical_latest_commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
+    "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase",
+    "license": "GPL-2.0 (original package notices retained in fixture bytes)"
+  }
+}

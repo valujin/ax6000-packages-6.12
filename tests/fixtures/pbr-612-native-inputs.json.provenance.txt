@@ -1,0 +1,2 @@
+Unmodified actual source lock from pbr-612-native-inputs.json, with APK translation version validated by actual apk-tools 3.0.5.
+SHA256: 24ef5943dd0d555cd14c47704928b68d6abb48ccc9ff8989faa8be82663b4317

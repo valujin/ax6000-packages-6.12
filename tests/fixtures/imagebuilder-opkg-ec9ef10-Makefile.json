@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/padavanonly/immortalwrt-mt798x-6.6",
+  "commit": "ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8",
+  "path": "target/imagebuilder/files/Makefile",
+  "sha256": "22b48d9868bede84061a7979514be43cf8ec860937d1b1684ceb0fd20021f2d6",
+  "license": "GPL-2.0-only"
+}

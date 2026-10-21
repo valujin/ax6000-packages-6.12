@@ -23,6 +23,20 @@ MAX_ASSET = 2 * 1024 ** 3 - 1
 MAX_MEMBERS = 100000
 METADATA = {'profile.json','repository.pub','downloads.json','downloads.sig','index.html','.nojekyll',
             'build-selection.json','build-provenance.json','firmware-manifest.json','build.config'}
+APK_METADATA = {'profile.sig', 'repository-apk.pem', 'native-providers.json'}
+
+
+def apk_options(apk):
+    return {} if apk is None else {'apk': apk}
+
+
+def apk_publication_args(profile, apk, apk_key, apk_public_key):
+    if module('package_format').manager(profile) != 'apk':
+        return []
+    if any(value is None for value in (apk, apk_key, apk_public_key)):
+        raise ValueError('APK publication requires --apk, --apk-key and --apk-public-key')
+    module('publish').validate_apk_signer(profile, apk_key, apk_public_key)
+    return ['--apk', str(apk), '--apk-key', str(apk_key), '--apk-public-key', str(apk_public_key)]
 
 
 def module(name):
@@ -95,19 +109,29 @@ def channel_identity(profile,lock,channel,repository):
         raise ValueError('Profile/lock generation mismatch')
     if lock.get('feeds',{}).get('base') != profile['firmware']['commit']:
         raise ValueError('Moving or mismatched base feed')
+    if module('package_format').manager(profile)=='apk':
+        if lock.get('package_manager')!='apk' or lock.get('apk_key_sha256')!=profile.get('apk_key_sha256'):
+            raise ValueError('Channel APK profile/lock identity mismatch')
 
 
 def cohort(profile):
-    return {key:profile[key] for key in ('id','channel','build_id','firmware','sdk')}
+    result = {key:profile[key] for key in ('id','channel','build_id','firmware','sdk')}
+    if profile.get('package_manager', 'opkg') == 'apk':
+        result.update(package_manager='apk', apk_key_sha256=profile.get('apk_key_sha256'))
+    return result
 
 
 
-def validate_generation_replacement(old,new,expected_build_id):
+def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_migration=False,migration_proof=None):
     """Authorize one same-ABI cohort replacement, never a moving kernel update."""
     if not expected_build_id or old.get('build_id')!=expected_build_id:
         raise ValueError('Replacement predecessor build ID differs from explicit authorization')
     if new.get('build_id')==expected_build_id or new.get('sdk')==old.get('sdk'):
         raise ValueError('Replacement must have a new build ID and SDK')
+    if allow_asu_apk_migration:
+        validate_asu_apk_migration(old,new)
+        validate_migration_proof(old,new,migration_proof)
+        return
     allowed={'build_id','sdk','image_packages','package_only'}
     if {k:v for k,v in old.items() if k not in allowed}!={k:v for k,v in new.items() if k not in allowed}:
         raise ValueError('Replacement changes profile/source/kernel ABI/architecture/layouts or requested packages')
@@ -120,12 +144,89 @@ def validate_generation_replacement(old,new,expected_build_id):
         raise ValueError('Replacement must retain the downloadable Tailscale package')
 
 
-def restored_identity(restored,pointer,channel,repository,public_key,usign):
+def validate_asu_apk_migration(old,new):
+    """One explicit OPKG→new-firmware APK/ASU transition with fixed source ABI.
+
+    This authorization only widens the reviewed manual publication path. Daily
+    composition still rejects every generation change. It does not authorize
+    changing requested applications or replacing a live router's package manager.
+    """
+    allowed={'build_id','sdk','imagebuilder','asu','package_manager','apk_key_sha256',
+             'pbr_source','vendor_country_db','packages','image_packages','package_only'}
+    if {k:v for k,v in old.items() if k not in allowed}!={k:v for k,v in new.items() if k not in allowed}:
+        raise ValueError('ASU/APK migration changes source/kernel ABI/architecture/layouts or unrelated policy')
+    if old.get('package_manager','opkg')!='opkg' or new.get('package_manager')!='apk' or old.get('asu') is not None:
+        raise ValueError('ASU/APK migration requires an existing OPKG generation and a new APK generation')
+    policy=module('asu_client').policy(new)
+    if policy is None or policy['cohort']!='612-'+new['channel']:
+        raise ValueError('ASU/APK migration requires the exact cohort ASU policy')
+    if new.get('pbr_source')!='mossdef-stable' or new.get('vendor_country_db') is not True:
+        raise ValueError('ASU/APK migration requires reviewed PBR and vendor country policies')
+    if new.get('apk_key_sha256')!=sha256_file(ROOT/'keys/repository-apk.pem'):
+        raise ValueError('ASU/APK migration APK key differs from reviewed repository key')
+    ib=new.get('imagebuilder',{})
+    if (not isinstance(ib,dict) or not re.fullmatch(r'[a-f0-9]{64}',ib.get('sha256',''))
+            or type(ib.get('size')) is not int or ib['size']<=0
+            or not ib.get('url','').startswith('https://github.com/'+new['publication']['repository']+'/releases/download/firmware-'+new['build_id']+'/')):
+        raise ValueError('ASU/APK migration requires a new immutable matching ImageBuilder')
+    required=set(module('asu_client').REQUIRED_PACKAGES)
+    for field in ('packages','image_packages'):
+        before=old.get(field);after=new.get(field)
+        if (not isinstance(before,list) or not isinstance(after,list) or len(after)!=len(set(after))
+                or set(after)!=set(before)|required or [name for name in after if name not in required]!=before):
+            raise ValueError('ASU/APK migration may add only the reviewed three ASU client packages')
+    if old.get('package_only')!=['tailscale'] or new.get('package_only')!=['tailscale'] or 'tailscale' in new['image_packages']:
+        raise ValueError('ASU/APK migration must preserve the Tailscale package-only policy')
+
+
+def validate_migration_proof(old,new,proof):
+    """Require an operator-supplied actual native byte comparison receipt.
+
+    The receipt is local reviewed authorization, not a replacement for archive
+    verification. The required Image hash is over the uncompressed kernel bytes
+    extracted from each real firmware image, never over an APK/IPK container.
+    """
+    if not isinstance(proof,dict):
+        raise ValueError('ASU/APK migration requires an explicit native migration proof')
+    expected={'schema_version':1,'kind':'asu-apk-native-migration',
+              'predecessor_build_id':old['build_id'],'successor_build_id':new['build_id'],
+              'source_commit':old['firmware']['commit'],'kernel_version':old['firmware']['kernel_version']}
+    if any(proof.get(key)!=value for key,value in expected.items()):
+        raise ValueError('Native migration proof differs from the exact authorized generations')
+    context=proof.get('kernel_context')
+    required={'.config','Module.symvers','arch/arm64/boot/Image'}
+    if not isinstance(context,dict) or not required <= set(context) or set(context)-required-{'vmlinux'}:
+        raise ValueError('Native migration proof requires kernel configuration, symbols and actual Image bytes')
+    for name,item in context.items():
+        if not isinstance(item,dict) or set(item)!={'before','after'} or item['before']!=item['after']:
+            raise ValueError('Native kernel byte comparison differs: '+name)
+        identity=item['before']
+        if (not isinstance(identity,dict) or set(identity)!={'sha256','size'}
+                or not re.fullmatch(r'[a-f0-9]{64}',identity.get('sha256',''))
+                or type(identity.get('size')) is not int or identity['size']<=0):
+            raise ValueError('Invalid native kernel comparison identity: '+name)
+    patches=proof.get('source_patches')
+    if (not isinstance(patches,dict) or set(patches)!={'before','after'}
+            or not isinstance(patches['before'],list) or patches['before']!=patches['after']):
+        raise ValueError('Native migration proof source patches differ')
+
+
+def validate_migration_manifests(old_tree,new_tree,proof):
+    for phase,tree,build_id in [('before',old_tree,proof['predecessor_build_id']),
+                                ('after',new_tree,proof['successor_build_id'])]:
+        manifest=read_json(Path(tree)/'firmware-manifest.json')
+        if (manifest.get('build_id')!=build_id or manifest.get('source_commit')!=proof['source_commit']
+                or manifest.get('kernel_version')!=proof['kernel_version']
+                or manifest.get('source_patches',[])!=proof['source_patches'][phase]):
+            raise ValueError('Native migration proof differs from actual '+phase+' firmware manifest')
+
+
+def restored_identity(restored,pointer,channel,repository,public_key,usign,*,apk=None):
     restored=Path(restored)
     verify(restored/'snapshot-manifest.json',restored/'snapshot-manifest.sig',public_key,usign)
     manifest=read_json(restored/'snapshot-manifest.json')
     validate_pointer(pointer,read_json(restored/'release.json'))
-    profile,lock,files=validate_channel(restored/'channel',channel,repository,public_key,usign)
+    profile,lock,files=validate_channel(restored/'channel',channel,repository,public_key,usign,**apk_options(apk))
     if manifest.get('files')!=files or sha256_file(restored/'snapshot-manifest.json')!=pointer.get('manifest_sha256'):
         raise ValueError('Restored channel/pointer mismatch')
     if any(pointer.get(k)!=manifest.get(k) for k in ('channel','profile_id','build_id','kernel_version')):
@@ -139,6 +240,9 @@ def catalog_identity(tree,profile,public_key,usign):
     for key,expected in [('channel',profile['channel']),('profile_id',profile['id']),('build_id',profile['build_id']),
                          ('firmware',profile['firmware']),('sdk',profile['sdk'])]:
         if catalog.get(key) != expected:raise ValueError('Download catalog/profile mismatch')
+    if profile.get('package_manager','opkg')=='apk':
+        if catalog.get('package_manager')!='apk' or catalog.get('apk_key_sha256')!=profile.get('apk_key_sha256'):
+            raise ValueError('Download catalog APK manager/key differs from profile')
     release=catalog.get('release',{})
     repository=profile['publication']['repository']
     if release.get('repository') != repository or release.get('tag') != 'firmware-'+profile['build_id']:
@@ -178,16 +282,19 @@ def safe_name(name):
 
 def channel_files(tree,profile):
     files=[];total=0
+    fmt=module('package_format');manager=fmt.manager(profile);suffix=fmt.suffix(profile)
+    metadata=METADATA | (APK_METADATA if manager=='apk' else set())
     feed_prefix=f'feeds/{profile["id"]}/{profile["firmware"]["kernel_version"]}/'
     for path in sorted(Path(tree).rglob('*')):
         if path.is_symlink() or (not path.is_file() and not path.is_dir()):
             raise ValueError('Snapshot links and special files are forbidden')
         if path.is_dir():continue
         name=path.relative_to(tree).as_posix();safe_name(name)
-        if name not in METADATA and name!='state/lock.json':
+        if name not in metadata and name!='state/lock.json':
             if not name.startswith(feed_prefix):raise ValueError('Unexpected snapshot file')
             leaf=name[len(feed_prefix):]
-            if '/' in leaf or (leaf not in {'Packages','Packages.gz','Packages.sig'} and not re.fullmatch(r'[A-Za-z0-9_.+~-]+\.ipk',leaf)):
+            indexes={'Packages','Packages.gz','Packages.sig'} | ({'packages.adb'} if manager=='apk' else set())
+            if '/' in leaf or (leaf not in indexes and not re.fullmatch(r'[A-Za-z0-9_.+~-]+\.'+suffix,leaf)):
                 raise ValueError('Unexpected feed file')
         total+=path.stat().st_size
         if total > MAX_SITE or len(files) >= MAX_MEMBERS:raise ValueError('Snapshot exceeds size/member bounds')
@@ -207,8 +314,36 @@ def index_fields(text):
     return fields
 
 
-def validate_feed(tree,profile,public_key,usign):
+def native_provider_identity(tree,profile):
+    inventory=read_json(tree/'native-providers.json')
+    expected={'schema_version':1,'kind':'native-providers','profile_id':profile['id'],
+              'build_id':profile.get('build_id'),'sdk_sha256':profile.get('sdk',{}).get('sha256'),
+              'kernel_version':profile['firmware']['kernel_version'],
+              'architecture':profile['firmware']['architecture']}
+    if any(inventory.get(key)!=value for key,value in expected.items()):
+        raise ValueError('Native provider inventory differs from exact firmware/SDK cohort')
+    records=inventory.get('packages')
+    if not isinstance(records,list) or len(records)>100:
+        raise ValueError('Invalid native essential package inventory')
+    publisher=module('publish');provided=set();names=set()
+    required={'Package','Base-Package','APK-Name','Version','Architecture','Filename','Size','SHA256sum'}
+    for record in records:
+        if not isinstance(record,dict) or not required<=set(record) or set(record)-required-{'ABIVersion','Provides'}:
+            raise ValueError('Invalid native essential package record')
+        if not all(isinstance(value,str) for value in record.values()):
+            raise ValueError('Invalid native essential package fields')
+        if (record['Filename']!=record['Package']+'-'+record['Version']+'.apk'
+                or not re.fullmatch(r'[A-Za-z0-9_.+~-]+\.apk',record['Filename'])
+                or not re.fullmatch(r'[1-9][0-9]*',record['Size'])
+                or not re.fullmatch(r'[a-f0-9]{64}',record['SHA256sum']) or record['Package'] in names):
+            raise ValueError('Duplicate or invalid native essential package identity')
+        provided.update(publisher.native_provider_names(record,profile));names.add(record['Package'])
+    return provided
+
+
+def validate_feed(tree,profile,public_key,usign,*,apk=None):
     feed=tree/'feeds'/profile['id']/profile['firmware']['kernel_version']
+    fmt=module('package_format');manager=fmt.manager(profile);suffix=fmt.suffix(profile)
     verify(feed/'Packages',feed/'Packages.sig',public_key,usign)
     if (feed/'Packages').stat().st_size > 8*1024**2:raise ValueError('Index too large')
     index=(feed/'Packages').read_bytes()
@@ -217,47 +352,58 @@ def validate_feed(tree,profile,public_key,usign):
     publisher=module('publish');names=set();filenames=set();controls=[]
     for paragraph in index.decode().strip().split('\n\n'):
         fields=index_fields(paragraph);filename=fields.get('Filename','')
-        if not re.fullmatch(r'[A-Za-z0-9_.+~-]+\.ipk',filename) or filename in filenames:
+        if not re.fullmatch(r'[A-Za-z0-9_.+~-]+\.'+suffix,filename) or filename in filenames:
             raise ValueError('Unsafe or duplicate index filename')
         package=feed/filename
         if not package.is_file() or str(package.stat().st_size)!=fields.get('Size') or sha256_file(package)!=fields.get('SHA256sum'):
             raise ValueError('Index package checksum/size mismatch')
-        control=publisher.read_control(package);publisher.validate_package(control,profile)
-        if any(fields.get(k)!=v for k,v in control.items()):raise ValueError('Index differs from IPK control')
-        if control['Package'] in names or control['Package'] in {'kernel','libc','base-files','busybox','opkg'}:
+        control=publisher.read_control(package,**apk_options(apk));publisher.validate_package(control,profile)
+        if any(fields.get(k)!=v for k,v in publisher.index_control(control).items()):raise ValueError('Index differs from package control')
+        if manager=='apk' and filename != control['Package']+'-'+control['Version']+'.apk':
+            raise ValueError('APK filename differs from native name/version')
+        if control['Package'] in names or publisher.protected_package(control,profile):
             raise ValueError('Duplicate or protected package')
         names.add(control['Package']);filenames.add(filename);controls.append(control)
-    if not controls or {p.name for p in feed.glob('*.ipk')} != filenames:
+    if not controls or {p.name for p in feed.glob('*.'+suffix)} != filenames:
         raise ValueError('Incomplete or empty feed inventory')
-    provided=set(names)|{'kernel','libc','base-files','busybox','opkg'}
+    if manager=='apk':
+        publisher.verify_apk_index(feed,profile,apk,tree/'repository-apk.pem',controls)
+    provided=set(names)|(publisher.APK_PROTECTED if manager=='apk' else publisher.PROTECTED)
+    if manager=='apk':
+        provided.update(native_provider_identity(tree,profile))
     for control in controls:
-        provided.update(re.findall(r'(?:^|,)\s*([A-Za-z0-9_.+-]+)',control.get('Provides','')))
+        provided.update(re.findall(r'(?:^|,)\s*([A-Za-z0-9_.+:-]+)',control.get('Provides','')))
     for control in controls:
         for dep in control.get('Depends','').split(','):
             if not dep.strip():continue
-            alternatives=[re.match(r'\s*([A-Za-z0-9_.+-]+)',item) for item in dep.split('|')]
+            if manager=='apk' and dep.strip().startswith('!'):continue
+            pattern=r'\s*([A-Za-z0-9_.+:-]+)' if manager=='apk' else r'\s*([A-Za-z0-9_.+-]+)'
+            alternatives=[re.match(pattern,item) for item in dep.split('|')]
             if not alternatives or any(match is None for match in alternatives) or not any(match[1] in provided for match in alternatives):
                 raise ValueError(f'Unresolved package dependency: {control["Package"]}: {dep}')
 
 
-def validate_channel(tree,channel,repository,public_key,usign):
+def validate_channel(tree,channel,repository,public_key,usign,*,apk=None):
     tree=Path(tree);profile=read_json(tree/'profile.json');lock=read_json(tree/'state/lock.json')
     if tree.is_symlink() or not tree.is_dir():raise ValueError('Channel root must be a regular directory')
     channel_identity(profile,lock,channel,repository)
+    if module('package_format').manager(profile)=='apk':
+        verify(tree/'profile.json',tree/'profile.sig',public_key,usign)
+        module('publish').validate_apk_key(profile,tree/'repository-apk.pem')
     if lock.get('profile_sha256') != sha256_file(tree/'profile.json'):raise ValueError('Profile checksum mismatch')
     publisher=module('publish')
     if publisher.public_key_payload((tree/'repository.pub').read_text()) != publisher.public_key_payload(Path(public_key).read_text()):
         raise ValueError('Snapshot key differs from trusted key')
     files=channel_files(tree,profile)
     catalog_identity(tree,profile,public_key,usign)
-    validate_feed(tree,profile,public_key,usign)
+    validate_feed(tree,profile,public_key,usign,**apk_options(apk))
     return profile,lock,files
 
 
-def pack_snapshot(tree,channel,repository,recipe_commit,key,public_key,usign,output):
+def pack_snapshot(tree,channel,repository,recipe_commit,key,public_key,usign,output,*,apk=None):
     output=fresh(output);signing_key(key,public_key)
     if not re.fullmatch(r'[a-f0-9]{40}',recipe_commit):raise ValueError('Invalid recipe commit')
-    profile,lock,files=validate_channel(Path(tree),channel,repository,public_key,usign)
+    profile,lock,files=validate_channel(Path(tree),channel,repository,public_key,usign,**apk_options(apk))
     manifest={'schema_version':1,'kind':'channel-snapshot','repository':repository,'channel':channel,
               'profile_id':profile['id'],'build_id':profile['build_id'],'kernel_version':profile['firmware']['kernel_version'],
               'sdk_sha256':profile['sdk']['sha256'],'recipe_commit':recipe_commit,
@@ -317,7 +463,7 @@ def validate_pointer(pointer,release):
     return assets
 
 
-def restore_snapshot(archive,pointer,before,after,expected,public_key,usign,output):
+def restore_snapshot(archive,pointer,before,after,expected,public_key,usign,output,*,apk=None):
     output=fresh(output);archive=Path(archive)
     assets=validate_pointer(pointer,before);validate_pointer(pointer,after)
     def identity(release):
@@ -351,7 +497,7 @@ def restore_snapshot(archive,pointer,before,after,expected,public_key,usign,outp
         manifest=read_json(work/'snapshot-manifest.json')
         if sha256_file(work/'snapshot-manifest.json')!=pointer['manifest_sha256']:
             raise ValueError('Signed manifest differs from pointer')
-        profile,lock,files=validate_channel(work/'channel',pointer['channel'],manifest.get('repository'),public_key,usign)
+        profile,lock,files=validate_channel(work/'channel',pointer['channel'],manifest.get('repository'),public_key,usign,**apk_options(apk))
         if manifest.get('kind')!='channel-snapshot' or manifest.get('schema_version')!=1 or manifest.get('files')!=files:
             raise ValueError('Snapshot inventory differs')
         for key,value in [('channel',profile['channel']),('profile_id',profile['id']),('build_id',profile['build_id']),('kernel_version',profile['firmware']['kernel_version'])]:
@@ -375,7 +521,7 @@ def read_state(path,signature,repository,public_key,usign):
     return state
 
 
-def compose_site(live_state,live_signature,channels,repository,key,public_key,usign,output,*,bootstrap=False,replacements=None):
+def compose_site(live_state,live_signature,channels,repository,key,public_key,usign,output,*,bootstrap=False,replacements=None,apk=None,allow_asu_apk_migration=False,migration_proof=None):
     output=fresh(output);signing_key(key,public_key)
     if live_state is None:
         if not bootstrap or live_signature is not None:raise ValueError('Explicit bootstrap required')
@@ -394,14 +540,16 @@ def compose_site(live_state,live_signature,channels,repository,key,public_key,us
             if old is not None:raise ValueError('Cannot remove an existing channel')
             continue
         restored,pointer=channels[channel];restored=Path(restored)
-        profile,files=restored_identity(restored,pointer,channel,repository,public_key,usign)
+        profile,files=restored_identity(restored,pointer,channel,repository,public_key,usign,**apk_options(apk))
         if channel in replacements:
             predecessor,expected_build_id=replacements[channel]
             old_tree,old_pointer=predecessor
             if old is None or old_pointer!=old:
                 raise ValueError('Replacement predecessor differs from authenticated live pointer')
-            old_profile,_=restored_identity(old_tree,old_pointer,channel,repository,public_key,usign)
-            validate_generation_replacement(old_profile,profile,expected_build_id)
+            old_profile,_=restored_identity(old_tree,old_pointer,channel,repository,public_key,usign,**apk_options(apk))
+            validate_generation_replacement(old_profile,profile,expected_build_id,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof)
+            if allow_asu_apk_migration:
+                validate_migration_manifests(Path(old_tree)/'channel',restored/'channel',migration_proof)
         elif old is not None and any(old.get(k)!=pointer.get(k) for k in ('profile_id','build_id','kernel_version')):
             raise ValueError('Daily publication cannot switch firmware generation')
         total+=sum(item['size'] for item in files)
@@ -425,7 +573,7 @@ def asset_record(path,name=None):
     return {'name':name or path.name,'path':str(path.absolute()),'size':path.stat().st_size,'sha256':sha256_file(path)}
 
 
-def publish_snapshot(plan_path,repository,public_key,usign,output):
+def publish_snapshot(plan_path,repository,public_key,usign,output,*,apk=None):
     output=fresh(output);plan=read_json(plan_path)
     if plan.get('repository')!=repository or plan.get('kind')!='channel-snapshot':raise ValueError('Wrong snapshot plan repository/kind')
     if plan.get('tag')!='packages-'+plan.get('channel','')+'-'+plan.get('manifest_sha256',''):
@@ -446,7 +594,7 @@ def publish_snapshot(plan_path,repository,public_key,usign,output):
     with tempfile.TemporaryDirectory(prefix='ax6000-plan-check-') as temporary:
         expected=profile_from_archive(Path(by_name['channel.tar.zst']['path']))
         restored=Path(temporary)/'restored'
-        restore_snapshot(Path(by_name['channel.tar.zst']['path']),pointer,fake,fake,expected,public_key,usign,restored)
+        restore_snapshot(Path(by_name['channel.tar.zst']['path']),pointer,fake,fake,expected,public_key,usign,restored,**apk_options(apk))
         if read_json(restored/'snapshot-manifest.json')['recipe_commit']!=plan.get('recipe_commit'):
             raise ValueError('Snapshot plan recipe differs from signed manifest')
     release=api.publish_release(plan)
@@ -473,7 +621,7 @@ def profile_from_archive(archive):
         process.wait()
 
 
-def restore_online(pointer,expected,repository,public_key,usign,output):
+def restore_online(pointer,expected,repository,public_key,usign,output,*,apk=None):
     output=fresh(output)
     api=module('publication_api').ReleaseAPI(repository)
     before=api.get_release(pointer['release_id'])
@@ -484,7 +632,7 @@ def restore_online(pointer,expected,repository,public_key,usign,output):
         archive=Path(temporary)/'channel.tar.zst'
         api.download_asset(before,assets['channel.tar.zst'],archive,pointer['archive_sha256'],pointer['archive_size'])
         after=api.get_release(pointer['release_id'])
-        restore_snapshot(archive,pointer,before,after,expected,public_key,usign,output)
+        restore_snapshot(archive,pointer,before,after,expected,public_key,usign,output,**apk_options(apk))
         manifest=read_json(output/'snapshot-manifest.json')
         if api.resolve_tag_commit(pointer['tag'])!=manifest['recipe_commit']:
             shutil.rmtree(output)
@@ -531,6 +679,10 @@ def publish_generation(raw,expected_profile,archive,checksum,repository,key,publ
             catalog={'schema_version':1,'channel':profile['channel'],'profile_id':profile['id'],'build_id':profile['build_id'],
                      'firmware':profile['firmware'],'sdk':profile['sdk'],'assets':assets,
                      'release':{'repository':repository,'id':release['id'],'tag':plan['tag'],'recipe_commit':recipe}}
+            if profile.get('asu',{}).get('enabled') is True:
+                catalog['imagebuilder']=profile['imagebuilder']
+            if profile.get('package_manager','opkg')=='apk':
+                catalog.update(package_manager='apk',apk_key_sha256=profile['apk_key_sha256'])
             module('firmware_layouts').validate_download_catalog(catalog,profile)
             (work/'downloads.json').write_bytes(canonical_json(catalog))
             sign(work/'downloads.json',work/'downloads.sig',key,public_key,usign)
@@ -568,7 +720,7 @@ def fetch_live(site_url,repository,public_key,usign,output,*,bootstrap=False):
     return read_state(output/'site-state.json',output/'site-state.sig',repository,public_key,usign)
 
 
-def restore_live_channels(state,profiles,repository,public_key,usign,work):
+def restore_live_channels(state,profiles,repository,public_key,usign,work,*,apk=None):
     result={}
     if state is None:return result
     for channel in CHANNELS:
@@ -577,15 +729,15 @@ def restore_live_channels(state,profiles,repository,public_key,usign,work):
         profile=Path(profiles)/('redmi-ax6000-612-'+channel+'.json')
         if not profile.is_file():raise ValueError('Missing expected generated profile for live channel')
         output=Path(work)/('restored-'+channel)
-        restore_online(pointer,read_json(profile),repository,public_key,usign,output)
+        restore_online(pointer,read_json(profile),repository,public_key,usign,output,**apk_options(apk))
         result[channel]=(output,pointer)
     return result
 
 
-def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,force=False,bootstrap=False):
+def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,force=False,bootstrap=False,apk=None,apk_key=None,apk_public_key=None):
     work=fresh(work);output=fresh(output);signing_key(key,public_key);work.mkdir(parents=True)
     previous=fetch_live(site_url,repository,public_key,usign,work/'live',bootstrap=bootstrap)
-    restored=restore_live_channels(previous,profiles,repository,public_key,usign,work)
+    restored=restore_live_channels(previous,profiles,repository,public_key,usign,work,**apk_options(apk))
     changed=False;failures=[]
     for channel in CHANNELS:
         profile_path=Path(profiles)/('redmi-ax6000-612-'+channel+'.json')
@@ -609,6 +761,7 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
             if old and read_json(lock)==read_json(old[0]/'channel/state/lock.json') and not force:
                 print(f'{channel}: unchanged');shutil.rmtree(owned);continue
             if old is None:raise ValueError('Publish initial firmware generation and snapshot before enabling daily builds')
+            apk_args=apk_publication_args(profile,apk,apk_key,apk_public_key)
             raw=owned/'raw'
             subprocess.run(['bash',str(ROOT/'scripts/build.sh'),'--profile',str(profile_path),'--lock',str(lock),
                             '--work-dir',str(owned/'sdk'),'--output-dir',str(raw)],check=True)
@@ -618,12 +771,12 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
             subprocess.run(['python3',str(ROOT/'scripts/publish.py'),'--profile',str(profile_path),'--input',str(raw),
                             '--output',str(owned/'staged'),'--lock',str(lock),'--key',str(key),'--public-key',str(public_key),
                             '--usign',str(usign),'--external-assets',str(old[0]/'channel/downloads.json'),
-                            '--external-assets-signature',str(old[0]/'channel/downloads.sig'),'--generation-release-metadata',str(owned/'generation.json')],check=True)
+                            '--external-assets-signature',str(old[0]/'channel/downloads.sig'),'--generation-release-metadata',str(owned/'generation.json'),*apk_args],check=True)
             recipe=os.environ.get('AX6000_RECIPE_COMMIT') or subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip()
-            pack_snapshot(owned/'staged',channel,repository,recipe,key,public_key,usign,owned/'packed')
-            pointer=publish_snapshot(owned/'packed/snapshot-plan.json',repository,public_key,usign,owned/'published')
+            pack_snapshot(owned/'staged',channel,repository,recipe,key,public_key,usign,owned/'packed',**apk_options(apk))
+            pointer=publish_snapshot(owned/'packed/snapshot-plan.json',repository,public_key,usign,owned/'published',**apk_options(apk))
             new=work/('new-restored-'+channel)
-            restore_online(pointer,profile,repository,public_key,usign,new)
+            restore_online(pointer,profile,repository,public_key,usign,new,**apk_options(apk))
             restored[channel]=(new,pointer);changed=True
             # This fixed, newly created channel root is ours. Never remove source trees.
             shutil.rmtree(owned)
@@ -642,7 +795,7 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
         if failures:raise ValueError('No channel refresh succeeded')
         return None
     compose_site(None if previous is None else work/'live/site-state.json',None if previous is None else work/'live/site-state.sig',
-                 restored,repository,key,public_key,usign,output,bootstrap=previous is None)
+                 restored,repository,key,public_key,usign,output,bootstrap=previous is None,**apk_options(apk))
     latest=fetch_live(site_url,repository,public_key,usign,work/'live-recheck',bootstrap=previous is None)
     if latest!=previous:raise ValueError('Live predecessor changed; do not deploy')
     deployment_record(work,output,site_url,previous is None)
@@ -678,33 +831,38 @@ def fetch_generation(tag,repository,public_key,usign,output):
     return output
 
 
-def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,work,key,public_key,usign,output,*,bootstrap=False,replace_build_id=None):
+def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,work,key,public_key,usign,output,*,bootstrap=False,replace_build_id=None,apk=None,apk_key=None,apk_public_key=None,allow_asu_apk_migration=False,migration_proof=None):
     work=fresh(work);output=fresh(output);work.mkdir(parents=True)
     profile=read_json(Path(raw)/'profile.json');channel=profile['channel']
+    if allow_asu_apk_migration and replace_build_id is None:
+        raise ValueError('--allow-asu-apk-migration requires --replace-build-id')
     previous=fetch_live(site_url,repository,public_key,usign,work/'live',bootstrap=bootstrap)
-    restored=restore_live_channels(previous,profiles,repository,public_key,usign,work)
+    restored=restore_live_channels(previous,profiles,repository,public_key,usign,work,**apk_options(apk))
     old=restored.get(channel)
     replacements={}
     if replace_build_id is not None:
         if bootstrap or old is None:raise ValueError('Replacement requires an authenticated live predecessor')
-        old_profile,_=restored_identity(old[0],old[1],channel,repository,public_key,usign)
-        validate_generation_replacement(old_profile,profile,replace_build_id)
+        old_profile,_=restored_identity(old[0],old[1],channel,repository,public_key,usign,**apk_options(apk))
+        validate_generation_replacement(old_profile,profile,replace_build_id,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof)
+        if allow_asu_apk_migration:
+            validate_migration_manifests(Path(old[0])/'channel',raw,migration_proof)
         replacements[channel]=(old,replace_build_id)
     elif old and cohort(read_json(old[0]/'channel/profile.json'))!=cohort(profile):
         raise ValueError('Manual generation migration requires --replace-build-id')
+    apk_args=apk_publication_args(profile,apk,apk_key,apk_public_key)
     subprocess.run(['python3',str(ROOT/'scripts/publish.py'),'--profile',str(Path(raw)/'profile.json'),
                     '--input',str(raw),'--output',str(work/'staged'),'--lock',str(Path(raw)/'lock.json'),
                     '--key',str(key),'--public-key',str(public_key),'--usign',str(usign),
                     '--external-assets',str(catalog),'--external-assets-signature',str(signature),
-                    '--generation-release-metadata',str(metadata)],check=True)
+                    '--generation-release-metadata',str(metadata),*apk_args],check=True)
     recipe=os.environ.get('AX6000_RECIPE_COMMIT') or subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip()
-    pack_snapshot(work/'staged',channel,repository,recipe,key,public_key,usign,work/'packed')
-    pointer=publish_snapshot(work/'packed/snapshot-plan.json',repository,public_key,usign,work/'released')
+    pack_snapshot(work/'staged',channel,repository,recipe,key,public_key,usign,work/'packed',**apk_options(apk))
+    pointer=publish_snapshot(work/'packed/snapshot-plan.json',repository,public_key,usign,work/'released',**apk_options(apk))
     restored_channel=work/('new-restored-'+channel)
-    restore_online(pointer,profile,repository,public_key,usign,restored_channel)
+    restore_online(pointer,profile,repository,public_key,usign,restored_channel,**apk_options(apk))
     restored[channel]=(restored_channel,pointer)
     compose_site(None if previous is None else work/'live/site-state.json',None if previous is None else work/'live/site-state.sig',
-                 restored,repository,key,public_key,usign,output,bootstrap=previous is None,replacements=replacements)
+                 restored,repository,key,public_key,usign,output,bootstrap=previous is None,replacements=replacements,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof,**apk_options(apk))
     latest=fetch_live(site_url,repository,public_key,usign,work/'live-recheck',bootstrap=previous is None)
     if latest!=previous:raise ValueError('Live predecessor changed; do not deploy')
     deployment_record(work,output,site_url,previous is None)
@@ -779,7 +937,10 @@ def main():
     def common(p,*,secret=False):
         p.add_argument('--repository',required=True);p.add_argument('--public-key',required=True,type=Path)
         p.add_argument('--usign',required=True,type=Path);p.add_argument('--output',required=True,type=Path)
+        p.add_argument('--apk',type=Path,help='Trusted host APK tool for APK snapshots')
         if secret:p.add_argument('--key',required=True,type=Path)
+        if secret:
+            p.add_argument('--apk-key',type=Path);p.add_argument('--apk-public-key',type=Path)
     pack=sub.add_parser('pack');common(pack,secret=True)
     pack.add_argument('--channel',choices=CHANNELS,required=True);pack.add_argument('--input',type=Path,required=True);pack.add_argument('--recipe-commit',required=True)
     gen=sub.add_parser('publish-generation');common(gen,secret=True)
@@ -800,31 +961,33 @@ def main():
     publish=sub.add_parser('publish-channel');common(publish,secret=True)
     for name in ('raw','external-assets','external-assets-signature','generation-release-metadata','work-root'):publish.add_argument('--'+name,type=Path,required=True)
     publish.add_argument('--replace-build-id',help='Replace exactly this authenticated live build, preserving source/kernel ABI/layouts')
+    publish.add_argument('--migration-proof',type=Path,help='Reviewed actual old/new native kernel byte comparison JSON')
+    publish.add_argument('--allow-asu-apk-migration',action='store_true',help='Explicitly authorize the reviewed additive ASU/APK firmware migration')
     publish.add_argument('--site-url',required=True);publish.add_argument('--profiles',type=Path,default=ROOT/'profiles');publish.add_argument('--bootstrap',action='store_true')
     check=sub.add_parser('verify-deployment');check.add_argument('--check',type=Path,required=True);check.add_argument('--phase',choices=('before','after'),required=True)
     args=parser.parse_args()
     try:
         if args.command=='verify-deployment':verify_deployment(args.check,args.phase)
         elif args.command=='fetch-generation':fetch_generation(args.release_tag,args.repository,args.public_key,args.usign,args.output)
-        elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap,replace_build_id=args.replace_build_id)
-        elif args.command=='pack':pack_snapshot(args.input,args.channel,args.repository,args.recipe_commit,args.key,args.public_key,args.usign,args.output)
+        elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap,replace_build_id=args.replace_build_id,allow_asu_apk_migration=args.allow_asu_apk_migration,migration_proof=None if args.migration_proof is None else read_json(args.migration_proof),apk=args.apk,apk_key=args.apk_key,apk_public_key=args.apk_public_key)
+        elif args.command=='pack':pack_snapshot(args.input,args.channel,args.repository,args.recipe_commit,args.key,args.public_key,args.usign,args.output,**apk_options(args.apk))
         elif args.command=='publish-generation':publish_generation(args.raw,args.expected_profile,args.raw_archive,args.checksum,args.repository,args.key,args.public_key,args.usign,args.output,resume_draft_id=args.resume_draft_id)
-        elif args.command=='publish-snapshot':publish_snapshot(args.plan,args.repository,args.public_key,args.usign,args.output)
+        elif args.command=='publish-snapshot':publish_snapshot(args.plan,args.repository,args.public_key,args.usign,args.output,**apk_options(args.apk))
         elif args.command=='restore':
             pointer=read_json(args.pointer);expected=read_json(args.expected_profile)
             offline=(args.archive,args.release_before,args.release_after)
             if any(offline):
                 if not all(offline):raise ValueError('Offline restore requires archive and before/after metadata')
-                restore_snapshot(args.archive,pointer,read_json(args.release_before),read_json(args.release_after),expected,args.public_key,args.usign,args.output)
-            else:restore_online(pointer,expected,args.repository,args.public_key,args.usign,args.output)
+                restore_snapshot(args.archive,pointer,read_json(args.release_before),read_json(args.release_after),expected,args.public_key,args.usign,args.output,**apk_options(args.apk))
+            else:restore_online(pointer,expected,args.repository,args.public_key,args.usign,args.output,**apk_options(args.apk))
         elif args.command=='compose':
             channels={}
             for channel in CHANNELS:
                 tree=getattr(args,channel);pointer=getattr(args,channel+'_pointer')
                 if bool(tree)!=bool(pointer):raise ValueError('Channel directory and pointer are paired')
                 if tree:channels[channel]=(tree,read_json(pointer))
-            compose_site(args.live_state,args.live_signature,channels,args.repository,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap)
-        elif args.command=='refresh':refresh(args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,force=args.force,bootstrap=args.bootstrap)
+            compose_site(args.live_state,args.live_signature,channels,args.repository,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap,**apk_options(args.apk))
+        elif args.command=='refresh':refresh(args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,force=args.force,bootstrap=args.bootstrap,apk=args.apk,apk_key=args.apk_key,apk_public_key=args.apk_public_key)
         elif args.command=='read-live':fetch_live(args.site_url,args.repository,args.public_key,args.usign,args.output,bootstrap=args.bootstrap)
     except (ValueError,OSError,subprocess.CalledProcessError,tarfile.TarError,KeyError) as error:
         parser.exit(1,f'channel-snapshot: {error}\n')

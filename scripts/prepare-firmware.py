@@ -4,6 +4,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -19,6 +20,123 @@ import tempfile
 import prepare
 import firmware_layouts
 from publish import read_control
+
+
+def sibling_module(name):
+    """Load opt-in helpers from this recipe, even with importlib-based callers."""
+    prepare.require(name in {"asu_client", "imagebuilder", "monitor", "package_format", "apk_world"}, "unsupported native helper")
+    path = Path(__file__).resolve().with_name(name + ".py")
+    spec = importlib.util.spec_from_file_location("ax6000_native_" + name, path)
+    prepare.require(spec is not None and spec.loader is not None, "native helper unavailable: " + name)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def asu_policy(profile):
+    if "asu" not in profile:
+        return None
+    helper = sibling_module("asu_client")
+    policy = helper.policy(profile)
+    expected = "612-" + profile["channel"] if profile.get("channel") else "66"
+    prepare.require(policy["cohort"] == expected, "ASU cohort differs from source firmware channel")
+    required = set(helper.REQUIRED_PACKAGES)
+    prepare.require(required <= set(profile.get("packages", []))
+                    and required <= set(profile.get("image_packages", [])),
+                    "ASU client packages must be requested and installed in the image")
+    return policy
+
+
+def asu_symbols(profile):
+    policy = asu_policy(profile)
+    if policy is None:
+        return {}
+    values = {"IB": "y", "IB_STANDALONE": "y", "SIGNATURE_CHECK": "y"}
+    # 6.6 BUILDBOT overrides standalone and silently drops most native packages.
+    if policy["cohort"] == "66":
+        values["BUILDBOT"] = "n"
+        values.update({"PACKAGE_opkg": "y", "USE_APK": "n"})
+        values.update({"PACKAGE_" + name: "n" for name in ("apk", "apk-mbedtls", "apk-openssl")})
+    return values
+
+
+def verify_asu(profile, source):
+    if asu_policy(profile) is None:
+        return
+    config = (source / ".config").read_text()
+    for symbol, value in asu_symbols(profile).items():
+        active = re.findall(r"^CONFIG_" + re.escape(symbol) + r"=(.+)$", config, re.M)
+        prepare.require(active == [value] if value != "n" else not active,
+                        f"ASU configuration requires {symbol}={value}")
+    sibling_module("asu_client").configure(profile, source, check_only=True)
+
+
+def native_seed(profile):
+    """Pre-build seed: source profile, recipe fingerprint and fixed contract; no SDK cycle.
+
+    Canonical UTF-8 JSON uses sorted keys and compact separators. Only asu.seed
+    is omitted. This is called on source profiles while SDK and kernel ABI are
+    null; monitor.recipe_digest binds scripts, workflows and ASU assets. The
+    generated profile later binds the seed to actual SDK/IB identities.
+    """
+    inputs = copy.deepcopy(profile)
+    inputs["asu"].pop("seed", None)
+    payload = {"recipe_contract": "ax6000-native-asu-v1", "source_profile": inputs,
+               "recipe_sha256": sibling_module("monitor").recipe_digest()}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def firmware_bank_assets(archive):
+    """The SDK carries images, never the separately exported native ImageBuilder."""
+    return [asset for asset in sorted(archive.parent.iterdir())
+            if asset.is_file() and asset != archive and not asset.name.endswith(".partial")
+            and asset.name not in {"sha256sums", "SHA256SUMS"}
+            and "imagebuilder" not in asset.name.lower()]
+
+
+def firmware_asset_url(profile, filename):
+    if profile.get("channel") is not None:
+        return firmware_layouts.firmware_release_url(profile, filename)
+    publication = profile.get("publication", {})
+    prepare.require(publication.get("repository") == "valujin/ax6000-packages"
+                    and publication.get("firmware_assets") == "github-release",
+                    "ASU firmware requires the approved immutable Release repository")
+    build_id = profile.get("build_id", "")
+    prepare.require(isinstance(build_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,180}", build_id),
+                    "invalid ASU firmware build ID")
+    prepare.require(Path(filename).name == filename and filename not in {"", ".", ".."}, "invalid firmware asset name")
+    return f"https://github.com/valujin/ax6000-packages/releases/download/firmware-{build_id}/{filename}"
+
+
+def export_imagebuilder(generated, source, helper=None):
+    if asu_policy(generated) is None:
+        return
+    target = source / "bin/targets/mediatek/filogic"
+    archives = sorted(path for path in target.iterdir()
+                      if "imagebuilder" in path.name.lower() and ".tar" in path.name.lower())
+    prepare.require(len(archives) == 1, "native ASU build must produce exactly one ImageBuilder archive")
+    archive = archives[0]
+    prepare.require(archive.is_file() and not archive.is_symlink()
+                    and archive.resolve().is_relative_to(source.resolve())
+                    and not any(parent.is_symlink() for parent in archive.parents
+                                if parent != source and parent.is_relative_to(source)),
+                    "native ImageBuilder archive must be a regular source file")
+    prepare.require(re.fullmatch(r"immortalwrt-imagebuilder(?:-[A-Za-z0-9_.+-]+)?-mediatek-filogic\.Linux-x86_64\.tar\.(?:xz|gz|zst)", archive.name),
+                    "unrecognized native ImageBuilder archive filename")
+    url = firmware_asset_url(generated, archive.name)
+    helper = helper or sibling_module("imagebuilder")
+    apk = generated.get("package_manager", "opkg") == "apk"
+    extra = {"public_apk_key": Path(__file__).resolve().parents[1] / "keys/repository-apk.pem",
+             "apk": source / "staging_dir/host/bin/apk"} if apk else {}
+    result = helper.export_archive(generated, source, archive,
+                                   public_key=Path(__file__).resolve().parents[1] / "keys/repository.pub",
+                                   signing_key=source / ("private-key.pem" if apk else "key-build"),
+                                   native_public_key=source / ("public-key.pem" if apk else "key-build.pub"),
+                                   usign=source / "staging_dir/host/bin/usign", normalizer=normalize_local_sdk, **extra)
+    generated["imagebuilder"] = {"url": url,
+                                 "sha256": result["sha256"], "size": result["size"]}
+    helper.validate_artifact(target, generated)
 
 
 def validate(profile, lock):
@@ -55,11 +173,16 @@ def validate(profile, lock):
                 prepare.require(pins.get(patch["feed_name"]) == patch["feed_commit"],
                                 f"source build {patch['feed_name']} pin differs from reviewed patch input")
     ssl_symbols(profile)
+    policy = asu_policy(profile)
+    if policy is not None and profile.get("sdk", {}).get("url") is None:
+        prepare.require(policy["seed"] == native_seed(profile), "ASU source profile seed differs from its reviewed recipe inputs")
     return profile
 
 
 def configure(profile, lock, source):
     validate(profile, lock)
+    if profile.get("package_manager") == "apk":
+        sibling_module("apk_world").configure_source(profile, source)
     repository_files(source, profile=profile)
     pins = prepare.feed_pins(profile, lock)
     (source / "feeds.conf").write_text("".join(
@@ -83,7 +206,10 @@ def configure(profile, lock, source):
         values["TARGET_DEVICE_mediatek_filogic_DEVICE_" + device] = "y"
         values["TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_" + device] = '"-kmod-mt7915e -kmod-mt7986-firmware"'
     values.update(source_symbols(profile))
+    values.update(asu_symbols(profile))
     (source / ".config").write_text(set_symbols(config, values))
+    if asu_policy(profile) is not None:
+        sibling_module("asu_client").configure(profile, source)
 
 
 def source_symbols(profile):
@@ -93,10 +219,14 @@ def source_symbols(profile):
     installed = {"kmod-mt_wifi", "kmod-conninfra", "kmod-warp", "kmod-mediatek_hnat",
                  "kmod-leds-ws2812b", "mtwifi-cfg-ucode", "iwinfo-ucode", "ucode-mod-iwinfo",
                  "ucode-mod-datconf", "ucode-mod-l1parser", "wifi-dats", "libiwinfo",
-                 "luci-app-mtwifi-cfg", "opkg"}
+                 "luci-app-mtwifi-cfg"}
+    apk = profile.get("package_manager", "opkg") == "apk"
+    prepare.require(profile.get("package_manager", "opkg") in {"opkg", "apk"}, "unsupported native package manager")
+    installed.update({"apk-openssl", "openwrt-keyring", "usign"} if apk else {"opkg"})
+    disabled = {"iwinfo", "mtwifi-cfg", "apk", "apk-mbedtls"} | ({"opkg"} if apk else {"apk-openssl"})
     values = {"PACKAGE_" + name: "y" for name in installed}
-    values.update({"PACKAGE_" + name: "n" for name in ("iwinfo", "mtwifi-cfg", "apk", "apk-mbedtls", "apk-openssl")})
-    values.update({"WIFI_SCRIPTS_UCODE": "y", "USE_APK": "n", "CLEAN_IPKG": "n",
+    values.update({"PACKAGE_" + name: "n" for name in disabled})
+    values.update({"WIFI_SCRIPTS_UCODE": "y", "USE_APK": "y" if apk else "n", "CLEAN_IPKG": "n",
                    "TARGET_ROOTFS_SQUASHFS": "y", "TARGET_ROOTFS_INITRAMFS": "y",
                    "TARGET_ROOTFS_INITRAMFS_SEPARATE": "y", "TARGET_INITRAMFS_COMPRESSION_XZ": "y"})
     for symbol in ("TARGET_ROOTFS_EXT4FS", "TARGET_ROOTFS_JFFS2", "TARGET_ROOTFS_EROFS", "TARGET_ROOTFS_TARGZ",
@@ -107,33 +237,65 @@ def source_symbols(profile):
     return values
 
 
-def repository_files(source, check_only=False, profile=None):
-    """Override moving official feeds; connect the verified feed with install-feed.sh."""
-    public = (Path(__file__).resolve().parents[1] / "keys/repository.pub").read_bytes()
-    lines = public.decode("ascii").splitlines()
-    prepare.require(len(lines) == 2 and lines[0].startswith("untrusted comment:"), "invalid repository public key")
-    data = base64.b64decode(lines[1], validate=True)
-    prepare.require(len(data) == 42 and data[:2] == b"Ed", "invalid repository public key")
-    fingerprint = data[2:10].hex()
-    installer = (Path(__file__).resolve().parent / "install-feed.sh").read_bytes()
-    prepare.require(b"expected_fingerprint=" + fingerprint.encode() + b"\n" in installer,
-                    "bundled installer signing key differs from repository key")
-    if profile is not None and profile.get("channel") is not None:
-        firmware_layouts.validate_devices(profile)
-        default = b"base=${PACKAGE_REPOSITORY_URL:-https://valujin.github.io/ax6000-packages}"
-        prepare.require(installer.count(default) == 1, "bundled installer default URL differs from reviewed template")
-        base = profile["publication"]["site_url"].rstrip("/") + "/channels/" + profile["channel"]
-        prepare.require(base == "https://valujin.github.io/ax6000-packages-6.12/channels/" + profile["channel"],
-                        "untrusted channel installer URL")
-        installer = installer.replace(default, b"base=${PACKAGE_REPOSITORY_URL:-" + base.encode() + b"}")
-    files = {
-        "files/etc/opkg/distfeeds.conf":
-            b"# Packages for this firmware require its exact kernel ABI.\n"
-            b"# Connect the signed matching repository with ax6000-install-feed.\n"
-            b"# Moving official snapshot feeds are deliberately not configured.\n",
-        "files/etc/opkg/keys/" + fingerprint: public,
+def apk_repository_files(profile):
+    """Tag public userspace feeds; native world pins protect the installed stack."""
+    firmware_layouts.validate_devices(profile)
+    prepare.require(sibling_module("package_format").manager(profile) == "apk", "APK overlay requires its explicit cohort")
+    root = Path(__file__).resolve().parents[1]
+    public = (root / "keys/repository-apk.pem").read_bytes()
+    prepare.require(hashlib.sha256(public).hexdigest() == profile.get("apk_key_sha256"),
+                    "APK public key differs from reviewed source profile")
+    prepare.require(public.startswith(b"-----BEGIN PUBLIC KEY-----\n") and public.endswith(b"-----END PUBLIC KEY-----\n"),
+                    "APK repository key must contain public PEM bytes only")
+    installer = (root / "scripts/install-feed-apk.sh").read_bytes()
+    default = b"base=${PACKAGE_REPOSITORY_URL:-https://valujin.github.io/ax6000-packages-6.12/channels/recommended}"
+    prepare.require(installer.count(default) == 1, "bundled APK installer default URL differs from reviewed template")
+    base = "https://valujin.github.io/ax6000-packages-6.12/channels/" + profile["channel"]
+    installer = installer.replace(default, b"base=${PACKAGE_REPOSITORY_URL:-" + base.encode() + b"}")
+    feeds = ("# Public userspace packages; explicitly select with @public.\n"
+             "# Core, kernel and vendor packages stay bound to this image.\n")
+    feeds += "".join("@public https://downloads.immortalwrt.org/releases/25.12.0/packages/aarch64_cortex-a53/"
+                     + feed + "/packages.adb\n" for feed in ("base", "luci", "packages", "routing", "telephony", "video"))
+    return {
+        "files/etc/apk/repositories.d/distfeeds.list": feeds.encode(),
+        "files/etc/apk/repositories.d/customfeeds.list":
+            b"# The signed matching AX6000 APK repository is installed by ax6000-install-feed.\n",
+        "files/etc/apk/keys/repository-apk.pem": public,
+        "files/etc/ax6000/repository.pub": (root / "keys/repository.pub").read_bytes(),
         "files/usr/sbin/ax6000-install-feed": installer,
     }
+
+
+def repository_files(source, check_only=False, profile=None):
+    """Override moving official feeds; connect the verified feed with install-feed.sh."""
+    if profile is not None and profile.get("package_manager") == "apk":
+        files = apk_repository_files(profile)
+    else:
+        public = (Path(__file__).resolve().parents[1] / "keys/repository.pub").read_bytes()
+        lines = public.decode("ascii").splitlines()
+        prepare.require(len(lines) == 2 and lines[0].startswith("untrusted comment:"), "invalid repository public key")
+        data = base64.b64decode(lines[1], validate=True)
+        prepare.require(len(data) == 42 and data[:2] == b"Ed", "invalid repository public key")
+        fingerprint = data[2:10].hex()
+        installer = (Path(__file__).resolve().parent / "install-feed.sh").read_bytes()
+        prepare.require(b"expected_fingerprint=" + fingerprint.encode() + b"\n" in installer,
+                        "bundled installer signing key differs from repository key")
+        if profile is not None and profile.get("channel") is not None:
+            firmware_layouts.validate_devices(profile)
+            default = b"base=${PACKAGE_REPOSITORY_URL:-https://valujin.github.io/ax6000-packages}"
+            prepare.require(installer.count(default) == 1, "bundled installer default URL differs from reviewed template")
+            base = profile["publication"]["site_url"].rstrip("/") + "/channels/" + profile["channel"]
+            prepare.require(base == "https://valujin.github.io/ax6000-packages-6.12/channels/" + profile["channel"],
+                            "untrusted channel installer URL")
+            installer = installer.replace(default, b"base=${PACKAGE_REPOSITORY_URL:-" + base.encode() + b"}")
+        files = {
+            "files/etc/opkg/distfeeds.conf":
+                b"# Packages for this firmware require its exact kernel ABI.\n"
+                b"# Connect the signed matching repository with ax6000-install-feed.\n"
+                b"# Moving official snapshot feeds are deliberately not configured.\n",
+            "files/etc/opkg/keys/" + fingerprint: public,
+            "files/usr/sbin/ax6000-install-feed": installer,
+        }
     for relative, content in files.items():
         target = source / relative
         prepare.require(target.resolve().is_relative_to(source.resolve()) and not target.is_symlink()
@@ -474,6 +636,7 @@ def select(profile, source):
     prepare.require(installed <= available, "pinned source is missing vendor/opkg packages: " + ", ".join(sorted(installed - available)))
     values.update(required)
     values.update(ssl_symbols(profile))
+    values.update(asu_symbols(profile))
     values.update({"PACKAGE_" + name: "m" for name in prepare.package_only_packages(profile)})
     config_path.write_text(set_symbols(config, values))
     report = {"profile": profile["id"], "requested": sorted(requested), "candidate_kmods": kmods,
@@ -487,6 +650,11 @@ def select(profile, source):
     patches = source / "firmware-source-patches.json"
     if patches.is_file():
         report["source_patches"] = json.loads(patches.read_text())["patches"]
+    if profile.get("package_manager") == "apk":
+        guard = sibling_module("apk_world")
+        guard.configure_policy(profile, source)
+        report["apk_world"] = {**guard.configure_source(profile, source, check_only=True),
+                               "policy_sha256": hashlib.sha256((source / "ax6000-apk-world-policy.json").read_bytes()).hexdigest()}
     (source / "build-selection.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
@@ -498,6 +666,11 @@ def verify(profile, source):
     config = (source / ".config").read_text()
     verify_ssl(profile, config)
     verify_package_only(profile, source)
+    verify_asu(profile, source)
+    if profile.get("package_manager") == "apk":
+        guard = sibling_module("apk_world")
+        guard.configure_source(profile, source, check_only=True)
+        guard.configure_policy(profile, source, check_only=True)
     enabled = set(re.findall(r"^CONFIG_TARGET_DEVICE_(.+)=y$", config, re.M))
     expected = {"mediatek_filogic_DEVICE_" + device for device in firmware_layouts.validate_devices(profile)}
     prepare.require(enabled == expected, "firmware selection includes another device or omits a requested AX6000 layout")
@@ -550,7 +723,7 @@ def dependency_groups(value, label):
     for group in value.split(","):
         names = set()
         for alternative in group.split("|"):
-            match = re.fullmatch(r"\s*([A-Za-z0-9][A-Za-z0-9_.+\-]*)"
+            match = re.fullmatch(r"\s*([A-Za-z0-9][A-Za-z0-9_.+:\-]*)"
                                  r"(?:\s*\((?:>=|<=|>>|<<|!=|=|>|<)\s*[^\s()]+\))?\s*", alternative)
             prepare.require(match is not None, f"invalid {label}: {alternative!r}")
             names.add(match[1])
@@ -562,12 +735,15 @@ def runtime_dependency_closure(controls, roots):
     """Preserve built providers conservatively; final IPK controls are authoritative."""
     packages = {}
     providers = {}
+    apk = any("APK-Name" in control for _, control in controls)
+    def groups(value, label):
+        return prepare.native_dependency_groups(value, label, apk=True) if apk else dependency_groups(value, label)
     for _, control in controls:
         name = control["Package"]
         prepare.require(name not in packages, f"duplicate built package in SDK dependency baseline: {name}")
         packages[name] = control
         provided = {name}
-        for group in dependency_groups(control.get("Provides", ""), f"Provides for {name}"):
+        for group in groups(control.get("Provides", ""), f"Provides for {name}"):
             provided.update(group)
         for virtual in provided:
             providers.setdefault(virtual, set()).add(name)
@@ -578,7 +754,7 @@ def runtime_dependency_closure(controls, roots):
             continue
         prepare.require(name in packages, f"missing built baseline package: {name}")
         closure.add(name)
-        for group in dependency_groups(packages[name].get("Depends", ""), f"Depends for {name}"):
+        for group in groups(packages[name].get("Depends", ""), f"Depends for {name}"):
             candidates = set().union(*(providers.get(dependency, set()) for dependency in group))
             prepare.require(bool(candidates), f"built module baseline dependency unavailable: {name} -> "
                             + " | ".join(sorted(group)))
@@ -680,9 +856,19 @@ def augment_sdk(profile, source, archive, controls, abi):
                      if control.get("Package", "").startswith("kmod-")}
     refreshed = set(profile["packages"]) - core
     frozen = built_modules - refreshed
-    protected = {"kernel", "libc", "base-files", "busybox", "opkg"}
+    apk = profile.get("package_manager", "opkg") == "apk"
+    protected = {"kernel", "libc", "base-files", "busybox", "apk", "apk-openssl", "apk-mbedtls"} if apk else {"kernel", "libc", "base-files", "busybox", "opkg"}
     built_names = {control["Package"] for _, control in controls}
     retained = (built_names - refreshed - protected) | {"kernel"}
+    protected_packages = set()
+    if apk:
+        guard = sibling_module("apk_world")
+        source_roots = set(guard.core_recipe_roots((source / "tmp/.packageinfo").read_text()))
+        source_roots.update(guard.VENDOR)
+        protected_roots = (source_roots | protected | {"libgcc", "libstdcpp"}) & built_names
+        protected_packages = runtime_dependency_closure(controls, protected_roots)
+        refreshed.difference_update(protected_packages)
+        retained.update(protected_packages)
     # Keep every offered full-build package, including vendor GUI/tools and
     # auto-selected translations. Protected identities are retained only when
     # required by this closure; the publisher never offers them as upgrades.
@@ -716,32 +902,48 @@ def augment_sdk(profile, source, archive, controls, abi):
         snapshot = sdk / "ax6000-baseline"
         if snapshot.exists():
             shutil.rmtree(snapshot)
-        (snapshot / "ipks").mkdir(parents=True)
+        bank = "apks" if apk else "ipks"
+        (snapshot / bank).mkdir(parents=True)
+        tool_manifest = {}
+        if apk:
+            host_apk = sdk / "staging_dir/host/bin/apk"
+            native_apk = source / "staging_dir/host/bin/apk"
+            # The native SDK bundles and strips host executables. Authenticate
+            # the exact reviewed wrapper, hidden ELF and complete loader/library
+            # context; bind the source ELF separately from its portable export.
+            host_context = prepare.optional_package_module("host_apk_bundle").describe(
+                sdk, native_apk, source / "scripts/bundle-libraries.sh")
+            context = {}
+            for relative in (".config", "Module.symvers", "include/generated/autoconf.h", "include/config/kernel.release"):
+                path = sdk_kernel / relative
+                prepare.require(path.read_bytes() == (kernel / relative).read_bytes(),
+                                "APK SDK kernel context differs from native build: " + relative)
+                context[relative] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
+            tool_manifest = {"package_manager": "apk", "protected_packages": sorted(protected_packages), "host_apk": host_context,
+                "kernel_context": {"path": kernel.relative_to(source).as_posix(), "files": context}}
         files = []
         for path, control in baseline:
-            target = snapshot / "ipks" / path.name
+            target = snapshot / bank / path.name
             prepare.require(not target.exists(), "duplicate frozen baseline package filename")
             shutil.copy2(path, target)
             with target.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
             files.append({"package": control["Package"], "version": control["Version"],
-                          "path": "ipks/" + path.name, "sha256": digest})
-        (snapshot / "manifest.json").write_text(json.dumps(
-            {"schema_version": 1, "source_commit": profile["firmware"]["commit"],
+                          "path": bank + "/" + path.name, "sha256": digest})
+        baseline_manifest = {"schema_version": 1, "source_commit": profile["firmware"]["commit"],
              "kernel_version": abi, "architecture": profile["firmware"]["architecture"],
              "source_patches": json.loads((source / "firmware-source-patches.json").read_text())["patches"]
              if (source / "firmware-source-patches.json").is_file() else [],
              "frozen_kmods": sorted(frozen), "frozen_packages": sorted(frozen_packages),
-             "refreshed_kmods": sorted(refreshed & built_modules), "files": files},
-            indent=2, sort_keys=True) + "\n")
+             "refreshed_kmods": sorted(refreshed & built_modules), "files": files, **tool_manifest}
+        baseline_bytes = (json.dumps(baseline_manifest, indent=2, sort_keys=True) + "\n").encode()
+        (snapshot / "manifest.json").write_bytes(baseline_bytes)
         # Carry immutable images and build metadata into daily SDK exports. The SDK
         # itself is added from the verified download later, avoiding archive recursion.
         firmware_assets = snapshot / "firmware"
         firmware_assets.mkdir()
-        for asset in sorted(archive.parent.iterdir()):
-            if asset.is_file() and asset != archive and not asset.name.endswith(".partial") \
-                    and asset.name not in {"sha256sums", "SHA256SUMS"}:
-                shutil.copy2(asset, firmware_assets / asset.name)
+        for asset in firmware_bank_assets(archive):
+            shutil.copy2(asset, firmware_assets / asset.name)
         # Validate the augmented context without changing its original configuration/hash.
         sdk_profile = copy.deepcopy(profile)
         sdk_profile["firmware"]["kernel_version"] = abi
@@ -761,11 +963,34 @@ def augment_sdk(profile, source, archive, controls, abi):
             with tarfile.open(partial, mode) as tar:
                 tar.add(sdk, arcname=sdk.name)
         partial.replace(archive)
+        return baseline_bytes
+
+
+def native_package_controls(profile, source):
+    if profile.get("package_manager", "opkg") != "apk":
+        return [(path, read_control(path)) for path in sorted((source / "bin").rglob("*.ipk"))]
+    helper = sibling_module("package_format")
+    prepare.require(helper.manager(profile) == "apk", "APK source must identify its native cohort")
+    prepare.require(not list((source / "bin").rglob("*.ipk")), "APK native output contains foreign IPKs")
+    controls = []
+    for path in sorted((source / "bin").rglob("*.apk")):
+        control = helper.read_control(path, apk=source / "staging_dir/host/bin/apk")
+        actual = control["Package"]
+        control["Package"] = control["Base-Package"]
+        if actual != control["Package"]:
+            alias = actual + " (= " + control["Version"] + ")"
+            control["Provides"] = ", ".join(filter(None, (control.get("Provides", ""), alias)))
+        controls.append((path, control))
+    return controls
 
 
 def export(profile, lock, source, output):
     prepare.require(not output.exists(), "firmware output directory already exists")
-    controls = [(path, read_control(path)) for path in sorted((source / "bin").rglob("*.ipk"))]
+    if profile.get("package_manager") == "apk":
+        guard = sibling_module("apk_world")
+        guard.configure_source(profile, source, check_only=True)
+        guard.configure_policy(profile, source, check_only=True)
+    controls = native_package_controls(profile, source)
     kernel = [control for _, control in controls if control.get("Package") == "kernel"]
     prepare.require(len(kernel) == 1, "build must produce exactly one kernel ipk to discover actual firmware ABI")
     abi = kernel[0].get("Version", "")
@@ -797,7 +1022,7 @@ def export(profile, lock, source, output):
     prepare.require(signer.is_file() and os_access_executable(signer), "built host usign is unavailable")
     generated = copy.deepcopy(profile)
     generated["firmware"]["kernel_version"] = abi
-    augment_sdk(profile, source, sdks[0], controls, abi)
+    baseline_bytes = augment_sdk(profile, source, sdks[0], controls, abi)
     # Daily SDK builds keep the kernel configuration fixed and reuse frozen modules.
     generated["all_kmods"] = False
     base_feed = {"name": "base", "url": profile["firmware"]["repository"], "commit": profile["firmware"]["commit"]}
@@ -814,6 +1039,7 @@ def export(profile, lock, source, output):
     generated["sdk"] = {"url": firmware_layouts.firmware_release_url(generated, sdks[0].name)
                         if profile.get("channel") is not None else url_base.rstrip("/") + "/" + sdks[0].name,
                         "sha256": sdk_hash}
+    export_imagebuilder(generated, source)
     output.mkdir(parents=True)
     shutil.copytree(source / "bin", output / "bin", symlinks=True)
     exported_target = output / "bin/targets/mediatek/filogic"
@@ -826,6 +1052,20 @@ def export(profile, lock, source, output):
     for filename in ("sha256sums", "SHA256SUMS"):
         (exported_target / filename).write_text("".join(checksums))
     shutil.copy2(signer, output / "usign")
+    if generated.get("package_manager") == "apk":
+        apk = source / "staging_dir/host/bin/apk"
+        shutil.copy2(apk, output / "apk")
+        source_provenance = json.loads(baseline_bytes)["host_apk"]["native_source"]
+        prepare.require(source_provenance["sha256"] == hashlib.sha256(apk.read_bytes()).hexdigest()
+                        and source_provenance["size"] == apk.stat().st_size,
+                        "native RAW APK differs from SDK bundle source provenance")
+        proof = {"schema_version": 1, "kind": "native-elf-v1", "native_source": source_provenance,
+                 "path": "apk", "size": apk.stat().st_size,
+                 "sha256": hashlib.sha256(apk.read_bytes()).hexdigest(),
+                 "sdk_sha256": generated["sdk"]["sha256"], "sdk_url": generated["sdk"]["url"],
+                 "source_relative_path": "staging_dir/host/bin/apk",
+                 "baseline_manifest_sha256": hashlib.sha256(baseline_bytes).hexdigest()}
+        (output / "host-apk-proof.json").write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n")
     report["firmware"] = generated["firmware"]
     report["built_packages"] = sorted(built)
     (output / "build-selection.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -833,6 +1073,9 @@ def export(profile, lock, source, output):
     generated_lock = copy.deepcopy(lock)
     generated_lock["firmware"] = generated["firmware"]
     generated_lock["sdk"] = generated["sdk"]
+    if generated.get("package_manager") == "apk":
+        generated_lock["package_manager"] = "apk"
+        generated_lock["apk_key_sha256"] = generated["apk_key_sha256"]
     generated_lock.setdefault("feeds", {})["base"] = profile["firmware"]["commit"]
     generated_lock["profile_sha256"] = hashlib.sha256((output / "profile.json").read_bytes()).hexdigest()
     (output / "lock.json").write_text(json.dumps(generated_lock, indent=2, sort_keys=True) + "\n")
@@ -854,6 +1097,9 @@ def export(profile, lock, source, output):
     firmware_manifest = {"build_id": build_id, "kernel_version": abi, "recipe_commit": recipe_commit,
                          "source_commit": profile["firmware"]["commit"], "source_patches": report.get("source_patches", []),
                          "files": manifest}
+    if profile.get("package_manager") == "apk":
+        firmware_manifest.update({"package_manager": "apk", "apk_key_sha256": generated["apk_key_sha256"],
+                                  "apk_world": report["apk_world"]})
     if profile.get("channel") is not None:
         firmware_manifest.update({"channel": profile["channel"], "devices": profile["firmware"]["devices"]})
         assets = firmware_layouts.collect_firmware_assets(output, generated, firmware_manifest)
@@ -861,6 +1107,10 @@ def export(profile, lock, source, output):
                    "build_id": build_id, "firmware": generated["firmware"], "sdk": generated["sdk"],
                    "assets": [{**{key: value for key, value in asset.items() if key != "path"},
                                "url": firmware_layouts.firmware_release_url(generated, asset["filename"])} for asset in assets]}
+        if generated.get("package_manager") == "apk":
+            catalog.update({"package_manager": "apk", "apk_key_sha256": generated["apk_key_sha256"]})
+        if asu_policy(generated) is not None:
+            catalog["imagebuilder"] = generated["imagebuilder"]
         firmware_layouts.validate_download_catalog(catalog, generated)
         (output / "downloads.json").write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
     (output / "firmware-manifest.json").write_text(json.dumps(firmware_manifest, indent=2) + "\n")

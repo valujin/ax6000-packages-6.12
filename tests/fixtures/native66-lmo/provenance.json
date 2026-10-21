@@ -1,0 +1,16 @@
+[
+  {
+    "package": "luci-i18n-attendedsysupgrade-ru",
+    "file": "luci-i18n-attendedsysupgrade-ru_26.246.30525~80ed8a4_all.ipk",
+    "sha256": "75e8308bffa4224d327f48180d2ac44dd1a206fbcdebfeff01fb6190262399c5",
+    "source_commit": "ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8",
+    "luci_feed_commit": "80ed8a44f244627c5a9f808d09f4c3d8f985b764"
+  },
+  {
+    "package": "luci-i18n-pbr-ru",
+    "file": "luci-i18n-pbr-ru_20260903.082845+pbr1.2.4-r2_all.ipk",
+    "sha256": "6d1a0334be889af27c3a1adcbaf86901e5e8aa552143d06e360620519a3e8726",
+    "source_commit": "ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8",
+    "luci_feed_commit": "80ed8a44f244627c5a9f808d09f4c3d8f985b764"
+  }
+]

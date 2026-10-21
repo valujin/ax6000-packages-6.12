@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "license": "GPL-2.0",
+  "sources": {
+    "66": {
+      "luci_repository": "https://github.com/immortalwrt/luci",
+      "luci_commit": "80ed8a44f244627c5a9f808d09f4c3d8f985b764",
+      "luci_path": "applications/luci-app-attendedsysupgrade",
+      "packages_repository": "https://github.com/immortalwrt/packages",
+      "packages_commit": "110d325c507051d78dac56d95d1c98a724eb0753",
+      "packages_path": "utils/attendedsysupgrade-common",
+      "files": {
+        "Makefile": "9d5640151cfccb609f3cbabd15da626c55f39e300fd3a2e7c93977a7214b23c9",
+        "acl.json": "a9df4afe172faa50d14f87f2a6dc1ec977957d4149c64c52545d7e78d30199ca",
+        "common.Makefile": "b94f1dc69b5dcc7f07b1917d57cba80a5df02818e5e9cc2be2ee8df80a436867",
+        "common.defaults": "dfb1d3fc3a90853c91d8cdea16e757d51aaf59d3208ab8709abbf79b392b0068",
+        "overview.js": "0344c89fca79a908cae814e5f7940e24ed191dd82d89ac05d6a8b3cc089c8a13",
+        "status.js": "abd71b579331f63933355446648710d93f9ef87a681d2af3a16827c4a2abe47d"
+      }
+    },
+    "612": {
+      "luci_repository": "https://github.com/immortalwrt/luci",
+      "luci_commit": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+      "luci_path": "applications/luci-app-attendedsysupgrade",
+      "packages_repository": "https://github.com/immortalwrt/packages",
+      "packages_commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8",
+      "packages_path": "utils/attendedsysupgrade-common",
+      "files": {
+        "Makefile": "571325ec0d68dc25bfdb55d5c5b1cc02292b24f2209d84d7c2b8819dd844e26c",
+        "acl.json": "a9df4afe172faa50d14f87f2a6dc1ec977957d4149c64c52545d7e78d30199ca",
+        "common.Makefile": "98f1cf6f0488d5572de5b623ad56832b999ba1c31f7b8c70253b050fc5cea033",
+        "common.defaults": "dfb1d3fc3a90853c91d8cdea16e757d51aaf59d3208ab8709abbf79b392b0068",
+        "overview.js": "3a73818cfdda501d6b597039094297117e64c95e392e0a7340bc808173b47042",
+        "status.js": "b884d19e003e2c4420fb57833a21700d909d367a8e82d26ae49c75a1c4402b4a"
+      }
+    }
+  }
+}

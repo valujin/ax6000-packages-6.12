@@ -1,20 +1,98 @@
 #!/usr/bin/env python3
-"""Validate IPKs and publish an opkg feed. Never rewrite kernel dependencies."""
+"""Validate native packages and publish a signed cohort feed. Never rewrite kernel dependencies."""
 import argparse
 import base64
 import gzip
 import hashlib
 import html
-import io
 import importlib.util
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
-import tarfile
 import tempfile
 from urllib.parse import urlsplit
+
+
+@lru_cache(maxsize=1)
+def package_format():
+    spec = importlib.util.spec_from_file_location('publisher_package_format', Path(__file__).with_name('package_format.py'))
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+PROTECTED = {'kernel', 'libc', 'base-files', 'busybox', 'opkg'}
+APK_PROTECTED = PROTECTED | {'apk', 'apk-openssl', 'apk-mbedtls', 'libgcc', 'libstdcpp',
+                             'libpthread', 'librt', 'libatomic', 'musl', 'openwrt-keyring', 'usign'}
+APK_CORE_ABIS = {'libgcc': '1', 'libstdcpp': '6', 'libatomic': '1'}
+
+
+def native_provider_names(control, profile):
+    """Only pinned-source essential names and their declared, known ABI aliases."""
+    base = control.get('Base-Package', control.get('Package'))
+    name = control.get('Package')
+    if base not in APK_PROTECTED:
+        raise ValueError('Native provider is outside the essential package allowlist')
+    abi = control.get('ABIVersion', '')
+    if abi and APK_CORE_ABIS.get(base) != abi:
+        raise ValueError('Unknown native essential package ABI alias')
+    if name != base + abi or control.get('APK-Name', name) != name:
+        raise ValueError('Native essential package name/ABI mismatch')
+    validate_package(control, profile)
+    if base == 'kernel' and control['Version'] != profile['firmware']['kernel_version']:
+        raise ValueError('Native kernel provider ABI mismatch')
+    allowed = APK_PROTECTED | {key + value for key, value in APK_CORE_ABIS.items()}
+    names = {name, base}
+    for token in control.get('Provides', '').split(','):
+        if not token.strip():
+            continue
+        match = re.fullmatch(r'\s*(@?[A-Za-z0-9_.+:-]+)(?:\s*\([<>=~]+\s+[^\s()]+\))?\s*', token)
+        if match is None:
+            raise ValueError('Malformed native essential provider')
+        provided = match[1]
+        normalized = provided.removeprefix('@').removesuffix('-any')
+        if normalized not in allowed:
+            raise ValueError('Native essential package provides an unrelated name')
+        names.add(provided)
+    return names
+
+
+def native_provider_inventory(profile, controls):
+    records = []
+    names = set()
+    for path, control in controls:
+        native_provider_names(control, profile)
+        if path.name!=control['Package']+'-'+control['Version']+'.apk' or not re.fullmatch(r'[A-Za-z0-9_.+~-]+\.apk',path.name):
+            raise ValueError('Native essential APK filename differs from its control')
+        if control['Package'] in names:
+            raise ValueError('Duplicate native essential package')
+        names.add(control['Package'])
+        fields = {key: control[key] for key in ('Package', 'Base-Package', 'APK-Name', 'ABIVersion',
+                   'Version', 'Architecture', 'Provides') if key in control}
+        fields.update(Filename=path.name, Size=str(path.stat().st_size), SHA256sum=sha256_file(path))
+        records.append(fields)
+    return {'schema_version': 1, 'kind': 'native-providers', 'profile_id': profile['id'],
+            'build_id': profile.get('build_id'), 'sdk_sha256': profile.get('sdk', {}).get('sha256'),
+            'kernel_version': profile['firmware']['kernel_version'],
+            'architecture': profile['firmware']['architecture'], 'packages': records}
+
+
+def protected_package(control, profile):
+    protected = APK_PROTECTED if package_format().manager(profile) == 'apk' else PROTECTED
+    names = {control['Package'], control.get('Base-Package', control['Package'])}
+    names.update(re.findall(r'(?:^|,)\s*([A-Za-z0-9_.+-]+)', control.get('Provides', '')))
+    if package_format().manager(profile) == 'apk':
+        protected = protected | {key + value for key, value in APK_CORE_ABIS.items()}
+        names.update(name.removesuffix('-any') for name in list(names))
+    return bool(names & protected)
+
+
+def index_control(control):
+    # The raw ADB object is compared separately, never interpolated into a text index.
+    return {k: v for k, v in control.items() if k != 'APK-Raw'}
 
 
 def sha256_file(path):
@@ -37,32 +115,9 @@ def firmware_build_id(profile):
     return build_id
 
 
-def read_control(path):
-    # OpenWrt ipkg-build uses a gzipped tar, rather than Debian's ar container.
-    with tarfile.open(path, 'r:*') as package:
-        members = [m for m in package.getmembers() if m.name.lstrip('./') == 'control.tar.gz']
-        if len(members) != 1 or not members[0].isfile() or members[0].size > 4 * 1024 * 1024:
-            raise ValueError(f'Invalid control archive: {path}')
-        data = package.extractfile(members[0]).read()
-    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
-        members = [m for m in archive.getmembers() if m.name.lstrip('./') == 'control']
-        if len(members) != 1 or not members[0].isfile() or members[0].size > 1024 * 1024:
-            raise ValueError(f'Invalid control: {path}')
-        text = archive.extractfile(members[0]).read().decode('utf-8')
-    fields = {}
-    previous = None
-    for line in text.splitlines():
-        if line.startswith((' ', '\t')) and previous:
-            fields[previous] += '\n' + line
-        elif ':' in line:
-            key, value = line.split(':', 1)
-            if key in fields:
-                raise ValueError(f'Duplicate control field: {key}')
-            fields[key] = value.strip()
-            previous = key
-        elif line:
-            raise ValueError('Malformed package control')
-    return fields
+def read_control(path, apk=None):
+    """Compatibility entry point backed by the common native package reader."""
+    return package_format().read_control(path, apk=apk)
 
 
 def validate_package(control, profile):
@@ -84,7 +139,70 @@ def validate_package(control, profile):
             raise ValueError('Kernel modules require target architecture')
 
 
-def stage_feed(raw, output, profile):
+def validate_apk_key(profile, public_key):
+    if public_key is None or not Path(public_key).is_file() or Path(public_key).is_symlink():
+        raise ValueError('APK requires an explicit pinned public PEM key')
+    if profile.get('apk_key_sha256') != sha256_file(Path(public_key)):
+        raise ValueError('APK public key differs from authenticated profile checksum')
+    subprocess.run(['openssl', 'pkey', '-pubin', '-in', str(public_key), '-noout'],
+                   check=True, capture_output=True, timeout=30)
+
+
+def validate_apk_signer(profile, key, public_key):
+    validate_apk_key(profile, public_key)
+    if key is None or not Path(key).is_file() or Path(key).is_symlink():
+        raise ValueError('APK signing requires an explicit private key')
+    derived = subprocess.check_output(['openssl', 'pkey', '-in', str(key), '-pubout', '-outform', 'DER'], timeout=30)
+    trusted = subprocess.check_output(['openssl', 'pkey', '-pubin', '-in', str(public_key), '-outform', 'DER'], timeout=30)
+    if derived != trusted:
+        raise ValueError('APK signing key differs from pinned public key')
+
+
+def verify_apk_index(feed, profile, apk, public_key, controls=None):
+    """Authenticate ADB, then reproduce its complete inventory from archive bytes.
+
+    APK's native identity is a metadata digest rather than whole-file SHA256.
+    Native verify checks payload integrity; the signed audit index additionally
+    binds every whole-file SHA256. Re-indexing checks all ADB metadata and hashes.
+    """
+    validate_apk_key(profile, public_key)
+    fmt = package_format()
+    if apk is None:
+        raise ValueError('trusted host apk binary is required')
+    apk = str(Path(apk).resolve())
+    feed = Path(feed)
+    packages = sorted(feed.glob('*.apk'))
+    if not packages:
+        raise ValueError('Empty APK repository')
+    with tempfile.TemporaryDirectory(prefix='ax6000-apk-index-') as temporary:
+        work = Path(temporary)
+        keys = work / 'keys'; keys.mkdir()
+        shutil.copyfile(public_key, keys / 'repository-apk.pem')
+        subprocess.run([apk, '--no-network', '--keys-dir', str(keys), 'verify', str(feed / 'packages.adb')],
+                       check=True, capture_output=True, timeout=120)
+        for path in packages:
+            subprocess.run([apk, '--no-network', '--allow-untrusted', 'verify', str(path)],
+                           check=True, capture_output=True, timeout=120)
+        rebuilt = work / 'packages.adb'
+        subprocess.run([apk, '--no-network', 'mkndx', '--allow-untrusted', '--output', str(rebuilt),
+                        *map(str, packages)], check=True, capture_output=True, timeout=120)
+        actual = fmt.index_info(feed / 'packages.adb', apk)
+        expected = fmt.index_info(rebuilt, apk)
+        if {item['Package']:item for item in actual} != {item['Package']:item for item in expected}:
+            raise ValueError('Signed APK index inventory/identity differs from package archives')
+        if controls is not None:
+            indexed = {item['Package']: item for item in actual}
+            if set(indexed) != {item['Package'] for item in controls}:
+                raise ValueError('Signed APK index package inventory differs')
+            for control in controls:
+                info = indexed[control['Package']]['APK-Raw']
+                # mkndx adds the archive length and native identity digest.
+                raw = {key: value for key, value in info.items() if key not in ('file-size', 'hashes')}
+                if raw != {key: value for key, value in control['APK-Raw'].items() if key not in ('file-size', 'hashes')}:
+                    raise ValueError('APK index metadata differs from archive control')
+
+
+def stage_feed(raw, output, profile, *, apk=None, apk_key=None, apk_public_key=None):
     if profile.get('enabled') is not True:
         raise ValueError('Profile disabled; supply matching firmware SDK first')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', profile['id']):
@@ -92,22 +210,44 @@ def stage_feed(raw, output, profile):
     expected = profile['firmware']['kernel_version']
     if not re.fullmatch(r'[A-Za-z0-9.~+_-]+', expected):
         raise ValueError('Invalid kernel version')
+    fmt = package_format()
+    manager = fmt.manager(profile)
+    suffix = fmt.suffix(profile)
+    if manager == 'apk':
+        if apk is not None and Path(apk).resolve().is_relative_to(Path(raw).resolve()):
+            raise ValueError('Imported RAW executable is not a trusted host APK tool')
+        validate_apk_signer(profile, apk_key, apk_public_key)
+        if apk is None:
+            raise ValueError('trusted host apk binary is required')
+        if any(Path(raw).rglob('*.ipk')):
+            raise ValueError('APK publication contains foreign IPK packages')
     validated = []
+    native_controls = []
     names = set()
-    for path in sorted(Path(raw).rglob('*.ipk')):
-        control = read_control(path)
+    for path in sorted(Path(raw).rglob('*.' + suffix)):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('Package must be a regular file')
+        control = read_control(path, apk=apk)
+        if manager == 'apk':
+            subprocess.run([str(Path(apk).resolve()), '--no-network', '--allow-untrusted', 'verify', str(path)],
+                           check=True, capture_output=True, timeout=120)
         # A supplemental feed must never offer to replace the firmware/kernel/C library.
-        if control.get('Package') in ('kernel', 'libc', 'base-files', 'busybox', 'opkg'):
+        if protected_package(control, profile):
+            if manager == 'apk' and control.get('Base-Package') in APK_PROTECTED:
+                native_controls.append((path, control))
             continue
         validate_package(control, profile)
         if control['Package'] in names:
             raise ValueError(f"Duplicate package: {control['Package']}")
         names.add(control['Package'])
-        if not re.fullmatch(r'[A-Za-z0-9_.+~\-]+\.ipk', path.name):
-            raise ValueError(f'Invalid IPK filename: {path.name}')
+        if not re.fullmatch(r'[A-Za-z0-9_.+~\-]+\.' + suffix, path.name):
+            raise ValueError(f'Invalid package filename: {path.name}')
+        if manager == 'apk' and path.name != control['Package'] + '-' + control['Version'] + '.apk':
+            raise ValueError('APK filename differs from native name/version')
         validated.append((path, control))
     if not validated:
         raise ValueError('Build has no packages (empty feed)')
+    providers = native_provider_inventory(profile, native_controls) if manager == 'apk' else None
     # Validate every archive before touching output; deployment is handled atomically by Pages.
     feed = Path(output) / 'feeds' / profile['id'] / expected
     if feed.exists():
@@ -117,13 +257,20 @@ def stage_feed(raw, output, profile):
     for path, control in validated:
         target = feed / path.name
         shutil.copy2(path, target)
-        fields = {k: v for k, v in control.items() if k not in ('Filename', 'Size', 'SHA256sum')}
+        fields = {k: v for k, v in index_control(control).items() if k not in ('Filename', 'Size', 'SHA256sum')}
         fields.update(Filename=path.name, Size=str(target.stat().st_size),
                       SHA256sum=sha256_file(target))
         paragraphs.append('\n'.join(f'{key}: {value}' for key, value in fields.items()))
     index = ('\n\n'.join(paragraphs) + '\n\n').encode()
     (feed / 'Packages').write_bytes(index)
     (feed / 'Packages.gz').write_bytes(gzip.compress(index, mtime=0))
+    if manager == 'apk':
+        subprocess.run([str(Path(apk).resolve()), '--no-network', 'mkndx', '--allow-untrusted', '--sign',
+                        str(Path(apk_key).resolve()), '--output', str(feed / 'packages.adb'),
+                        *[str(feed / path.name) for path, _ in validated]],
+                       check=True, capture_output=True, timeout=120)
+        verify_apk_index(feed, profile, apk, apk_public_key, [control for _, control in validated])
+        (Path(output) / 'native-providers.json').write_text(json.dumps(providers, sort_keys=True, indent=2) + '\n')
     return feed
 
 
@@ -237,6 +384,9 @@ def main():
     parser.add_argument('--public-key', type=Path,
                         help='Require the signing secret to match this pinned usign public key')
     parser.add_argument('--usign', required=True, type=Path)
+    parser.add_argument('--apk', type=Path, help='Trusted host apk-tools; never an executable from imported RAW')
+    parser.add_argument('--apk-key', type=Path, help='Explicit APK signing private PEM')
+    parser.add_argument('--apk-public-key', type=Path, help='Pinned APK public PEM matching profile apk_key_sha256')
     parser.add_argument('--lock', required=True, type=Path)
     parser.add_argument('--external-assets', type=Path)
     parser.add_argument('--external-assets-signature', type=Path)
@@ -264,7 +414,11 @@ def main():
         if not all(external) or args.public_key is None:
             raise ValueError('Channel publication requires signed immutable external assets and a pinned key')
         catalog = validate_external_catalog(*external, profile, args.public_key, args.usign)
-    feed = stage_feed(args.input, args.output, profile)
+    manager = package_format().manager(profile)
+    if manager == 'apk' and args.apk is not None and args.apk.resolve().is_relative_to(args.input.resolve()):
+        raise ValueError('Imported RAW executable is not a trusted host APK tool')
+    feed = stage_feed(args.input, args.output, profile, apk=args.apk, apk_key=args.apk_key,
+                      apk_public_key=args.apk_public_key)
     public_key = args.output / 'repository.pub'
     usign = str(args.usign.resolve())
     public_key.write_text(derived_public)
@@ -285,6 +439,12 @@ def main():
     shutil.copy2(args.lock, state / 'lock.json')
     # The lock fingerprints these exact bytes; snapshots must preserve that identity.
     shutil.copyfile(args.profile, args.output / 'profile.json')
+    if manager == 'apk':
+        shutil.copyfile(args.apk_public_key, args.output / 'repository-apk.pem')
+        subprocess.run([usign, '-S', '-m', str(args.output / 'profile.json'), '-s', str(args.key.resolve()),
+                        '-x', str(args.output / 'profile.sig')], check=True)
+        subprocess.run([usign, '-V', '-m', str(args.output / 'profile.json'), '-p', str(public_key),
+                        '-x', str(args.output / 'profile.sig')], check=True)
     for name in ('build-selection.json', 'build-provenance.json', 'firmware-manifest.json', 'build.config'):
         if (args.input / name).is_file():
             shutil.copy2(args.input / name, args.output / name)
@@ -302,11 +462,11 @@ def main():
             for p in sorted(firmware_dir.iterdir()) if p.is_file()
         ) + '</ul>'
     (args.output / 'index.html').write_text('<!doctype html><meta charset="utf-8"><title>AX6000 packages</title>'
-        '<h1>AX6000 packages</h1><p>Signed supplemental opkg repository.</p>'
+        f'<h1>AX6000 packages</h1><p>Signed supplemental {manager} repository.</p>'
         '<p><a href="profile.json">Firmware compatibility</a> · '
         '<a href="repository.pub">Signing public key</a> · '
         '<a href="state/lock.json">Source versions</a></p>'
-        f'<p><a href="{feed.relative_to(args.output).as_posix()}/Packages">Package index</a></p>' +
+        f'<p><a href="{feed.relative_to(args.output).as_posix()}/{"packages.adb" if manager == "apk" else "Packages"}">Package index</a></p>' +
         (f'<p>Kernel ABI: <code>{html.escape(profile["firmware"]["kernel_version"])}</code></p>'
          '<p>Firmware and SDK for Redmi AX6000 stock layout. Install the matching firmware '
          'before using these kernel modules.</p>' + downloads if firmware_dir else downloads))

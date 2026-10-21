@@ -9,7 +9,7 @@ import sys
 
 PRESERVE = ('GH_TOKEN', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_REPOSITORY',
             'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'RUNNER_TEMP', 'RUNNER_ENVIRONMENT',
-            'AX6000_RECIPE_COMMIT')
+            'AX6000_RECIPE_COMMIT', 'AX6000_APK')
 
 
 def resource_budget(meminfo, affinity):

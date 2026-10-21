@@ -29,6 +29,10 @@ import zlib
 
 from fit_payload import MIB, cell, extract_fit, read_fdt, require, stringlist, text
 import stock_factory
+import package_format
+import apk_world
+import image_features
+import host_apk_bundle
 
 PINS = {'recommended': 'ae65e1de69971b5a2e3cf7e39390ee93f274d488',
         'latest': 'a99b0888b88f134f56bcb2a7d93027b5d20638a9'}
@@ -282,7 +286,12 @@ def file_mode(listing, path):
 
 
 def require_mode(listing, path, mode):
-    expected = {0o755: '-rwxr-xr-x', 0o644: '-rw-r--r--'}[mode]
+    if mode is None:
+        actual = file_mode(listing, path)
+        require(len(actual) == 10 and actual.startswith('-') and actual[5] != 'w' and actual[8] != 'w',
+                'SquashFS feature file must be regular without group/other write: ' + path)
+        return
+    expected = {0o755: '-rwxr-xr-x', 0o644: '-rw-r--r--', 0o600: '-rw-------'}[mode]
     require(file_mode(listing, path) == expected, f'SquashFS {path} must be regular with mode {mode:04o}')
 
 
@@ -292,6 +301,8 @@ def squash_read(binary, root, path, cap=4096, listing=False):
 
 
 def repository_expected(repo, profile):
+    if profile.get('package_manager', 'opkg') == 'apk':
+        return apk_repository_expected(repo, profile)
     public = regular(repo / 'keys/repository.pub', 4096).read_bytes()
     lines = public.decode('ascii').splitlines()
     require(len(lines) == 2 and lines[0].startswith('untrusted comment:'), 'Invalid trusted repository key')
@@ -311,6 +322,128 @@ def repository_expected(repo, profile):
     return {'etc/opkg/distfeeds.conf': (DISTFEEDS, 0o644),
             'etc/opkg/keys/' + fingerprint: (public, 0o644),
             'usr/sbin/ax6000-install-feed': (installer, 0o755)}, fingerprint
+
+
+def apk_repository_expected(repo, profile):
+    require(package_format.manager(profile) == 'apk', 'APK repository renderer requires explicit APK cohort')
+    public = regular(repo / 'keys/repository-apk.pem', 4096).read_bytes()
+    digest = hashlib.sha256(public).hexdigest()
+    require(digest == profile.get('apk_key_sha256') and public.startswith(b'-----BEGIN PUBLIC KEY-----\n')
+            and public.endswith(b'-----END PUBLIC KEY-----\n'), 'Trusted APK public key/profile differs')
+    metadata_public = regular(repo / 'keys/repository.pub', 4096).read_bytes()
+    lines = metadata_public.decode('ascii').splitlines()
+    require(len(lines) == 2 and lines[0].startswith('untrusted comment:'), 'Invalid trusted catalog public key')
+    decoded = base64.b64decode(lines[1], validate=True)
+    require(len(decoded) == 42 and decoded[:2] == b'Ed', 'Invalid trusted catalog key bytes')
+    fingerprint = decoded[2:10].hex()
+    installer = regular(repo / 'scripts/install-feed-apk.sh', 32 * 1024).read_bytes()
+    require(b'expected_fingerprint=' + fingerprint.encode() + b'\n' in installer
+            and b'expected_apk_sha256=' + digest.encode() + b'\n' in installer,
+            'Trusted APK installer/key fingerprints differ')
+    site = 'https://valujin.github.io/ax6000-packages-6.12'
+    require(profile.get('publication', {}).get('site_url') == site, 'Unexpected APK publication site')
+    url = site + '/channels/' + profile['channel']
+    require(profile.get('build_source', {}).get('publication_url') == url, 'APK channel publication URL differs')
+    before = b'base=${PACKAGE_REPOSITORY_URL:-' + site.encode() + b'/channels/recommended}'
+    require(installer.count(before) == 1, 'Trusted APK installer default anchor differs')
+    installer = installer.replace(before, b'base=${PACKAGE_REPOSITORY_URL:-' + url.encode() + b'}')
+    feeds = (b'# Public userspace packages; explicitly select with @public.\n'
+             b'# Core, kernel and vendor packages stay bound to this image.\n')
+    feeds += b''.join(b'@public https://downloads.immortalwrt.org/releases/25.12.0/packages/aarch64_cortex-a53/'
+                      + feed.encode() + b'/packages.adb\n' for feed in
+                      ('base', 'luci', 'packages', 'routing', 'telephony', 'video'))
+    return {'etc/apk/repositories.d/distfeeds.list': (feeds, 0o644),
+            'etc/apk/repositories.d/customfeeds.list':
+                (b'# The signed matching AX6000 APK repository is installed by ax6000-install-feed.\n', 0o644),
+            'etc/apk/keys/repository-apk.pem': (public, 0o644),
+            'etc/ax6000/repository.pub': (metadata_public, 0o644),
+            'usr/sbin/ax6000-install-feed': (installer, 0o755)}, fingerprint
+
+
+def package_contents(path, *, payload=False, apk=None):
+    if Path(path).suffix == '.ipk':
+        return ipk_contents(path, payload=payload)
+    regular(path, 128 * MIB)
+    control = package_format.read_control(path, apk=apk)
+    files = package_format.payload_files(path, apk=apk) if payload else {}
+    return control, files
+
+
+def trusted_apk_argument(value, raw):
+    require(value, 'APK verification requires explicit --apk trusted HOST tool')
+    path = regular(Path(value).absolute(), 64 * MIB)
+    require(not path.resolve().is_relative_to(raw) and os.access(path, os.X_OK),
+            'Never execute an APK tool from untrusted raw artifacts')
+    with path.open('rb') as stream:
+        header = stream.read(20)
+    require(header[:7] == b'\x7fELF\x02\x01\x01' and header[18:20] == b'\x3e\x00',
+            'APK inspection requires an x86_64 HOST ELF executable')
+    version = run_bounded([str(path), '--version'], 4096).decode('ascii')
+    require('apk-tools 3.0.5' in version and 'x86_64' in version, 'Unapproved host APK version/architecture')
+    return path
+
+
+def apk_root_policy(binary, root, profile, installed, actual_paths, source, apk):
+    require(source is not None and apk is not None, 'APK root inspection requires trusted source and host APK')
+    require('usr/lib/opkg/status' not in actual_paths and not any(p.startswith('usr/lib/opkg/info/') for p in actual_paths),
+            'APK image retains OPKG database/metadata')
+    require(not any(name in actual_paths for name in ('bin/opkg', 'usr/bin/opkg')), 'APK image retains OPKG executable')
+    require_mode(squash_read(binary, root, 'usr/bin/apk', listing=True), 'usr/bin/apk', 0o755)
+    configurations = {name for name in actual_paths if name.startswith('etc/apk/repositories.d/') and name.endswith('.list')}
+    if 'etc/apk/repositories' in actual_paths:
+        configurations.add('etc/apk/repositories')
+    require({'etc/apk/repositories.d/distfeeds.list', 'etc/apk/repositories.d/customfeeds.list'} <= configurations
+            and len(configurations) <= 16, 'Cannot enumerate APK repository configuration')
+    expected_public, _ = apk_repository_expected(Path(__file__).resolve().parents[1], profile)
+    expected_lines = [line for line in expected_public['etc/apk/repositories.d/distfeeds.list'][0].splitlines()
+                      if line and not line.startswith(b'#')]
+    active = []
+    for path in configurations:
+        data = squash_read(binary, root, path, 32 * 1024)
+        rows = [line.strip() for line in data.splitlines() if line.strip() and not line.lstrip().startswith(b'#')]
+        require(not rows or path == 'etc/apk/repositories.d/distfeeds.list', 'APK image enables an unreviewed repository')
+        active.extend(rows)
+    require(active == expected_lines, 'APK public repositories differ from reviewed tagged userspace list')
+    known = {'etc/apk/keys/immortalwrt-25.12.pem': 'c0da9b5747f3fb16ea64fa37acda4df3723ac22ec30ca0dc6f5c89efc0161f1f',
+             'etc/apk/keys/openwrt-25.12.pem': '27d61d827d64ccf2f46dce5f52aec6279404d4a00686dafb22f52f3b4ee675f8'}
+    for path, digest in known.items():
+        data = squash_read(binary, root, path, 4096)
+        require(hashlib.sha256(data).hexdigest() == digest, 'APK official keyring public key differs: ' + path)
+        require_mode(squash_read(binary, root, path, listing=True), path, 0o644)
+    keys = [name for name in actual_paths if name.startswith('etc/apk/keys/') and name.endswith('.pem')]
+    require(3 <= len(keys) <= 16, 'APK key directory inventory differs')
+    native_public = regular(Path(source) / 'public-key.pem', 4096).read_bytes()
+    allowed_keys = set(known.values()) | {profile['apk_key_sha256'], hashlib.sha256(native_public).hexdigest()}
+    for path in keys:
+        data = squash_read(binary, root, path, 4096)
+        require(hashlib.sha256(data).hexdigest() in allowed_keys, 'APK image contains an unapproved signing key: ' + path)
+        require(data.startswith(b'-----BEGIN PUBLIC KEY-----\n') and data.endswith(b'-----END PUBLIC KEY-----\n'),
+                'APK image key is not public PEM only: ' + path)
+    apk_world.configure_source(profile, Path(source), check_only=True)
+    policy = apk_world.configure_policy(profile, Path(source), check_only=True)
+    records = []
+    for name, item in installed.items():
+        records.append({'name': name, 'version': item['Version'],
+                        'depends': item.get('APK-Depends', '').split(),
+                        'provides': item.get('APK-Provides', '').split(),
+                        'tags': ['openwrt:abiversion=' + item['ABIVersion']] if item.get('ABIVersion') else []})
+    pins = apk_world.protected_packages(records, policy, apk)
+    expected_pins = ''.join(name + '=' + version + '\n' for name, version in sorted(pins.items())).encode()
+    protected = squash_read(binary, root, 'etc/apk/ax6000-protected.list', MIB)
+    require(protected == expected_pins, 'Actual APK protected native package list differs')
+    world = squash_read(binary, root, 'etc/apk/world', MIB).decode('ascii')
+    require(world.endswith('\n'), 'Actual APK world is truncated')
+    rows = {}; actual_pins = {}
+    for line in world.splitlines():
+        token = apk_world.parse_token(line, world=True)
+        require(token[1] not in rows, 'Duplicate APK world constraint')
+        rows[token[1]] = token
+    for name, version in pins.items():
+        require(rows.get(name) == (False, name, None, '=', version), 'Actual APK world lost an exact native pin: ' + name)
+        actual_pins[name] = version
+    return {'package_manager': 'apk', 'public_opt_in_feeds': len(active), 'protected_packages': len(pins),
+            'protected_sha256': hashlib.sha256(protected).hexdigest(), 'public_keys': sorted(keys),
+            'world_sha256': hashlib.sha256(world.encode()).hexdigest()}
 
 
 class CappedReader:
@@ -377,7 +510,7 @@ def ipk_contents(path, *, payload=False):
                         require(control is None and member.isfile() and member.size <= MIB,
                                 'Invalid IPK control member')
                         control = control_fields(archive.extractfile(member).read(MIB + 1))
-                    elif name == 'data.tar.gz' and (relative.endswith('.ko') or relative.startswith('lib/firmware/')):
+                    elif name == 'data.tar.gz' and (relative.endswith('.ko') or relative.startswith('lib/firmware/') or relative.endswith('.lmo')):
                         # Firmware aliases are not executed/extracted. Concrete firmware
                         # files and all .ko files must match the actual image bytes.
                         if member.issym() and not relative.endswith('.ko'):
@@ -425,7 +558,7 @@ def module_info(data, version, kernel_config):
 
 
 def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
-                 fingerprint, kernel_config, manifest_packages):
+                 fingerprint, kernel_config, manifest_packages, feature_lock=None, feature_source=None, apk=None):
     regular(root, 0x7a80000)
     with root.open('rb') as stream:
         superblock = stream.read(96)
@@ -444,9 +577,13 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
         stream.seek(used)
         while chunk := stream.read(MIB):
             require(not any(chunk), 'Nonzero bytes after SquashFS filesystem')
-    status = parse_status(squash_read(binary, root, 'usr/lib/opkg/status', 4 * MIB))
+    manager = package_format.manager(profile)
+    database = 'lib/apk/db/installed' if manager == 'apk' else 'usr/lib/opkg/status'
+    status = (stock_factory.apk_status_packages if manager == 'apk' else parse_status)(
+        squash_read(binary, root, database, 4 * MIB))
     package_only = stock_factory.package_policy(profile)
-    if package_only:
+    actual_paths, symlinks = {}, {}
+    if package_only or manager == 'apk':
         listing = run_bounded([str(binary), '-processors', '1', '-data-queue', '8', '-frag-queue', '8',
                                '-no-wildcards', '-lln', str(root)], 4 * MIB)
         actual_paths, symlinks = {}, {}
@@ -460,10 +597,11 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
                     symlinks[name] = match[2].encode('utf-8')
         require(actual_paths and len(actual_paths) <= 30000, 'Cannot enumerate actual SquashFS file inventory')
         stock_factory.assert_absent(package_only, status, actual_paths, symlinks)
-    required = VENDOR | UCODE | {'kernel', 'opkg'} | set(profile.get('image_packages', []))
-    require(required <= status.keys(), 'Actual root omits required packages: ' + ', '.join(sorted(required - status.keys())))
-    forbidden = {'apk-openssl', 'apk-mbedtls', 'apk', 'kmod-mt7915e', 'kmod-mt7986-firmware',
-                 'mtwifi-cfg', 'iwinfo'}
+    required = VENDOR | UCODE | ({'kernel', 'apk-openssl', 'openwrt-keyring'} if manager == 'apk' else {'kernel', 'opkg'}) | set(profile.get('image_packages', []))
+    available = set(status) | {record.get('Base-Package', name) for name, record in status.items()}
+    require(required <= available, 'Actual root omits required packages: ' + ', '.join(sorted(required - available)))
+    forbidden = ({'opkg', 'apk-mbedtls'} if manager == 'apk' else {'apk-openssl', 'apk-mbedtls', 'apk'}) | {
+                 'kmod-mt7915e', 'kmod-mt7986-firmware', 'mtwifi-cfg', 'iwinfo'}
     require(not forbidden & status.keys() and not any(n.startswith('kmod-mt76') for n in status),
             'Actual root has conflicting APK/radio/config packages')
     require(set(status) == set(manifest_packages), 'Embedded status differs from external device package manifest')
@@ -486,27 +624,31 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
         require(actual == expected, 'Actual root trusted repository bytes differ: ' + path)
         require_mode(squash_read(binary, root, path, listing=True), path, mode)
         overlay[path] = {'sha256': hashlib.sha256(actual).hexdigest(), 'mode': f'{mode:04o}'}
-    # Read every actual opkg *.conf discovered by a successful bounded listing.
-    listing = squash_read(binary, root, 'etc/opkg', 32 * 1024, listing=True)
-    paths = re.findall(rb'\s+squashfs-root/(etc/opkg/[^\s]+\.conf)$', listing, re.M)
-    configs = {'etc/opkg.conf'} | {p.decode('ascii') for p in paths}
-    require('etc/opkg/distfeeds.conf' in configs and len(configs) <= 16, 'Cannot enumerate actual opkg configuration')
-    for path in configs:
-        data = squash_read(binary, root, path, 16 * 1024)
-        require(not re.search(rb'^\s*src(?:/\S+)?(?:\s|$)', data, re.M), 'Actual root enables a moving feed')
-        if path == 'etc/opkg.conf':
-            require(re.search(rb'^\s*option\s+check_signature(?:\s+1)?\s*$', data, re.M),
-                    'Actual opkg signature checks are disabled')
-    opkg = 'bin/opkg'
-    require_mode(squash_read(binary, root, opkg, listing=True), opkg, 0o755)
-    bin_listing = squash_read(binary, root, 'bin', 256 * 1024, listing=True)
-    usr_listing = squash_read(binary, root, 'usr/bin', 256 * 1024, listing=True)
-    require(not re.search(rb'\s+squashfs-root/(?:usr/)?bin/apk(?:\s|$)', bin_listing + usr_listing, re.M),
-            'Actual root contains an APK executable')
+    apk_policy = None
+    if manager == 'apk':
+        apk_policy = apk_root_policy(binary, root, profile, status, actual_paths, feature_source, apk)
+    else:
+        # Read every actual opkg *.conf discovered by a successful bounded listing.
+        listing = squash_read(binary, root, 'etc/opkg', 32 * 1024, listing=True)
+        paths = re.findall(rb'\s+squashfs-root/(etc/opkg/[^\s]+\.conf)$', listing, re.M)
+        configs = {'etc/opkg.conf'} | {p.decode('ascii') for p in paths}
+        require('etc/opkg/distfeeds.conf' in configs and len(configs) <= 16, 'Cannot enumerate actual opkg configuration')
+        for path in configs:
+            data = squash_read(binary, root, path, 16 * 1024)
+            require(not re.search(rb'^\s*src(?:/\S+)?(?:\s|$)', data, re.M), 'Actual root enables a moving feed')
+            if path == 'etc/opkg.conf':
+                require(re.search(rb'^\s*option\s+check_signature(?:\s+1)?\s*$', data, re.M),
+                        'Actual opkg signature checks are disabled')
+        opkg = 'bin/opkg'
+        require_mode(squash_read(binary, root, opkg, listing=True), opkg, 0o755)
+        bin_listing = squash_read(binary, root, 'bin', 256 * 1024, listing=True)
+        usr_listing = squash_read(binary, root, 'usr/bin', 256 * 1024, listing=True)
+        require(not re.search(rb'\s+squashfs-root/(?:usr/)?bin/apk(?:\s|$)', bin_listing + usr_listing, re.M),
+                'Actual root contains an APK executable')
     modules, firmware, inspected = {}, {}, 0
     version = abi.split('~')[0]
     for package in sorted({n for n in status if n.startswith('kmod-')}):
-        control, files = ipk_contents(ipks[package], payload=True)
+        control, files = package_contents(ipks[package], payload=True, apk=apk)
         require(control == controls[package], 'Native IPK changed during root inspection')
         found_modules = 0
         for path, value in files.items():
@@ -525,12 +667,22 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
                 firmware[path] = {'package': package, 'size': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
         if package in VENDOR:
             require(found_modules > 0, 'Native vendor package has no inspected module: ' + package)
+    native_translations = {}
+    for package in sorted(n for n in status if n.startswith('luci-i18n-pbr-') or n == 'luci-i18n-attendedsysupgrade-ru'):
+        native_control, payload = package_contents(ipks[package], payload=True, apk=apk)
+        require(native_control == controls[package], 'Native translation package changed during image inspection')
+        native_translations.update({path: data for path, data in payload.items() if path.endswith('.lmo')})
+    feature_record = image_features.verify(profile, feature_lock or {}, status,
+        lambda path, cap: squash_read(binary, root, path, cap),
+        lambda path, mode: require_mode(squash_read(binary, root, path, listing=True), path, mode),
+        source=feature_source, native_translations=native_translations)
     return {'sha256': sha256(root), 'size': root.stat().st_size, 'squashfs_bytes_used': used,
             'installed_kernel': status['kernel'], 'installed_packages': sorted(status),
             'vendor_packages': sorted(VENDOR), 'ucode_packages': sorted(UCODE),
             'modules': modules, 'firmware': firmware, 'trusted_key_fingerprint': fingerprint,
-            'repository_files': overlay, 'active_feeds': 0, 'apk_executable_present': False,
-            'package_only_absent': package_only}
+            'repository_files': overlay, 'active_feeds': apk_policy['public_opt_in_feeds'] if apk_policy else 0,
+            'apk_executable_present': manager == 'apk', 'package_manager': manager, 'apk_policy': apk_policy,
+            'package_only_absent': package_only, 'optional_features': feature_record}
 
 
 class PipeReader:
@@ -547,10 +699,51 @@ class PipeReader:
                     return os.read(self.pipe.fileno(), min(size, MIB))
 
 
-def inspect_sdk(archive, kernel, source, work, profile):
+def trusted_strip_argument(value=None, raw=None):
+    selected = value or shutil.which('strip')
+    require(selected is not None, 'A trusted GNU strip tool is required for the APK SDK source transformation')
+    requested = Path(selected).absolute()
+    path = regular(requested.resolve(), 64 * MIB)
+    require(os.access(path, os.X_OK), 'Trusted GNU strip is not executable')
+    require(raw is None or not any(p.is_relative_to(Path(raw).resolve()) for p in (requested, path)),
+            'GNU strip must not come from untrusted raw artifacts')
+    with path.open('rb') as stream:
+        header = stream.read(64)
+    require(header[:7] == b'\x7fELF\x02\x01\x01' and header[18:20] == b'\x3e\x00',
+            'Trusted GNU strip must be a native x86_64 ELF')
+    return path
+
+
+def verify_sdk_source_transform(proof, native_tool, records, work, stripper=None):
+    if proof['kind'] == 'native-elf-v1':
+        return None
+    tool = trusted_strip_argument(stripper)
+    transform = proof['source_transform']
+    require(transform['name'] == 'strip' and transform['sha256'] == sha256(tool),
+            'APK SDK source-transform GNU strip tool identity differs')
+    version = run_bounded([str(tool), '--version'], 64 * 1024, timeout=15)
+    require(version.startswith(b'GNU strip '), 'APK SDK source-transform tool is not GNU strip')
+    # Only the trusted host tool executes; the copied native APK is data for strip.
+    with tempfile.TemporaryDirectory(prefix='sdk-native-apk-strip-', dir=work) as temporary:
+        candidate = Path(temporary) / 'native-apk'
+        shutil.copy2(native_tool, candidate)
+        require(sha256(candidate) == proof['native_source']['sha256'],
+                'Native APK source changed before independent strip verification')
+        run_bounded([str(tool), str(candidate)], 64 * 1024, timeout=30, file_cap=64 * MIB)
+        digest = sha256(regular(candidate, 64 * MIB))
+    require(digest == transform['result_sha256'] == records[host_apk_bundle.HIDDEN]['sha256'],
+            'APK SDK hidden executable differs from independently stripped native source')
+    return {'tool_sha256': sha256(tool), 'result_sha256': digest, 'independently_recomputed': True}
+
+
+def inspect_sdk(archive, kernel, source, work, profile, native_controls=None, native_packages=None, stripper=None):
     relative = kernel.relative_to(source).as_posix()
     wanted = {relative + '/' + name for name in CONTEXTS}
     wanted |= {'Config-build.in', 'include/version.mk'}
+    apk_sdk = package_format.manager(profile) == 'apk'
+    if apk_sdk:
+        wanted |= {'ax6000-baseline/manifest.json', 'staging_dir/host/bin/apk'}
+    baseline_packages, bundle_records = {}, {}
     captured, names, declared, members, top = {}, set(), 0, 0, None
     process, raw = None, None
     if archive.name.endswith('.zst'):
@@ -584,16 +777,50 @@ def inspect_sdk(archive, kernel, source, work, profile):
                     target = PurePosixPath(linked)
                     require(target.parts and target.parts[0] == top and '..' not in target.parts,
                             'SDK archive link escapes its root')
+                name = PurePosixPath(*p.parts[1:]).as_posix()
+                bundle_member = apk_sdk and host_apk_bundle.is_bundle_path(name)
+                if bundle_member and not entry.isdir():
+                    require(not entry.islnk(), 'APK SDK host runtime must not use hardlinks')
+                    if entry.issym():
+                        bundle_records[name] = {'type': 'symlink', 'target': entry.linkname, 'mode': entry.mode}
                 if not entry.isfile():
                     continue
                 declared += entry.size
                 require(declared <= 16 * 1024**3, 'SDK declared byte cap exceeded')
-                name = PurePosixPath(*p.parts[1:]).as_posix()
+                if apk_sdk:
+                    require(PurePosixPath(name).name != 'private-key.pem', 'APK SDK must not export a PEM private signing key')
+                    require(not name.startswith('ax6000-baseline/ipks/'), 'APK SDK contains a legacy IPK baseline')
+                    if name.startswith('ax6000-baseline/apks/'):
+                        require(name.endswith('.apk') and len(PurePosixPath(name).parts) == 3 and 0 < entry.size <= 128 * MIB,
+                                'APK SDK baseline member path/size differs')
+                        digest = hashlib.sha256(); count = 0
+                        with tar.extractfile(entry) as stream:
+                            while chunk := stream.read(MIB):
+                                count += len(chunk); digest.update(chunk)
+                        require(count == entry.size, 'Truncated APK SDK baseline package')
+                        baseline_packages[name.removeprefix('ax6000-baseline/')] = {'sha256': digest.hexdigest(), 'size': count}
+                if bundle_member:
+                    require(0 < entry.size <= 64 * MIB and len(bundle_records) < 4096,
+                            'APK SDK host runtime byte/member cap exceeded')
+                    digest = hashlib.sha256(); count = 0; header = b''; wrapper = bytearray()
+                    with tar.extractfile(entry) as stream:
+                        while chunk := stream.read(MIB):
+                            count += len(chunk); digest.update(chunk)
+                            if len(header) < 64: header += chunk[:64 - len(header)]
+                            if name == 'staging_dir/host/bin/apk':
+                                require(count <= 64 * MIB, 'APK SDK entrypoint byte cap exceeded')
+                                wrapper.extend(chunk)
+                    require(count == entry.size, 'Truncated APK SDK host runtime')
+                    bundle_records[name] = {'type': 'file', 'sha256': digest.hexdigest(), 'size': count,
+                                            'mode': entry.mode, 'header': header.hex()}
+                    if name == 'staging_dir/host/bin/apk': captured[name] = bytes(wrapper)
+                    continue
                 if name not in wanted:
                     continue
-                require(entry.size <= 4 * MIB and name not in captured, 'SDK context byte/duplicate cap exceeded')
+                cap = 4 * MIB
+                require(entry.size <= cap and name not in captured, 'SDK context byte/duplicate cap exceeded')
                 with tar.extractfile(entry) as stream:
-                    captured[name] = stream.read(4 * MIB + 1)
+                    captured[name] = stream.read(cap + 1)
                 require(len(captured[name]) == entry.size, 'Truncated SDK context')
         while reader.read(MIB):
             pass
@@ -608,6 +835,62 @@ def inspect_sdk(archive, kernel, source, work, profile):
         if raw:
             raw.close()
     require(set(captured) == wanted, 'SDK lacks required kernel contexts/target defaults')
+    baseline_proof = None
+    if apk_sdk:
+        baseline = json_bytes(captured['ax6000-baseline/manifest.json'])
+        require(baseline.get('package_manager') == 'apk' and baseline.get('schema_version') == 1
+                and baseline.get('source_commit') == profile['firmware']['commit']
+                and baseline.get('kernel_version') == profile['firmware']['kernel_version']
+                and baseline.get('architecture') == profile['firmware']['architecture'], 'APK SDK baseline cohort identity differs')
+        tool = baseline.get('host_apk', {})
+        host_apk_bundle.verify_records(tool, bundle_records, captured['staging_dir/host/bin/apk'])
+        native_tool = regular(source / 'staging_dir/host/bin/apk', 64 * MIB)
+        native_source = tool.get('native_source', {})
+        with native_tool.open('rb') as stream:
+            native_header = stream.read(64)
+        require(native_source.get('sha256') == sha256(native_tool)
+                and native_source.get('size') == native_tool.stat().st_size
+                and native_source.get('machine') == host_apk_bundle.elf_machine(native_header)
+                and native_header[:7] == b'\x7fELF\x02\x01\x01' and native_header[18:20] == b'\x3e\x00',
+                'APK SDK host runtime native-source provenance differs from actual source executable')
+        bundler = regular(source / 'scripts/bundle-libraries.sh', MIB)
+        require(sha256(bundler) == tool.get('bundler_sha256'),
+                'APK SDK host runtime bundler differs from actual source script')
+        source_transform_proof = verify_sdk_source_transform(tool, native_tool, bundle_records, work, stripper)
+        records = baseline.get('files')
+        require(isinstance(records, list) and records and len(records) <= 10000, 'APK SDK baseline package inventory absent')
+        seen, identities = set(), {}
+        for record in records:
+            require(isinstance(record, dict) and set(record) == {'package', 'version', 'path', 'sha256'}, 'Malformed APK SDK baseline entry')
+            name, path = record['package'], record['path']
+            require(name not in identities and path not in seen and path in baseline_packages, 'APK SDK baseline duplicate/missing package')
+            require(record['sha256'] == baseline_packages[path]['sha256'], 'APK SDK baseline archive bytes differ')
+            if native_controls is not None:
+                require(name in native_controls and record['version'] == native_controls[name]['Version'], 'APK SDK/native baseline package identity differs')
+                actual = native_packages[name]
+                require(sha256(actual) == record['sha256'] and actual.stat().st_size == baseline_packages[path]['size'],
+                        'APK SDK frozen archive differs from actual native package')
+            identities[name] = record; seen.add(path)
+        require(seen == set(baseline_packages) and set(identities) == set(baseline.get('frozen_packages', [])),
+                'APK SDK actual/frozen package inventory differs')
+        require(set(baseline.get('frozen_kmods', [])) == {name for name in identities if name.startswith('kmod-')}
+                and 'kernel' in identities, 'APK SDK frozen kernel/module bank differs')
+        if native_controls is not None:
+            core = set(apk_world.core_recipe_roots(regular(source / 'tmp/.packageinfo', 64 * MIB).read_text()))
+            refreshed = (set(profile.get('packages', [])) - core) & {name for name in native_controls if name.startswith('kmod-')}
+            require(set(baseline['frozen_kmods']) == {name for name in native_controls if name.startswith('kmod-')} - refreshed,
+                    'APK SDK omits a native frozen kernel module')
+        context = baseline.get('kernel_context', {})
+        require(context.get('path') == relative and set(context.get('files', {})) ==
+                {'.config', 'Module.symvers', 'include/generated/autoconf.h', 'include/config/kernel.release'},
+                'APK SDK baseline kernel context inventory differs')
+        for name, record in context['files'].items():
+            value = captured[relative + '/' + name]
+            require(record == {'sha256': hashlib.sha256(value).hexdigest(), 'size': len(value)}, 'APK SDK baseline prepared context differs')
+        baseline_proof = {'packages': len(identities), 'frozen_kmods': len(baseline['frozen_kmods']),
+                          'manifest_sha256': hashlib.sha256(captured['ax6000-baseline/manifest.json']).hexdigest(),
+                          'host_apk': tool, 'source_transform': source_transform_proof,
+                          'whole_native_archive_bytes_matched': native_controls is not None}
     hashes = {}
     for name in CONTEXTS:
         data = regular(kernel / name, 4 * MIB).read_bytes()
@@ -637,6 +920,7 @@ def inspect_sdk(archive, kernel, source, work, profile):
     require(rows and all(len(row) >= 4 and re.fullmatch(rb'0x[0-9a-fA-F]{8}', row[0]) for row in rows),
             'Malformed Module.symvers export table')
     return {'sdk_sha256': sha256(archive), 'members': members, 'declared_bytes': declared,
+            'package_manager': 'apk' if apk_sdk else 'opkg', 'apk_baseline': baseline_proof,
             'kernel_relative_path': relative, 'matching_contexts': hashes, 'kernel_release': release,
             'native_abi_hash': stored, 'modversions': modversions,
             'export_rows': len(rows), 'export_crc_all_zero': all(int(row[0], 16) == 0 for row in rows),
@@ -731,8 +1015,10 @@ def main(args):
     require((firmware.get('target'), firmware.get('subtarget'), firmware.get('architecture')) ==
             ('mediatek', 'filogic', 'aarch64_cortex-a53'), 'Profile target/architecture differs')
     approved = read_json(repo / 'profiles' / ('redmi-ax6000-612-' + channel + '-new.json'))
-    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source'):
+    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source', 'asu', 'pbr_source', 'vendor_country_db', 'package_manager', 'apk_key_sha256'):
         require(profile.get(field) == approved.get(field), 'Exported profile differs from reviewed recipe: ' + field)
+    manager = package_format.manager(profile)
+    apk = trusted_apk_argument(getattr(args, 'apk', None), raw) if manager == 'apk' else None
     package_only = stock_factory.package_policy(profile)
     require({k: v for k, v in firmware.items() if k != 'kernel_version'} ==
             {k: v for k, v in approved['firmware'].items() if k != 'kernel_version'},
@@ -745,6 +1031,11 @@ def main(args):
     require(firmware.get('kernel_version') == manifest.get('kernel_version'), 'Export kernel ABI identity differs')
     require(manifest.get('channel') == channel and manifest.get('devices') == firmware['devices'],
             'Export manifest channel/devices differ')
+    if manager == 'apk':
+        require(manifest.get('package_manager') == 'apk' and manifest.get('apk_key_sha256') == profile.get('apk_key_sha256'),
+                'Export manifest APK format/key identity differs')
+    else:
+        require(manifest.get('package_manager', 'opkg') == 'opkg', 'Legacy OPKG manifest format differs')
     sdk_hash = profile.get('sdk', {}).get('sha256', '')
     build_id = profile.get('build_id', '')
     require(re.fullmatch(r'[0-9a-f]{64}', sdk_hash) and build_id == profile['id'] + '-' + commit[:12] + '-' + sdk_hash[:12]
@@ -752,12 +1043,19 @@ def main(args):
     lock = read_json(raw / 'lock.json')
     require(lock.get('firmware') == firmware and lock.get('sdk') == profile['sdk']
             and lock.get('profile_sha256') == sha256(raw / 'profile.json'), 'Export lock/profile identity differs')
+    if manager == 'apk':
+        require(lock.get('package_manager') == 'apk' and lock.get('apk_key_sha256') == profile.get('apk_key_sha256'),
+                'Export lock APK format/key identity differs')
     config = regular(raw / 'build.config', 4 * MIB).read_bytes()
     require(config == regular(source / '.config', 4 * MIB).read_bytes(), 'Exported build config differs from actual source')
-    for symbol in ('USE_APK', 'CLEAN_IPKG'):
+    disabled = ('CLEAN_IPKG', 'PACKAGE_opkg', 'PACKAGE_apk-mbedtls') if manager == 'apk' else ('USE_APK', 'CLEAN_IPKG')
+    for symbol in disabled:
         require(b'# CONFIG_' + symbol.encode() + b' is not set\n' in config, 'Required configuration disabled-state absent: ' + symbol)
     for symbol in ('SDK', 'DEVEL', 'ALL_KMODS', 'SIGNED_PACKAGES', 'SIGNATURE_CHECK', 'TARGET_MULTI_PROFILE', 'TARGET_PER_DEVICE_ROOTFS'):
         require(b'CONFIG_' + symbol.encode() + b'=y\n' in config, 'Required configuration lost: ' + symbol)
+    if manager == 'apk':
+        for symbol in ('USE_APK', 'PACKAGE_apk-openssl', 'PACKAGE_openwrt-keyring'):
+            require(b'CONFIG_' + symbol.encode() + b'=y\n' in config, 'Native APK provider/keyring configuration differs: ' + symbol)
     for package in package_only:
         require(b'CONFIG_PACKAGE_' + package.encode() + b'=m\n' in config,
                 'package_only must be compiled as a downloadable module: ' + package)
@@ -768,6 +1066,10 @@ def main(args):
     devices = set(re.findall(rb'^CONFIG_TARGET_DEVICE_([^=\n]+)=y$', config, re.M))
     require(devices == {('mediatek_filogic_DEVICE_' + d).encode() for d in DEVICES.values()}, 'Actual build selected other/missing devices')
     expected_files, fingerprint = repository_expected(repo, profile)
+    feature_expected = image_features.expected(profile, lock, source=source)
+    for name in ('etc/asu-cohort.json', 'etc/uci-defaults/99-ax6000-asu'):
+        if name in feature_expected['files']:
+            expected_files[name] = feature_expected['files'][name]
     for path, (data, mode) in expected_files.items():
         overlay = safe_path(source, 'files/' + path)
         require(regular(overlay, 16 * 1024).read_bytes() == data and overlay.stat().st_mode & 0o7777 == mode,
@@ -799,9 +1101,10 @@ def main(args):
     require(actual == set(inventory), 'Actual raw bin inventory differs from manifest')
     controls, ipks = {}, {}
     for name, path in inventory.items():
-        if not name.endswith('.ipk'):
+        if not name.endswith(('.ipk', '.apk')):
             continue
-        control, _ = ipk_contents(path)
+        require(name.endswith('.apk' if manager == 'apk' else '.ipk'), 'Mixed package archive formats in native export')
+        control, _ = package_contents(path, apk=apk)
         package = control.get('Package', '')
         require(package and package not in controls and control.get('Version')
                 and control.get('Architecture') in ('all', 'noarch', firmware['architecture']), 'Invalid/duplicate native IPK control')
@@ -812,17 +1115,24 @@ def main(args):
     require(controls.get('kernel', {}).get('Version') == firmware['kernel_version'], 'Native kernel IPK ABI differs')
     selection = read_json(raw / 'build-selection.json')
     source_selection = read_json(source / 'build-selection.json')
-    for field in ('selected_packages', 'candidate_kmods', 'selected_kmods', 'incompatible_kmods', 'source_patches', 'devices', 'channel'):
+    for field in ('selected_packages', 'candidate_kmods', 'selected_kmods', 'incompatible_kmods', 'source_patches', 'devices', 'channel', 'apk_world'):
         require(selection.get(field) == source_selection.get(field), 'Actual source/export selection differs: ' + field)
     require(selection.get('firmware') == firmware and set(selection.get('built_packages', [])) == set(controls),
             'Exported selection firmware/built package inventory differs')
     require(manifest.get('source_patches', []) == selection.get('source_patches', []),
             'Export manifest/selection source patch provenance differs')
+    if manager == 'apk':
+        guard = apk_world.configure_source(profile, source, check_only=True)
+        apk_world.configure_policy(profile, source, check_only=True)
+        expected_guard = {**guard, 'policy_sha256': sha256(source / 'ax6000-apk-world-policy.json')}
+        require(manifest.get('apk_world') == selection.get('apk_world') == expected_guard,
+                'Actual native APK rootfs/core policy provenance differs')
     patch_record = source / 'firmware-source-patches.json'
     if patch_record.is_file():
         require(read_json(patch_record).get('patches') == selection.get('source_patches', []),
                 'Actual source patch record differs from export')
-    require(set(profile['packages']) <= controls.keys() and set(selection.get('selected_kmods', [])) <= controls.keys(),
+    available = set(controls) | {control.get('Base-Package', name) for name, control in controls.items()}
+    require(set(profile['packages']) <= available and set(selection.get('selected_kmods', [])) <= available,
             'Export omits requested packages or selected kernel modules')
     selected = set(v.decode() for v in re.findall(rb'^CONFIG_PACKAGE_([^=\n]+)=[my]$', config, re.M))
     require(selected == set(selection.get('selected_packages', [])), 'Actual selected package configuration differs')
@@ -840,8 +1150,9 @@ def main(args):
         require(actual_name in controls, 'Export omits selected native IPK: ' + actual_name)
         if suffix:
             require(controls[actual_name].get('ABIVersion') == suffix
-                    and name in {v.strip() for v in controls[actual_name].get('Provides', '').split(',')},
-                    'Selected native IPK ABI alias differs: ' + actual_name)
+                    and (controls[actual_name].get('Base-Package') == name if manager == 'apk' else
+                         name in {v.strip() for v in controls[actual_name].get('Provides', '').split(',')}),
+                    'Selected native package ABI alias differs: ' + actual_name)
     abi = re.fullmatch(r'(6\.12\.[0-9]+)~([0-9a-f]{32})-r([0-9]+)', firmware['kernel_version'])
     require(abi is not None, 'Malformed native 6.12 kernel ABI')
     kernels = [p.parent for p in source.glob('build_dir/target-*/linux-*/linux-*/.vermagic')
@@ -852,7 +1163,8 @@ def main(args):
     sdk_name = PurePosixPath(urlsplit(profile['sdk']['url']).path).name
     sdk = safe_path(raw, 'bin/targets/mediatek/filogic/' + sdk_name)
     require(sdk in inventory.values() and sha256(sdk) == sdk_hash, 'Exact exported SDK is absent or changed')
-    context, kernel_config = inspect_sdk(sdk, kernel, source, work, profile)
+    stripper = trusted_strip_argument(getattr(args, 'strip', None), raw) if manager == 'apk' else None
+    context, kernel_config = inspect_sdk(sdk, kernel, source, work, profile, native_controls=controls, native_packages=ipks, stripper=stripper)
     target = raw / 'bin/targets/mediatek/filogic'
     records = {}
     for layout, device in DEVICES.items():
@@ -882,7 +1194,8 @@ def main(args):
         dt_record = verify_dtb(fit['fdt']['path'], layout)
         package_manifest = resolve_device_manifest(target, layout, profile, image, source / 'bin/targets/mediatek/filogic')
         root_record = inspect_root(root, layout, tools['unsquashfs4'], profile, controls, ipks,
-                                   expected_files, fingerprint, kernel_config, device_manifest(package_manifest))
+                                   expected_files, fingerprint, kernel_config, device_manifest(package_manifest),
+                                   feature_lock=lock, feature_source=source, apk=apk)
         root_record['package_manifest'] = {'filename': package_manifest.name, 'sha256': sha256(package_manifest)}
         fit_record = {k: {key: value for key, value in v.items() if key != 'path'} for k, v in fit.items()}
         records[layout] = {'image': image.name, 'image_sha256': before, 'image_size': image.stat().st_size,
@@ -921,11 +1234,14 @@ def main(args):
                 stock_factory_proof = stock_factory.verify_native_factory(ram_image, path,
                     package_only=package_only,
                     expected_packages={name: controls[name] for name in records['stock']['root']['installed_packages']},
-                    expected_dtb_sha256=records['stock']['device_tree']['sha256'], kernel_inputs=kernel_inputs)
+                    expected_dtb_sha256=records['stock']['device_tree']['sha256'], kernel_inputs=kernel_inputs,
+                    package_manager=manager, expected_files=expected_files, expected_hashes={name: item['sha256'] for name, item in
+                        records['stock']['root']['optional_features']['files'].items()})
                 optional_sizes[path.name]['payload_verified'] = True
     if 'tailscale' in package_only:
         require(stock_factory_proof is not None, 'Native stock factory UBI is mandatory for package_only Tailscale')
     result = {'schema_version': 1, 'ok': True, 'channel': channel, 'build_id': build_id,
+              'package_manager': manager, 'host_apk': {'path': str(apk), 'sha256': sha256(apk)} if apk else None,
               'source_commit': commit, 'kernel_abi': firmware['kernel_version'], 'layouts': records,
               'sdk_context': context, 'sysupgrade_input': {'path': str(expected_kernel),
                   'sha256': sha256(expected_kernel), 'size': expected_kernel.stat().st_size,
@@ -950,6 +1266,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('repo', 'source', 'raw', 'output'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--apk', help='Explicit trusted x86_64 host apk-tools 3.0.5 (required for APK images)')
+    parser.add_argument('--strip', help='Trusted native GNU strip matching SDK source-transform proof (default: local strip)')
     parser.add_argument('--work-dir', help='Fresh inspection directory outside readonly inputs (default: /tmp)')
     args = parser.parse_args()
     try:

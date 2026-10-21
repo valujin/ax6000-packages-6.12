@@ -16,7 +16,7 @@ firmware = importlib.util.module_from_spec(spec); spec.loader.exec_module(firmwa
 
 
 def profile(channel='recommended'):
-    return json.loads((ROOT / f'profiles/redmi-ax6000-612-{channel}-new.json').read_text())
+    return json.loads((ROOT / f'tests/fixtures/legacy612-{channel}-source-profile.json').read_text())
 
 
 class Source612Tests(unittest.TestCase):

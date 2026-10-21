@@ -1,0 +1,10 @@
+{
+  "evidence": "Byte-identical reviewed recommended/latest source preimages; hook is checked before/post-transform by apk_world.configure_source.",
+  "path": "include/rootfs.mk",
+  "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git",
+  "sha256": "502ee81027a310f84345471c27c2c6d3ee212456bda6da5e1e7410f8c24d669d",
+  "source_commits": [
+    "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+    "a99b0888b88f134f56bcb2a7d93027b5d20638a9"
+  ]
+}
