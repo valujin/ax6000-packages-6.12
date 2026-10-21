@@ -1124,7 +1124,19 @@ def main(args):
     source_selection = read_json(source / 'build-selection.json')
     for field in ('selected_packages', 'candidate_kmods', 'selected_kmods', 'incompatible_kmods', 'source_patches', 'devices', 'channel', 'apk_world'):
         require(selection.get(field) == source_selection.get(field), 'Actual source/export selection differs: ' + field)
-    require(selection.get('firmware') == firmware and set(selection.get('built_packages', [])) == set(controls),
+    canonical_controls, canonical_ipks = controls, ipks
+    if manager == 'apk':
+        canonical_names = [control.get('Base-Package') for control in controls.values()]
+        built_names = selection.get('built_packages', [])
+        require(all(isinstance(name, str) and name for name in canonical_names)
+                and len(canonical_names) == len(set(canonical_names)) == len(controls),
+                'Native APK canonical package identities collide or are absent')
+        require(isinstance(built_names, list) and all(isinstance(name, str) and name for name in built_names)
+                and len(built_names) == len(set(built_names)) == len(controls),
+                'Exported APK built package inventory count/uniqueness differs')
+        canonical_controls = {control['Base-Package']: control for control in controls.values()}
+        canonical_ipks = {control['Base-Package']: ipks[name] for name, control in controls.items()}
+    require(selection.get('firmware') == firmware and set(selection.get('built_packages', [])) == set(canonical_controls),
             'Exported selection firmware/built package inventory differs')
     require(manifest.get('source_patches', []) == selection.get('source_patches', []),
             'Export manifest/selection source patch provenance differs')
@@ -1171,7 +1183,7 @@ def main(args):
     sdk = safe_path(raw, 'bin/targets/mediatek/filogic/' + sdk_name)
     require(sdk in inventory.values() and sha256(sdk) == sdk_hash, 'Exact exported SDK is absent or changed')
     stripper = trusted_strip_argument(getattr(args, 'strip', None), raw) if manager == 'apk' else None
-    context, kernel_config = inspect_sdk(sdk, kernel, source, work, profile, native_controls=controls, native_packages=ipks, stripper=stripper)
+    context, kernel_config = inspect_sdk(sdk, kernel, source, work, profile, native_controls=canonical_controls, native_packages=canonical_ipks, stripper=stripper)
     target = raw / 'bin/targets/mediatek/filogic'
     records = {}
     for layout, device in DEVICES.items():
