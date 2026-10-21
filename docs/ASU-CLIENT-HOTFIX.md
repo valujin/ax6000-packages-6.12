@@ -6,14 +6,16 @@
 
 На Redmi AX6000 нормальна пара `apk --print-arch` → `aarch64` и `/etc/apk/arch` → `aarch64_cortex-a53`. Первая команда показывает архитектуру сборки клиента APK, файл задаёт архитектуру пакетов. Старый установщик ошибочно требовал их полного совпадения.
 
+Исправленный установщик также принимает пять штатных `@public` feeds зеркала `mirrors.vsean.net` для 25.12.0 и `aarch64_cortex-a53`: base, luci, packages, routing, telephony. Скрипт первого запуска ImmortalWrt заменяет официальный адрес этим зеркалом; прежняя проверка его не учитывала. Чтение базы установленных пакетов теперь выполняется одним запросом APK вместо 262, а этапы и прогресс проверки выводятся в терминал.
+
 Для канала `recommended` запустить исправленный установщик по закреплённой ссылке с проверкой SHA256:
 
 ```sh
 sh <<'EOF'
 set -eu
 f=/tmp/ax6000-install-feed.fixed.sh
-wget -O "$f" 'https://raw.githubusercontent.com/valujin/ax6000-packages-6.12/1e248a67e72adafb8305f1f263789764316fc37f/scripts/install-feed-apk.sh'
-echo '2be3bb361e96761847819eb4198a5789d5546630852ac5ca282485baf6af3ea7  /tmp/ax6000-install-feed.fixed.sh' | sha256sum -c -
+wget -O "$f" 'https://raw.githubusercontent.com/valujin/ax6000-packages-6.12/b122c35046ab1c3cd03828aabd168bb35466e2c8/scripts/install-feed-apk.sh'
+echo 'cf09ea4a038f1080624aa5da534cc78871f70741b273db12515f875c9b484ebf  /tmp/ax6000-install-feed.fixed.sh' | sha256sum -c -
 sh "$f"
 if [ ! -e /root/ax6000-install-feed.before-fix ]; then
     cp -p /usr/sbin/ax6000-install-feed /root/ax6000-install-feed.before-fix
