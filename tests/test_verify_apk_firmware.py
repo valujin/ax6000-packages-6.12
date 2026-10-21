@@ -108,7 +108,7 @@ class NativeApkImageTests(unittest.TestCase):
         self.assertEqual(proof['package_manager'], 'apk')
         self.assertTrue(proof['apk_executable_present'])
         self.assertEqual(len(proof['modules']), 4)
-        self.assertEqual(proof['active_feeds'], 6)
+        self.assertEqual(proof['active_feeds'], 5)
         self.assertGreater(proof['apk_policy']['protected_packages'], 4)
         self.assertEqual(proof['package_only_absent'], ['tailscale'])
         self.assertGreaterEqual(len(proof['optional_features']['files']), 9)

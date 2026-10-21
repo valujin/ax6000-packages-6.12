@@ -24,24 +24,35 @@ APK = os.environ.get('AX6000_HOST_APK') or os.environ.get('AX6000_APK') or os.en
 
 class NativeApkPolicy(unittest.TestCase):
     def test_overlay_tags_only_public_userspace_and_preserves_trust_and_cohort(self):
-        profile = json.loads((ROOT / 'profiles/redmi-ax6000-612-latest-new.json').read_text())
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory)
-            firmware.repository_files(source, profile=profile)
-            firmware.repository_files(source, profile=profile, check_only=True)
-            feeds = (source / 'files/etc/apk/repositories.d/distfeeds.list').read_text()
-            urls = [line for line in feeds.splitlines() if not line.startswith('#')]
-            self.assertEqual(len(urls), 6)
-            for line in urls:
-                self.assertTrue(line.startswith('@public https://downloads.immortalwrt.org/releases/25.12.0/packages/aarch64_cortex-a53/'))
-                self.assertNotIn('/targets/', line); self.assertNotIn('/kmods/', line)
-            self.assertEqual((source / 'files/etc/apk/keys/repository-apk.pem').read_bytes(), (ROOT / 'keys/repository-apk.pem').read_bytes())
-            self.assertEqual((source / 'files/etc/ax6000/repository.pub').read_bytes(), (ROOT / 'keys/repository.pub').read_bytes())
-            self.assertIn('channels/latest}', (source / 'files/usr/sbin/ax6000-install-feed').read_text())
-            self.assertFalse((source / 'files/etc/opkg').exists())
-            (source / 'files/etc/apk/repositories.d/customfeeds.list').write_text('https://foreign.example/packages.adb\n')
-            with self.assertRaisesRegex(ValueError, 'overlay differs'):
+        from test_verify_firmware import verify
+        base = 'https://downloads.immortalwrt.org/releases/25.12.0/packages/aarch64_cortex-a53/'
+        expected_urls = ['@public ' + base + feed + '/packages.adb'
+                         for feed in ('base', 'luci', 'packages', 'routing', 'telephony')]
+        for channel in ('recommended', 'latest'):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                profile = json.loads((ROOT / ('profiles/redmi-ax6000-612-' + channel + '-new.json')).read_text())
+                source = Path(directory)
+                firmware.repository_files(source, profile=profile)
                 firmware.repository_files(source, profile=profile, check_only=True)
+                feeds = (source / 'files/etc/apk/repositories.d/distfeeds.list').read_text()
+                urls = [line for line in feeds.splitlines() if line and not line.startswith('#')]
+                self.assertEqual(urls, expected_urls)
+                self.assertNotIn('/video/', feeds)
+                self.assertTrue(feeds.endswith('\n'))
+                # The independent rootfs inspector must expect the complete same
+                # rendered overlay, including both original production public keys.
+                inspected, _ = verify.apk_repository_expected(ROOT, profile)
+                for target, (data, _) in inspected.items():
+                    self.assertEqual((source / 'files' / target).read_bytes(), data)
+                self.assertEqual((source / 'files/etc/apk/keys/repository-apk.pem').read_bytes(), (ROOT / 'keys/repository-apk.pem').read_bytes())
+                self.assertEqual((source / 'files/etc/ax6000/repository.pub').read_bytes(), (ROOT / 'keys/repository.pub').read_bytes())
+                self.assertIn('channels/' + channel + '}', (source / 'files/usr/sbin/ax6000-install-feed').read_text())
+                self.assertFalse((source / 'files/etc/opkg').exists())
+                # This is the downloadable APK feed list, not source build feeds.
+                self.assertIn('video', [item['name'] for item in profile['feeds']])
+                (source / 'files/etc/apk/repositories.d/customfeeds.list').write_text('https://foreign.example/packages.adb\n')
+                with self.assertRaisesRegex(ValueError, 'overlay differs'):
+                    firmware.repository_files(source, profile=profile, check_only=True)
 
     def test_actual_new_source_profiles_validate_against_pinned_author_pair(self):
         lock_path = ROOT / 'tests/fixtures/pbr-612-native-inputs.json'

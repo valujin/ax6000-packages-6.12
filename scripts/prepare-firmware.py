@@ -255,7 +255,7 @@ def apk_repository_files(profile):
     feeds = ("# Public userspace packages; explicitly select with @public.\n"
              "# Core, kernel and vendor packages stay bound to this image.\n")
     feeds += "".join("@public https://downloads.immortalwrt.org/releases/25.12.0/packages/aarch64_cortex-a53/"
-                     + feed + "/packages.adb\n" for feed in ("base", "luci", "packages", "routing", "telephony", "video"))
+                     + feed + "/packages.adb\n" for feed in ("base", "luci", "packages", "routing", "telephony"))
     return {
         "files/etc/apk/repositories.d/distfeeds.list": feeds.encode(),
         "files/etc/apk/repositories.d/customfeeds.list":

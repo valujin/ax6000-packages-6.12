@@ -351,7 +351,7 @@ def apk_repository_expected(repo, profile):
              b'# Core, kernel and vendor packages stay bound to this image.\n')
     feeds += b''.join(b'@public https://downloads.immortalwrt.org/releases/25.12.0/packages/aarch64_cortex-a53/'
                       + feed.encode() + b'/packages.adb\n' for feed in
-                      ('base', 'luci', 'packages', 'routing', 'telephony', 'video'))
+                      ('base', 'luci', 'packages', 'routing', 'telephony'))
     return {'etc/apk/repositories.d/distfeeds.list': (feeds, 0o644),
             'etc/apk/repositories.d/customfeeds.list':
                 (b'# The signed matching AX6000 APK repository is installed by ax6000-install-feed.\n', 0o644),
