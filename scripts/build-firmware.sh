@@ -74,17 +74,15 @@ PY
 )
 source_dir="$work/source"
 prepare=(python3 "$script_dir/prepare-firmware.py" --profile "$profile" --lock "$lock" --source-dir "$source_dir")
-# Native world normally emits IB. Compile explicitly only when its output is absent.
+# CONFIG_IB makes native image installation build kernels for unselected devices,
+# including FIT pipelines requiring their absent per-device rootfs. Disable that
+# graph expansion during world; package IB explicitly from the selected images.
 ensure_imagebuilder() {
     grep -q '^CONFIG_IB=y$' "$source_dir/.config" || return 0
+    [[ -f $source_dir/target/imagebuilder/Makefile && ! -L $source_dir/target/imagebuilder/Makefile ]] || fail 'native ImageBuilder target is unavailable'
+    make -j"$BUILD_JOBS" target/imagebuilder/compile CONFIG_IB= V=s
     local archives=("$source_dir"/bin/targets/mediatek/filogic/*imagebuilder*.tar.*)
     [[ -e ${archives[0]} || -L ${archives[0]} ]] || archives=()
-    if ((${#archives[@]} == 0)); then
-        [[ -f $source_dir/target/imagebuilder/Makefile && ! -L $source_dir/target/imagebuilder/Makefile ]] || fail 'native ImageBuilder target is unavailable'
-        make -j"$BUILD_JOBS" target/imagebuilder/compile V=s
-        archives=("$source_dir"/bin/targets/mediatek/filogic/*imagebuilder*.tar.*)
-        [[ -e ${archives[0]} || -L ${archives[0]} ]] || archives=()
-    fi
     ((${#archives[@]} == 1)) || fail 'native build must produce exactly one ImageBuilder archive'
     [[ -f ${archives[0]} && ! -L ${archives[0]} ]] || fail 'native ImageBuilder archive is not a regular file'
 }
@@ -109,7 +107,7 @@ PY
     # Native ignored copy/catalog merging can retain an obsolete stock factory.
     image_cache_receipts=$(mktemp -d "$work/image-cache-reset.XXXXXX")
     "${prepare[@]}" --phase reset-cached-images --cleanup-receipt "$image_cache_receipts/receipt.json"
-    make -j"$BUILD_JOBS" world V=s
+    make -j"$BUILD_JOBS" world CONFIG_IB= V=s
     ensure_imagebuilder
     "${prepare[@]}" --phase export --output-dir "$output"
     exit 0
@@ -142,6 +140,6 @@ fingerprints = {name: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest(
                 for name, path in zip(('profile_sha256', 'lock_sha256'), sys.argv[1:3])}
 pathlib.Path(sys.argv[3]).write_text(json.dumps(fingerprints, sort_keys=True) + '\n')
 PY
-make -j"$BUILD_JOBS" world V=s
+make -j"$BUILD_JOBS" world CONFIG_IB= V=s
 ensure_imagebuilder
 "${prepare[@]}" --phase export --output-dir "$output"

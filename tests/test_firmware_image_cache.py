@@ -161,7 +161,7 @@ class ImageCacheReset(unittest.TestCase):
                               capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         phases=log.read_text().splitlines()
-        self.assertEqual(phases[-4:],['verify','reset-cached-images','make:-j1 world V=s','export'])
+        self.assertEqual(phases[-4:],['verify','reset-cached-images','make:-j1 world CONFIG_IB= V=s','export'])
         receipts=list(self.root.glob('image-cache-reset.*/receipt.json'))
         self.assertEqual(len(receipts),1);self.assertFalse(receipts[0].is_relative_to(self.source))
         self.assertTrue(all(not (self.source/p).exists() for p in self.paths))
