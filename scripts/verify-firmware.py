@@ -1050,7 +1050,14 @@ def main(args):
     require(config == regular(source / '.config', 4 * MIB).read_bytes(), 'Exported build config differs from actual source')
     disabled = ('CLEAN_IPKG', 'PACKAGE_opkg', 'PACKAGE_apk-mbedtls') if manager == 'apk' else ('USE_APK', 'CLEAN_IPKG')
     for symbol in disabled:
-        require(b'# CONFIG_' + symbol.encode() + b' is not set\n' in config, 'Required configuration disabled-state absent: ' + symbol)
+        if manager == 'apk' and symbol == 'CLEAN_IPKG':
+            # Native Kconfig omits this symbol when its !USE_APK dependency is false.
+            declarations = [line for line in config.splitlines()
+                            if re.match(rb'[ \t]*(?:#[ \t]*)?CONFIG_CLEAN_IPKG\b', line)]
+            require(declarations in ([], [b'# CONFIG_CLEAN_IPKG is not set']),
+                    'Native APK CLEAN_IPKG must be absent or explicitly disabled')
+        else:
+            require(b'# CONFIG_' + symbol.encode() + b' is not set\n' in config, 'Required configuration disabled-state absent: ' + symbol)
     for symbol in ('SDK', 'DEVEL', 'ALL_KMODS', 'SIGNED_PACKAGES', 'SIGNATURE_CHECK', 'TARGET_MULTI_PROFILE', 'TARGET_PER_DEVICE_ROOTFS'):
         require(b'CONFIG_' + symbol.encode() + b'=y\n' in config, 'Required configuration lost: ' + symbol)
     if manager == 'apk':
