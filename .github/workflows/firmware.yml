@@ -108,6 +108,7 @@ jobs:
       - name: Build firmware, SDK and kernel modules
         id: firmware_build
         run: |
+          set -o pipefail
           mkdir -p logs
           python3 scripts/hosted-publication.py -- bash scripts/build-firmware.sh --profile "$PROFILE" --lock state/firmware-lock.json \
             --work-dir "$RUNNER_TEMP/firmware-build" --output-dir raw \

@@ -24,6 +24,39 @@ def bundle_proof(sdk, native_source):
     return module.describe(sdk, native_source, bundler)
 
 
+class FreshNativeApkSelectionTests(unittest.TestCase):
+    def test_actual_source_profiles_verify_before_sdk_baseline_exists(self):
+        repository = Path(__file__).resolve().parents[1]
+        for channel in ('recommended', 'latest'):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                profile = json.loads((repository / 'profiles' /
+                    f'redmi-ax6000-612-{channel}-new.json').read_text())
+                self.assertEqual(profile['package_manager'], 'apk')
+                self.assertIsNone(profile['sdk']['url'])
+                self.assertIsNone(profile['firmware']['kernel_version'])
+                config = 'CONFIG_USE_APK=y\n' + ''.join(
+                    f'CONFIG_PACKAGE_{name}=y\n' for name in profile['packages'])
+                languages = {language: 'y' for language in profile.get('luci_languages', [])}
+                config += ''.join(f'CONFIG_LUCI_LANG_{language}=y\n' for language in languages)
+                (source / '.config').write_text(config)
+                (source / 'build-selection.json').write_text(json.dumps(
+                    {'candidate_kmods': [], 'luci_languages': languages}))
+                self.assertFalse((source / 'ax6000-baseline').exists())
+                report = prepare.verify_selection(profile, source)
+                self.assertEqual(report['required_native_kmods'], [])
+                self.assertTrue(set(profile['packages']) <= set(report['selected_packages']))
+                (source / '.config').write_text(config.replace('CONFIG_PACKAGE_pbr=y\n', ''))
+                with self.assertRaisesRegex(ValueError, 'requested packages unresolved.*pbr'):
+                    prepare.verify_selection(profile, source)
+
+    def test_sdk_decoder_still_requires_native_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = channel_profile(); profile['package_manager'] = 'apk'
+            with self.assertRaisesRegex(ValueError, 'APK SDK requires its native baseline manifest'):
+                prepare.sdk_apk(profile, Path(directory))
+
+
 class ApkSdkTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)

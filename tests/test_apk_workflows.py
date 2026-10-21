@@ -80,6 +80,24 @@ class APKWorkflowTests(unittest.TestCase):
         self.assertEqual(record['secrets_present'], [], 'secret values must be removed before launching publication')
         return record
 
+    def test_native_build_tee_preserves_child_status_with_github_bash_e_default(self):
+        # GitHub's implicit shell is bash -e, without pipefail. Execute the
+        # actual workflow block under that shell rather than our strict helper.
+        stub = self.root / 'commands/python3'
+        stub.write_text('#!' + sys.executable + '\nimport os,sys\nprint("native-build-marker", flush=True)\nsys.exit(int(os.environ["CHILD_STATUS"]))\n')
+        stub.chmod(0o755)
+        block = shell_blocks('firmware.yml')['Build firmware, SDK and kernel modules']
+        environment = dict(self.environment, PROFILE='fixture-profile.json')
+        for inherited in ('SHELLOPTS', 'BASHOPTS', 'BASH_ENV'):
+            environment.pop(inherited, None)
+        for status in (0, 37):
+            with self.subTest(status=status):
+                result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-c', block],
+                    cwd=self.root, env=dict(environment, CHILD_STATUS=str(status)),
+                    text=True, capture_output=True)
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertIn('native-build-marker', (self.root / 'logs/firmware-build.log').read_text())
+
     def test_hosted_scope_preserves_only_trusted_apk_path_without_signing_secrets(self):
         scope = runpy.run_path(str(ROOT / 'scripts/hosted-publication.py'))
         preserved = scope['PRESERVE']

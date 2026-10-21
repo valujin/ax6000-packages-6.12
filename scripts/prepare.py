@@ -766,7 +766,8 @@ def verify_selection(profile, sdk):
                     "6.12 SDK must retain opkg/IPK; APK was enabled after defconfig")
     selected = set(re.findall(r"^CONFIG_PACKAGE_(.+)=[my]$", config, re.M))
     baseline = baseline_packages(profile, sdk)
-    required = required_native_kmods(baseline, config, apk=sdk_apk(profile, sdk))
+    # Fresh native source trees have no exported SDK package bank to decode yet.
+    required = required_native_kmods(baseline, config, apk=sdk_apk(profile, sdk)) if baseline else set()
     require(required <= selected, "native dependency selection unresolved after defconfig: "
             + ", ".join(sorted(required - selected)))
     missing = sorted(set(profile["packages"]) - selected - baseline.keys())
