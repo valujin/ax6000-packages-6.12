@@ -59,16 +59,16 @@ def activate(encoded,channel,expected_predecessor,site_url,repository,profiles,w
     profile=snapshot.read_json(active)
     need(snapshot.sha256_file(active)==PROFILE_SHA256,'Active recommended profile is not the accepted R5 APK profile')
     need(profile.get('package_manager')=='apk' and profile.get('channel')==channel,'Active profile is not recommended APK')
-    for key,value in {'profile_id':profile['id'],'build_id':profile['build_id'],'kernel_version':profile['firmware']['kernel_version']}.items():
-        need(pointer.get(key)==value,'Incoming snapshot changes the active firmware generation')
+    for field,value in {'profile_id':profile['id'],'build_id':profile['build_id'],'kernel_version':profile['firmware']['kernel_version']}.items():
+        need(pointer.get(field)==value,'Incoming snapshot changes the active firmware generation')
     work=snapshot.fresh(work);output=snapshot.fresh(output);work.mkdir(parents=True)
     previous=snapshot.fetch_live(site_url,repository,public_key,usign,work/'live')
     need(previous is not None and all(previous['channels'].get(name) is not None for name in ('recommended','latest')),'Both authenticated live channels are required')
     old=previous['channels']['recommended'];latest=previous['channels']['latest']
     need(old.get('manifest_sha256')==expected_predecessor,'Authenticated live predecessor differs from explicit authorization')
     need(pointer['manifest_sha256']!=expected_predecessor,'Incoming snapshot is already the live predecessor')
-    for key in ('profile_id','build_id','kernel_version'):
-        need(old.get(key)==pointer.get(key),'Snapshot activation cannot change firmware generation')
+    for field in ('profile_id','build_id','kernel_version'):
+        need(old.get(field)==pointer.get(field),'Snapshot activation cannot change firmware generation')
     # Restore both generations to authenticate complete profile bytes, not just
     # pointer fields. All signature/index/catalog/API checks stay in normal APIs.
     old_tree=work/'previous-recommended';incoming=work/'incoming-recommended';retained=work/'retained-latest'

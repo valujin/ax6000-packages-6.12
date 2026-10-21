@@ -54,6 +54,7 @@ class SnapshotActivation(unittest.TestCase):
             self.identities.append(tree)
             if not (tree/'snapshot-manifest.sig').is_file():raise ValueError('Missing signed snapshot proof')
         def compose(live,sig,channels,repo,key,pub,usign,out,**kwargs):
+            self.assertEqual(key,self.root/'private','Activation changed the original signing-key argument')
             self.compositions.append(channels);self.assertEqual(set(kwargs),{'apk'})
             state=copy.deepcopy(self.previous);state['channels']={name:pointer for name,(_,pointer) in channels.items()}
             out.mkdir();(out/'site-state.json').write_bytes(snapshot.canonical_json(state));(out/'site-state.sig').write_text('new signed state')
@@ -74,6 +75,22 @@ class SnapshotActivation(unittest.TestCase):
         self.assertEqual(set(check),{'schema_version','site_url','before','after'})
         self.assertEqual(check['before']['site-state.json'],snapshot.sha256_file(self.root/'work/live/site-state.json'))
         self.assertEqual(check['after']['site-state.json'],snapshot.sha256_file(self.root/'public/site-state.json'))
+
+    @unittest.skipUnless(os.environ.get('USIGN'), 'Set USIGN to the official host tool')
+    def test_original_signer_reaches_normal_compose_and_real_usign(self):
+        tool=os.environ['USIGN'];key=self.root/'private';public=self.root/'public-key'
+        subprocess.run([tool,'-G','-s',str(key),'-p',str(public)],check=True,capture_output=True)
+        def compose(live,sig,channels,repo,signer,pub,usign,out,**kwargs):
+            self.assertEqual(signer,key,'Original signing-key path must cross the composition boundary unchanged')
+            def identity(tree,*args,**kw):
+                return snapshot.read_json(tree/'channel/profile.json'),[{'path':'profile.json','size':(tree/'channel/profile.json').stat().st_size}]
+            with patch.object(snapshot,'read_state',return_value=copy.deepcopy(self.previous)),patch.object(snapshot,'restored_identity',side_effect=identity):
+                return snapshot.compose_site(live,sig,channels,repo,signer,pub,tool,out,**kwargs)
+        self.backend.compose_site=compose
+        state=self.run_activation()
+        self.assertEqual(state['channels']['latest'],self.latest)
+        snapshot.verify(self.root/'public/site-state.json',self.root/'public/site-state.sig',public,tool)
+        self.assertEqual(snapshot.read_json(self.root/'public/site-state.json'),state)
 
     def test_wrong_predecessor_fails_before_restore_or_compose(self):
         with self.assertRaisesRegex(ValueError,'predecessor'):self.run_activation(predecessor='0'*64)
