@@ -222,18 +222,70 @@ def validate_equal_kernel_context(proof):
             raise ValueError('Invalid native kernel comparison identity: '+name)
 
 
+def legacy_migration_metadata(tree,proof,workspace):
+    """Resolve absent V2 predecessor metadata without changing its signed tree."""
+    catalog=read_json(Path(tree)/'downloads.json')
+    release=catalog.get('release',{})
+    tag='firmware-'+proof['predecessor_build_id']
+    if (not isinstance(release,dict) or release.get('repository')!='valujin/ax6000-packages-6.12'
+            or type(release.get('id')) is not int or release['id']<=0
+            or release.get('tag')!=tag or catalog.get('build_id')!=proof['predecessor_build_id']
+            or not isinstance(release.get('recipe_commit'),str)
+            or not re.fullmatch('[0-9a-f]{40}',release['recipe_commit'])):
+        raise ValueError('Legacy migration catalog differs from the exact predecessor release')
+    transport=module('publication_api')
+    api=transport.ReleaseAPI(release['repository'])
+    before=api.get_release(release['id'])
+    if (not isinstance(before,dict) or before.get('id')!=release['id']
+            or before.get('tag_name')!=tag or before.get('draft') is not False
+            or before.get('immutable') is not True
+            or api.resolve_tag_commit(tag)!=release['recipe_commit']):
+        raise ValueError('Legacy migration metadata requires the exact immutable predecessor release')
+    identity=transport.release_identity(before)
+    assets=[asset for asset in before.get('assets',[]) if asset.get('name')=='firmware-manifest.json']
+    expected=proof['firmware_manifest_sha256']['before']
+    if (len(assets)!=1 or type(assets[0].get('size')) is not int
+            or not 0<assets[0]['size']<=8*1024**2 or assets[0].get('digest')!='sha256:'+expected):
+        raise ValueError('Legacy migration manifest asset differs from the reviewed proof')
+    asset=assets[0]
+    _MIGRATION_DOWNLOAD_BUDGET['used']+=asset['size']
+    if _MIGRATION_DOWNLOAD_BUDGET['used']>512*1024**2:
+        raise ValueError('Migration process download byte cap exceeded')
+    resolved=Path(workspace)/'legacy-before';resolved.mkdir()
+    for name in ('downloads.json','downloads.sig'):
+        source=Path(tree)/name
+        if source.is_symlink() or not source.is_file() or source.stat().st_size>8*1024**2:
+            raise ValueError('Missing, linked or oversized legacy catalog metadata')
+        shutil.copyfile(source,resolved/name)
+    destination=resolved/'firmware-manifest.json'
+    api.download_asset(before,asset,destination,expected,asset['size'])
+    read_json(destination)
+    if destination.stat().st_size!=asset['size'] or sha256_file(destination)!=expected:
+        raise ValueError('Legacy migration native firmware manifest checksum differs')
+    if (identity!=transport.release_identity(api.get_release(release['id']))
+            or api.resolve_tag_commit(tag)!=release['recipe_commit']):
+        raise ValueError('Immutable legacy migration release changed during verification')
+    return resolved
+
+
 def validate_migration_manifests(old_tree,new_tree,proof):
-    for phase,tree,build_id in [('before',old_tree,proof['predecessor_build_id']),
-                                ('after',new_tree,proof['successor_build_id'])]:
-        manifest=read_json(Path(tree)/'firmware-manifest.json')
-        if (manifest.get('build_id')!=build_id or manifest.get('source_commit')!=proof['source_commit']
-                or manifest.get('kernel_version')!=proof['kernel_version']
-                or manifest.get('source_patches',[])!=proof['source_patches'][phase]):
-            raise ValueError('Native migration proof differs from actual '+phase+' firmware manifest')
-    if proof.get('schema_version')==2:
-        module('kernel_migration').validate_payloads(
-            [('before',old_tree),('after',new_tree)],proof,read_json,module('publication_api'),
-            _MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
+    with tempfile.TemporaryDirectory(prefix='ax6000-migration-metadata-') as workspace:
+        trees=[]
+        for phase,tree,build_id in [('before',old_tree,proof['predecessor_build_id']),
+                                    ('after',new_tree,proof['successor_build_id'])]:
+            path=Path(tree)/'firmware-manifest.json'
+            if proof.get('schema_version')==2 and phase=='before' and not path.exists() and not path.is_symlink():
+                tree=legacy_migration_metadata(tree,proof,workspace)
+            manifest=read_json(Path(tree)/'firmware-manifest.json')
+            if (manifest.get('build_id')!=build_id or manifest.get('source_commit')!=proof['source_commit']
+                    or manifest.get('kernel_version')!=proof['kernel_version']
+                    or manifest.get('source_patches',[])!=proof['source_patches'][phase]):
+                raise ValueError('Native migration proof differs from actual '+phase+' firmware manifest')
+            trees.append((phase,tree))
+        if proof.get('schema_version')==2:
+            module('kernel_migration').validate_payloads(
+                trees,proof,read_json,module('publication_api'),
+                _MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
 
 
 def restored_identity(restored,pointer,channel,repository,public_key,usign,*,apk=None):
