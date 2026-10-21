@@ -1,6 +1,7 @@
 """Exercise the APK router installer with isolated filesystem and tool stubs."""
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -31,6 +32,7 @@ class ApkInstallerTests(unittest.TestCase):
         (self.apk / 'keys/repository-apk.pem').write_bytes(self.key.read_bytes())
         self.world = f'kernel={ABI}\nlibc=1.2.5-r1\nbase-files=1-r1\nbusybox=1-r1\napk-openssl=3.0.5-r3\n'
         (self.apk / 'world').write_text(self.world)
+        (self.apk / 'arch').write_text('aarch64_cortex-a53\n')
         (self.apk / 'ax6000-protected.list').write_text(self.world)
         self.public = self.apk / 'repositories.d/public.list'
         self.public.write_text(PUBLIC)
@@ -39,14 +41,14 @@ class ApkInstallerTests(unittest.TestCase):
         self.assertTrue(source.exists(), 'APK installer must exist')
         self.installer.write_text(source.read_text().replace('/etc', str(self.etc)).replace('/lib/apk/repositories.d', str(self.root / 'lib/apk/repositories.d')))
         self.env = dict(os.environ, PATH=str(self.mock) + ':' + os.environ['PATH'], MOCK_KEY=str(self.key),
-                        MOCK_LOG=str(self.root / 'log'), MOCK_ABI=ABI, MOCK_ARCH='aarch64_cortex-a53',
-                        MOCK_PROFILE_SIG='0', MOCK_INDEX_SIG='0', MOCK_UPDATE='0', MOCK_FORMAT='apk')
+                        MOCK_LOG=str(self.root / 'log'), MOCK_ABI=ABI, MOCK_ARCH='aarch64',
+                        MOCK_PROFILE_ARCH='aarch64_cortex-a53', MOCK_PROFILE_SIG='0', MOCK_INDEX_SIG='0', MOCK_UPDATE='0', MOCK_FORMAT='apk')
         self.tool('id', '#!/bin/sh\necho 0\n')
         self.tool('wget', '''#!/usr/bin/env python3
 import json,os,pathlib,sys
 p=pathlib.Path(sys.argv[sys.argv.index('-O')+1]);u=sys.argv[-1]
 if u.endswith('/profile.json'):
- p.write_text(json.dumps({'id':'redmi-ax6000-612-recommended','channel':'recommended','package_manager':os.environ['MOCK_FORMAT'],'apk_key_sha256':'279ea19b627e16d0807e099de8bd6cf8b69830281defa9bdb9e4ae96f5beb751','firmware':{'architecture':'aarch64_cortex-a53','kernel_version':''' + repr(ABI) + '''}}))
+ p.write_text(json.dumps({'id':'redmi-ax6000-612-recommended','channel':'recommended','package_manager':os.environ['MOCK_FORMAT'],'apk_key_sha256':'279ea19b627e16d0807e099de8bd6cf8b69830281defa9bdb9e4ae96f5beb751','firmware':{'architecture':os.environ['MOCK_PROFILE_ARCH'],'kernel_version':''' + repr(ABI) + '''}}))
 elif u.endswith('/repository-apk.pem'): p.write_bytes(pathlib.Path(os.environ['MOCK_KEY']).read_bytes())
 else: p.write_text('downloaded data')
 ''')
@@ -98,6 +100,54 @@ else: raise SystemExit('Unexpected APK mutation: '+repr(a))
         self.assertEqual(self.own().read_text(), INDEX + '\n')
         self.assertEqual((self.root / 'log').read_text(), 'profile-verify\nindex-verify\nupdate\n')
         self.assertEqual((self.apk / 'world').read_text(), self.world)
+
+    def test_same_full_compiled_architecture_also_works(self):
+        self.env['MOCK_ARCH']='aarch64_cortex-a53'
+        result=self.run_installer()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.own().read_text(),INDEX+'\n')
+
+    def test_foreign_malformed_multiple_missing_linked_or_oversized_arch_refused(self):
+        path=self.apk/'arch'
+        for data in (b'aarch64\n',b'x86_64\n',b'',b'aarch64_cortex-a53\naarch64\n',
+                     b'aarch64_cortex-a53\n\n',b'aarch64_cortex-a53 \n',b'aarch64_cortex-a53\r\n',
+                     b'aarch64_cortex-a53\0',b'x'*257):
+            with self.subTest(data=data):
+                path.write_bytes(data);result=self.run_installer()
+                self.assertNotEqual(result.returncode,0)
+                self.assertFalse(self.own().exists())
+                self.assertEqual(self.public.read_text(),PUBLIC)
+                self.assertNotIn('update', (self.root/'log').read_text())
+        path.unlink()
+        self.assertNotEqual(self.run_installer().returncode,0)
+        outside=self.root/'outside-arch';outside.write_text('aarch64_cortex-a53\n');path.symlink_to(outside)
+        self.assertNotEqual(self.run_installer().returncode,0)
+        self.assertEqual(outside.read_text(),'aarch64_cortex-a53\n')
+        self.assertFalse(self.own().exists())
+
+    def test_busybox_awk_cannot_hide_nul_architecture_bytes(self):
+        busybox=shutil.which('busybox')
+        self.assertIsNotNone(busybox,'BusyBox required for actual router awk semantics')
+        self.tool('awk','#!/bin/sh\nexec '+busybox+' awk "$@"\n')
+        for data in (b'aarch64_cortex-a53\0',b'aarch64_cortex-a53\0\n'):
+            (self.apk/'arch').write_bytes(data)
+            result=self.run_installer()
+            self.assertNotEqual(result.returncode,0)
+            self.assertFalse(self.own().exists())
+        for data in (b'aarch64_cortex-a53',b'aarch64_cortex-a53\n'):
+            (self.apk/'arch').write_bytes(data)
+            result=self.run_installer()
+            self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_profile_architecture_and_cpu_mismatch_report_actual_values(self):
+        for name,value in [('MOCK_ARCH','x86_64'),('MOCK_PROFILE_ARCH','aarch64')]:
+            old=self.env[name];self.env[name]=value
+            result=self.run_installer()
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('compiled='+self.env['MOCK_ARCH'],result.stderr)
+            self.assertIn('effective=aarch64_cortex-a53',result.stderr)
+            self.assertIn('repository='+self.env['MOCK_PROFILE_ARCH'],result.stderr)
+            self.assertFalse(self.own().exists());self.env[name]=old
 
     def test_repeated_install_is_idempotent(self):
         for _ in range(2):

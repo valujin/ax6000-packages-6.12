@@ -42,7 +42,20 @@ channel=$(jsonfilter -i "$tmp/profile.json" -e '@.channel')
 case "$channel" in recommended|latest) ;; *) fail 'Invalid channel' ;; esac
 [ "$base" = "https://valujin.github.io/ax6000-packages-6.12/channels/$channel" ] || fail 'Signed profile belongs to another channel'
 [ "$profile" = "redmi-ax6000-612-$channel" ] || fail 'Invalid profile identity'
-[ "$arch" = aarch64_cortex-a53 ] && [ "$(apk --print-arch)" = "$arch" ] || fail 'Architecture mismatch'
+# --print-arch is APK's compiled CPU default, not its configured database arch.
+arch_file=/etc/apk/arch
+[ ! -L "$arch_file" ] && [ -f "$arch_file" ] && [ -r "$arch_file" ] || fail 'Missing or unsafe APK architecture file'
+[ "$(wc -c < "$arch_file")" -le 256 ] || fail 'Oversized APK architecture file'
+effective_arch=$(cat "$arch_file")
+compiled_arch=$(apk --print-arch)
+arch_checksum=$(sha256sum "$arch_file" | awk '{print $1}')
+arch_lf_checksum=$(printf 'aarch64_cortex-a53\n' | sha256sum | awk '{print $1}')
+arch_raw_checksum=$(printf 'aarch64_cortex-a53' | sha256sum | awk '{print $1}')
+if [ "$arch" != aarch64_cortex-a53 ] || [ "$effective_arch" != "$arch" ] ||
+    { [ "$arch_checksum" != "$arch_lf_checksum" ] && [ "$arch_checksum" != "$arch_raw_checksum" ]; } ||
+    { [ "$compiled_arch" != aarch64 ] && [ "$compiled_arch" != "$arch" ]; }; then
+    fail "Architecture mismatch: compiled=$compiled_arch effective=$effective_arch repository=$arch"
+fi
 case "$kernel" in ''|*[!a-zA-Z0-9.~_+-]*) fail 'Invalid kernel ABI' ;; esac
 installed_version() {
     apk --no-network --repositories-file /dev/null query --installed --format json --fields name,version "$1" > "$tmp/installed.json"
