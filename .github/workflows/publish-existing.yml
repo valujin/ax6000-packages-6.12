@@ -37,7 +37,7 @@ on:
         type: boolean
 
 concurrency:
-  group: package-repository
+  group: package-publication
   cancel-in-progress: false
 
 permissions:

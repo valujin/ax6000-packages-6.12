@@ -35,6 +35,21 @@ def shell_blocks(filename):
 
 
 class APKWorkflowTests(unittest.TestCase):
+    def test_native_build_is_separate_and_all_channel_writers_share_one_group(self):
+        groups = {}
+        for name in ('firmware.yml', 'packages.yml', 'publish-existing.yml'):
+            text = (ROOT / '.github/workflows' / name).read_text()
+            block = re.search(r'^concurrency:\n(?:  [^\n]+\n)+', text, re.M)
+            self.assertIsNotNone(block, name)
+            group = re.fullmatch(r'concurrency:\n  group: ([a-z-]+)\n  cancel-in-progress: false\n', block[0])
+            self.assertIsNotNone(group, name)
+            groups[name] = group[1]
+        self.assertEqual(groups['firmware.yml'], 'native-firmware')
+        self.assertEqual(groups['packages.yml'], 'package-publication')
+        self.assertEqual(groups['publish-existing.yml'], groups['packages.yml'])
+        native = (ROOT / '.github/workflows/firmware.yml').read_text()
+        self.assertNotRegex(native, r'(?:contents|pages|id-token): write')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

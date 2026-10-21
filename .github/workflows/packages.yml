@@ -14,7 +14,7 @@ on:
 # One full publication at a time, including the source comparison. Failed builds
 # leave the last successful Pages deployment and its source lock in place.
 concurrency:
-  group: package-repository
+  group: package-publication
   cancel-in-progress: false
 
 permissions:
