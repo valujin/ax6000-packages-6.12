@@ -105,7 +105,7 @@ def validate_inventory(raw, profile, manifest):
             raise ValueError('Firmware inventory must contain exactly one recorded stock sysupgrade image')
 
 
-def validate_metadata(raw, expected_profile):
+def validate_metadata(raw, expected_profile, *, expected_producer_commit=None):
     profile_path = raw / 'profile.json'
     profile = read_json(profile_path)
     lock = read_json(raw / 'lock.json')
@@ -148,6 +148,11 @@ def validate_metadata(raw, expected_profile):
     if lock.get('feeds', {}).get('base') != profile['firmware']['commit']:
         raise ValueError('Release lock base feed differs from firmware source commit')
     manifest = read_json(raw / 'firmware-manifest.json')
+    if expected_producer_commit is not None:
+        if (not isinstance(expected_producer_commit, str) or not re.fullmatch('[0-9a-f]{40}', expected_producer_commit)
+                or manifest.get('recipe_commit') != expected_producer_commit
+                or profile.get('asu') != expected.get('asu')):
+            raise ValueError('Imported native producer or ASU policy differs from authenticated producer profile')
     if actual_manager == 'apk' and manifest.get('package_manager') != 'apk':
         raise ValueError('Release firmware manifest package manager differs from profile')
     if actual_manager == 'apk' and manifest.get('apk_key_sha256') != profile['apk_key_sha256']:
@@ -163,7 +168,7 @@ def validate_metadata(raw, expected_profile):
     return {'profile': profile, 'lock': lock, 'manifest': manifest}
 
 
-def import_bundle(archive, checksum, output, expected_profile, *, max_bytes=8 * 1024 ** 3):
+def import_bundle(archive, checksum, output, expected_profile, *, max_bytes=8 * 1024 ** 3, expected_producer_commit=None):
     archive, checksum, output = Path(archive), Path(checksum), Path(output)
     if output.exists() or output.is_symlink():
         raise ValueError('Import output must be a fresh directory')
@@ -217,7 +222,7 @@ def import_bundle(archive, checksum, output, expected_profile, *, max_bytes=8 * 
         error = process.communicate()[1]
         if process.returncode:
             raise ValueError('Release zstd decompression failed: ' + error.decode(errors='replace')[:500])
-        validate_metadata(temporary, Path(expected_profile))
+        validate_metadata(temporary, Path(expected_profile), expected_producer_commit=expected_producer_commit)
         temporary.rename(output)
     finally:
         if process is not None and process.poll() is None:
@@ -237,6 +242,7 @@ def main():
     parser.add_argument('--checksum', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--expected-profile', type=Path)
+    parser.add_argument('--expected-producer-commit', help='Exact producer authenticated by immutable generation transport')
     parser.add_argument('--release-metadata', type=Path)
     parser.add_argument('--previous-release-metadata', type=Path)
     args = parser.parse_args()
@@ -252,7 +258,8 @@ def main():
             parser.error('--previous-release-metadata requires --release-metadata')
         if not all((args.archive, args.checksum, args.output, args.expected_profile)):
             parser.error('import requires --archive, --checksum, --output and --expected-profile')
-        import_bundle(args.archive, args.checksum, args.output, args.expected_profile)
+        import_bundle(args.archive, args.checksum, args.output, args.expected_profile,
+                      expected_producer_commit=args.expected_producer_commit)
     except (ValueError, OSError, tarfile.TarError) as error:
         parser.exit(1, f'import-release: {error}\n')
     print(f'Imported validated raw build into {args.output}')

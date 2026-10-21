@@ -124,12 +124,19 @@ def cohort(profile):
 
 
 
-def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_migration=False,migration_proof=None):
+def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_migration=False,migration_proof=None,
+                                    allow_native_apk_replacement=False,native_replacement_proof=None,native_replacement_proof_sha256=None):
     """Authorize one same-ABI cohort replacement, never a moving kernel update."""
     if not expected_build_id or old.get('build_id')!=expected_build_id:
         raise ValueError('Replacement predecessor build ID differs from explicit authorization')
     if new.get('build_id')==expected_build_id or new.get('sdk')==old.get('sdk'):
         raise ValueError('Replacement must have a new build ID and SDK')
+    if allow_native_apk_replacement:
+        if allow_asu_apk_migration or migration_proof is not None:raise ValueError('Native replacement and OPKG migration are mutually exclusive')
+        module('native_generation').load_receipt(old,new,native_replacement_proof,native_replacement_proof_sha256)
+        return
+    if native_replacement_proof is not None or native_replacement_proof_sha256 is not None:
+        raise ValueError('Native replacement proof requires its explicit native flag')
     if allow_asu_apk_migration:
         validate_asu_apk_migration(old,new)
         validate_migration_proof(old,new,migration_proof)
@@ -588,7 +595,14 @@ def read_state(path,signature,repository,public_key,usign):
     return state
 
 
-def compose_site(live_state,live_signature,channels,repository,key,public_key,usign,output,*,bootstrap=False,replacements=None,apk=None,allow_asu_apk_migration=False,migration_proof=None):
+def compose_site(live_state,live_signature,channels,repository,key,public_key,usign,output,*,bootstrap=False,replacements=None,apk=None,allow_asu_apk_migration=False,migration_proof=None,
+                 allow_native_apk_replacement=False,native_replacement_proof=None,native_replacement_proof_sha256=None):
+    if allow_native_apk_replacement and (bootstrap or set(replacements or {})!={'recommended'}):
+        raise ValueError('Native replacement requires exactly one authenticated REC predecessor')
+    if allow_native_apk_replacement and (allow_asu_apk_migration or migration_proof is not None):
+        raise ValueError('Native replacement and OPKG migration are mutually exclusive')
+    if not allow_native_apk_replacement and (native_replacement_proof is not None or native_replacement_proof_sha256 is not None):
+        raise ValueError('Native replacement proof requires its explicit native flag')
     output=fresh(output);signing_key(key,public_key)
     if live_state is None:
         if not bootstrap or live_signature is not None:raise ValueError('Explicit bootstrap required')
@@ -614,7 +628,13 @@ def compose_site(live_state,live_signature,channels,repository,key,public_key,us
             if old is None or old_pointer!=old:
                 raise ValueError('Replacement predecessor differs from authenticated live pointer')
             old_profile,_=restored_identity(old_tree,old_pointer,channel,repository,public_key,usign,**apk_options(apk))
-            validate_generation_replacement(old_profile,profile,expected_build_id,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof)
+            validate_generation_replacement(old_profile,profile,expected_build_id,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof,
+                                            allow_native_apk_replacement=allow_native_apk_replacement,native_replacement_proof=native_replacement_proof,native_replacement_proof_sha256=native_replacement_proof_sha256)
+            if allow_native_apk_replacement:
+                native=module('native_generation')
+                reviewed=native.validate_receipt(old_profile,profile,native_replacement_proof,native_replacement_proof_sha256,
+                    predecessor_pointer=old_pointer,old_tree=Path(old_tree)/'channel',new_tree=restored/'channel')
+                native.validate_payloads(Path(old_tree)/'channel',restored/'channel',reviewed,read_json,module('publication_api'),_MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
             if allow_asu_apk_migration:
                 validate_migration_manifests(Path(old_tree)/'channel',restored/'channel',migration_proof)
         elif old is not None and any(old.get(k)!=pointer.get(k) for k in ('profile_id','build_id','kernel_version')):
@@ -871,7 +891,45 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
     return output
 
 
-def fetch_generation(tag,repository,public_key,usign,output):
+def select_generation_profile(catalog,repository,channel,output,*,recipe=ROOT):
+    """Select data from the authenticated generation producer, never publisher HEAD."""
+    if not isinstance(catalog,dict) or not isinstance(catalog.get('release'),dict):raise ValueError('Generation catalog identity missing')
+    release=catalog['release'];commit=release.get('recipe_commit')
+    if (channel not in CHANNELS or catalog.get('channel')!=channel
+            or catalog.get('profile_id')!='redmi-ax6000-612-'+channel
+            or release.get('repository')!=repository
+            or not isinstance(commit,str) or not re.fullmatch('[0-9a-f]{40}',commit)
+            or release.get('tag')!='firmware-'+catalog.get('build_id','')):
+        raise ValueError('Authenticated generation producer/profile identity differs')
+    output=fresh(output);recipe=Path(recipe)
+    git=['/usr/bin/git','-C',str(recipe)]
+    probe=subprocess.run(git+['cat-file','-e',commit+'^{commit}'],capture_output=True)
+    if probe.returncode:
+        # Public fixed repository, exact authenticated object; no checkout or code execution.
+        if not re.fullmatch('[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repository):raise ValueError('Invalid producer repository')
+        subprocess.run(git+['fetch','--no-tags','--depth=1','https://github.com/'+repository+'.git',commit],
+                       check=True,capture_output=True,timeout=180)
+    if subprocess.check_output(git+['rev-parse',commit+'^{commit}'],text=True).strip()!=commit:
+        raise ValueError('Generation producer must be the exact commit object')
+    native=module('native_generation')
+    blob=native.git_blob(recipe,commit,'profiles/redmi-ax6000-612-'+channel+'-new.json')
+    with tempfile.TemporaryDirectory(prefix='ax6000-producer-profile-') as temporary:
+        path=Path(temporary)/'profile.json';path.write_bytes(blob);profile=native.read_json(path)
+    if not isinstance(profile,dict) or profile.get('id')!=catalog['profile_id'] or profile.get('channel')!=channel:
+        raise ValueError('Producer Git source profile identity differs')
+    policy=profile.get('asu')
+    if policy is not None and not isinstance(policy,dict):raise ValueError('Producer ASU policy must be an object')
+    if policy is not None and policy.get('enabled') is True and policy.get('seed')!=native.producer_seed(recipe,commit,profile):
+        raise ValueError('Producer source profile seed differs from its exact Git recipe')
+    output.mkdir(parents=True)
+    (output/'producer-profile.json').write_bytes(blob)
+    (output/'producer-profile-proof.json').write_bytes(canonical_json({
+        'producer_commit':commit,'channel':channel,'profile_id':profile['id'],
+        'source_profile_sha256':hashlib.sha256(blob).hexdigest()}))
+    return output
+
+
+def fetch_generation(tag,repository,public_key,usign,output,*,channel=None):
     output=fresh(output);api=module('publication_api').ReleaseAPI(repository)
     before=api.get_release(tag)
     if before is None or before.get('draft') is not False or before.get('immutable') is not True:
@@ -894,11 +952,20 @@ def fetch_generation(tag,repository,public_key,usign,output):
         if catalog.get('release',{}).get('id')!=before['id'] or catalog['release'].get('repository')!=repository or catalog['release'].get('tag')!=tag:
             raise ValueError('Generation catalog release mismatch')
         if api.resolve_tag_commit(tag)!=catalog['release']['recipe_commit']:raise ValueError('Generation tag target mismatch')
+        if channel is not None:select_generation_profile(catalog,repository,channel,work/'producer')
         (work/'release.json').write_bytes(canonical_json(after));work.rename(output)
     return output
 
 
-def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,work,key,public_key,usign,output,*,bootstrap=False,replace_build_id=None,apk=None,apk_key=None,apk_public_key=None,allow_asu_apk_migration=False,migration_proof=None):
+def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,work,key,public_key,usign,output,*,bootstrap=False,replace_build_id=None,apk=None,apk_key=None,apk_public_key=None,allow_asu_apk_migration=False,migration_proof=None,
+                    allow_native_apk_replacement=False,native_replacement_proof=None,native_replacement_proof_sha256=None):
+    if allow_native_apk_replacement:
+        if allow_asu_apk_migration or migration_proof is not None:raise ValueError('Native replacement and OPKG migration are mutually exclusive')
+        if bootstrap or not replace_build_id:raise ValueError('Native replacement requires an authenticated exact --replace-build-id and no bootstrap')
+        if native_replacement_proof is None or not isinstance(native_replacement_proof_sha256,str) or not re.fullmatch('[0-9a-f]{64}',native_replacement_proof_sha256):
+            raise ValueError('Native replacement requires its separate reviewed proof and SHA')
+    elif native_replacement_proof is not None or native_replacement_proof_sha256 is not None:
+        raise ValueError('Native replacement proof requires its explicit native flag')
     work=fresh(work);output=fresh(output);work.mkdir(parents=True)
     profile=read_json(Path(raw)/'profile.json');channel=profile['channel']
     if allow_asu_apk_migration and replace_build_id is None:
@@ -910,7 +977,13 @@ def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,
     if replace_build_id is not None:
         if bootstrap or old is None:raise ValueError('Replacement requires an authenticated live predecessor')
         old_profile,_=restored_identity(old[0],old[1],channel,repository,public_key,usign,**apk_options(apk))
-        validate_generation_replacement(old_profile,profile,replace_build_id,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof)
+        validate_generation_replacement(old_profile,profile,replace_build_id,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof,
+                                        allow_native_apk_replacement=allow_native_apk_replacement,native_replacement_proof=native_replacement_proof,native_replacement_proof_sha256=native_replacement_proof_sha256)
+        if allow_native_apk_replacement:
+            native=module('native_generation')
+            reviewed=native.validate_receipt(old_profile,profile,native_replacement_proof,native_replacement_proof_sha256,
+                predecessor_pointer=old[1],old_tree=Path(old[0])/'channel',new_tree=raw)
+            native.validate_payloads(Path(old[0])/'channel',raw,reviewed,read_json,module('publication_api'),_MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
         if allow_asu_apk_migration:
             validate_migration_manifests(Path(old[0])/'channel',raw,migration_proof)
         replacements[channel]=(old,replace_build_id)
@@ -929,7 +1002,8 @@ def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,
     restore_online(pointer,profile,repository,public_key,usign,restored_channel,**apk_options(apk))
     restored[channel]=(restored_channel,pointer)
     compose_site(None if previous is None else work/'live/site-state.json',None if previous is None else work/'live/site-state.sig',
-                 restored,repository,key,public_key,usign,output,bootstrap=previous is None,replacements=replacements,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof,**apk_options(apk))
+                 restored,repository,key,public_key,usign,output,bootstrap=previous is None,replacements=replacements,allow_asu_apk_migration=allow_asu_apk_migration,migration_proof=migration_proof,
+                 allow_native_apk_replacement=allow_native_apk_replacement,native_replacement_proof=native_replacement_proof,native_replacement_proof_sha256=native_replacement_proof_sha256,**apk_options(apk))
     latest=fetch_live(site_url,repository,public_key,usign,work/'live-recheck',bootstrap=previous is None)
     if latest!=previous:raise ValueError('Live predecessor changed; do not deploy')
     deployment_record(work,output,site_url,previous is None)
@@ -1025,18 +1099,23 @@ def main():
     daily.add_argument('--force',action='store_true');daily.add_argument('--bootstrap',action='store_true')
     live=sub.add_parser('read-live');common(live);live.add_argument('--site-url',required=True);live.add_argument('--bootstrap',action='store_true')
     fetched=sub.add_parser('fetch-generation');common(fetched);fetched.add_argument('--release-tag',required=True)
+    fetched.add_argument('--channel',choices=CHANNELS,help='Select this authenticated native producer source profile')
     publish=sub.add_parser('publish-channel');common(publish,secret=True)
     for name in ('raw','external-assets','external-assets-signature','generation-release-metadata','work-root'):publish.add_argument('--'+name,type=Path,required=True)
     publish.add_argument('--replace-build-id',help='Replace exactly this authenticated live build, preserving source/kernel ABI/layouts')
     publish.add_argument('--migration-proof',type=Path,help='Reviewed actual old/new native kernel byte comparison JSON')
     publish.add_argument('--allow-asu-apk-migration',action='store_true',help='Explicitly authorize the reviewed additive ASU/APK firmware migration')
+    publish.add_argument('--allow-native-apk-replacement',action='store_true',help='Authorize the separately proved REC native APK APP3/installer generation replacement')
+    publish.add_argument('--native-replacement-proof',type=Path)
+    publish.add_argument('--native-replacement-proof-sha256')
     publish.add_argument('--site-url',required=True);publish.add_argument('--profiles',type=Path,default=ROOT/'profiles');publish.add_argument('--bootstrap',action='store_true')
     check=sub.add_parser('verify-deployment');check.add_argument('--check',type=Path,required=True);check.add_argument('--phase',choices=('before','after'),required=True)
     args=parser.parse_args()
     try:
         if args.command=='verify-deployment':verify_deployment(args.check,args.phase)
-        elif args.command=='fetch-generation':fetch_generation(args.release_tag,args.repository,args.public_key,args.usign,args.output)
-        elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap,replace_build_id=args.replace_build_id,allow_asu_apk_migration=args.allow_asu_apk_migration,migration_proof=None if args.migration_proof is None else read_json(args.migration_proof),apk=args.apk,apk_key=args.apk_key,apk_public_key=args.apk_public_key)
+        elif args.command=='fetch-generation':fetch_generation(args.release_tag,args.repository,args.public_key,args.usign,args.output,channel=args.channel)
+        elif args.command=='publish-channel':publish_channel(args.raw,args.external_assets,args.external_assets_signature,args.generation_release_metadata,args.site_url,args.repository,args.profiles,args.work_root,args.key,args.public_key,args.usign,args.output,bootstrap=args.bootstrap,replace_build_id=args.replace_build_id,allow_asu_apk_migration=args.allow_asu_apk_migration,migration_proof=None if args.migration_proof is None else read_json(args.migration_proof),apk=args.apk,apk_key=args.apk_key,apk_public_key=args.apk_public_key,
+            allow_native_apk_replacement=args.allow_native_apk_replacement,native_replacement_proof=args.native_replacement_proof,native_replacement_proof_sha256=args.native_replacement_proof_sha256)
         elif args.command=='pack':pack_snapshot(args.input,args.channel,args.repository,args.recipe_commit,args.key,args.public_key,args.usign,args.output,**apk_options(args.apk))
         elif args.command=='publish-generation':publish_generation(args.raw,args.expected_profile,args.raw_archive,args.checksum,args.repository,args.key,args.public_key,args.usign,args.output,resume_draft_id=args.resume_draft_id)
         elif args.command=='publish-snapshot':publish_snapshot(args.plan,args.repository,args.public_key,args.usign,args.output,**apk_options(args.apk))

@@ -189,6 +189,22 @@ class APKWorkflowTests(unittest.TestCase):
                      ALLOW_ASU_APK_MIGRATION=allowed, REPLACE_BUILD_ID=predecessor, MIGRATION_PROOF_BASE64=encoded),
             text=True, capture_output=True)
 
+    def test_manual_native_apk_replacement_passes_its_own_proof_sha_without_opkg_flag(self):
+        import hashlib
+        proof = self.root / 'native-reviewed.json'; proof.write_text('{"fixture":"reviewed operator data"}')
+        digest = hashlib.sha256(proof.read_bytes()).hexdigest()
+        result = self.run_step('publish-existing.yml', 'Publish a signed durable snapshot and compose both channels',
+                               NEEDS_APK='true', INCOMING_MANAGER='apk', APK_SIGNING_KEY='fixture APK PEM',
+                               ALLOW_NATIVE_APK_REPLACEMENT='true', REPLACE_BUILD_ID='exact-authenticated-old-build',
+                               NATIVE_REPLACEMENT_PROOF=str(proof), NATIVE_REPLACEMENT_PROOF_SHA256=digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record(); args = record['args']
+        self.assertIn('--allow-native-apk-replacement', args)
+        self.assertEqual(args[args.index('--native-replacement-proof') + 1], str(proof))
+        self.assertEqual(args[args.index('--native-replacement-proof-sha256') + 1], digest)
+        self.assertNotIn('--allow-asu-apk-migration', args)
+        self.assertNotIn('--migration-proof', args)
+
     def test_legacy_publication_does_not_require_a_migration_receipt(self):
         result = self.migration_receipt_step(allowed='false')
         self.assertEqual(result.returncode, 0, result.stderr)
