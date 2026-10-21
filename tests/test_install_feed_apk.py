@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -41,7 +42,7 @@ class ApkInstallerTests(unittest.TestCase):
         self.assertTrue(source.exists(), 'APK installer must exist')
         self.installer.write_text(source.read_text().replace('/etc', str(self.etc)).replace('/lib/apk/repositories.d', str(self.root / 'lib/apk/repositories.d')))
         self.env = dict(os.environ, PATH=str(self.mock) + ':' + os.environ['PATH'], MOCK_KEY=str(self.key),
-                        MOCK_LOG=str(self.root / 'log'), MOCK_ABI=ABI, MOCK_ARCH='aarch64',
+                        MOCK_LOG=str(self.root / 'log'), MOCK_QUERY_LOG=str(self.root / 'queries'), MOCK_ABI=ABI, MOCK_ARCH='aarch64',
                         MOCK_PROFILE_ARCH='aarch64_cortex-a53', MOCK_PROFILE_SIG='0', MOCK_INDEX_SIG='0', MOCK_UPDATE='0', MOCK_FORMAT='apk')
         self.tool('id', '#!/bin/sh\necho 0\n')
         self.tool('wget', '''#!/usr/bin/env python3
@@ -54,10 +55,24 @@ else: p.write_text('downloaded data')
 ''')
         self.tool('jsonfilter', '''#!/usr/bin/env python3
 import json,sys
-d=json.load(open(sys.argv[sys.argv.index('-i')+1]));expr=sys.argv[sys.argv.index('-e')+1]
-if expr.startswith('@[0]'): d=d[0];expr='@'+expr[4:]
-for k in expr[2:].split('.'): d=d[k]
-print(d)
+d=json.load(open(sys.argv[sys.argv.index('-i')+1]));a=sys.argv
+for i,flag in enumerate(a):
+ if flag not in ('-e','-t'):continue
+ expr=a[i+1]
+ if expr=='@': values=[d]
+ elif expr=='@[*]':values=list(d.values()) if isinstance(d,dict) else list(d)
+ elif expr.startswith('@[*].'):values=[row[expr[5:]] for row in d if isinstance(row,dict) and expr[5:] in row]
+ else:
+  value=d
+  if expr.startswith('@[0]'):value=value[0];expr='@'+expr[4:]
+  for k in expr[2:].split('.'):value=value[k]
+  values=[value]
+ if flag=='-t':
+  def kind(v):return 'string' if isinstance(v,str) else 'object' if isinstance(v,dict) else 'array' if isinstance(v,list) else 'null' if v is None else 'int'
+  if values:print('\\\\ '.join(kind(v) for v in values))
+ else:
+  for value in values:
+   if value is not None:print(value if isinstance(value,str) else json.dumps(value))
 ''')
         self.tool('usign', '''#!/usr/bin/env python3
 import os,sys
@@ -72,7 +87,9 @@ a=sys.argv[1:]
 if a==['--print-arch']: print(os.environ['MOCK_ARCH'])
 elif 'query' in a:
  name=a[-1];versions={'kernel':os.environ['MOCK_ABI'],'libc':'1.2.5-r1','base-files':'1-r1','busybox':'1-r1','apk-openssl':'3.0.5-r3'}
- print(json.dumps([{'name':name,'version':versions[name]}]))
+ with open(os.environ['MOCK_QUERY_LOG'],'a') as f:f.write(json.dumps(a)+'\\n')
+ rows=json.loads(os.environ['MOCK_INSTALLED']) if 'MOCK_INSTALLED' in os.environ else [{'name':n,'version':v} for n,v in versions.items()]
+ print(json.dumps(rows if name=='*' else [row for row in rows if isinstance(row,dict) and row.get('name')==name]))
 elif 'verify' in a:
  with open(os.environ['MOCK_LOG'],'a') as f:f.write('index-verify\\n')
  sys.exit(int(os.environ['MOCK_INDEX_SIG']))
@@ -93,6 +110,42 @@ else: raise SystemExit('Unexpected APK mutation: '+repr(a))
     def own(self):
         return self.apk / 'repositories.d/ax6000.list'
 
+    def test_installed_database_is_queried_once_including_kernel_and_reports_progress(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        queries = [json.loads(line) for line in (self.root / 'queries').read_text().splitlines()]
+        self.assertEqual(len(queries), 1, 'APK must load the installed database only once')
+        self.assertEqual(queries[0], ['--no-network', '--repositories-file', '/dev/null', 'query', '--installed', '--format', 'json', '--fields', 'name,version', '*'])
+        self.assertIn('Reading installed APK package inventory', result.stdout)
+        self.assertIn('Protected APK packages verified: 5/5', result.stdout)
+
+    def test_real_jsonfilter_rejects_nul_terminated_installed_names_and_versions(self):
+        binary = os.environ.get('AX6000_JSONFILTER') or shutil.which('jsonfilter')
+        if not binary:
+            self.skipTest('Real jsonfilter binary is required for NUL semantics')
+        self.tool('jsonfilter', '#!/bin/sh\nexec ' + shlex.quote(binary) + ' "$@"\n')
+        good = [{'name':name, 'version':version} for name, version in (line.split('=') for line in self.world.splitlines())]
+        for field in ('name', 'version'):
+            rows = [dict(row) for row in good]
+            rows[0][field] += '\x00hidden'
+            self.env['MOCK_INSTALLED'] = json.dumps(rows)
+            result = self.run_installer()
+            self.assertNotEqual(result.returncode, 0, 'jsonfilter must not silently truncate installed ' + field)
+            self.assertFalse(self.own().exists())
+
+    def test_malformed_or_duplicate_installed_inventory_fails_before_feed_changes(self):
+        good = [{'name':name, 'version':version} for name, version in (line.split('=') for line in self.world.splitlines())]
+        for rows in ([], {}, good + [good[0]], good + [{'name':'extra'}],
+                     good + [{'version':'1-r1'}], good + [{'name':'extra','version':1}],
+                     good + [{'name':'bad\nname','version':'1-r1'}],
+                     good + [{'name':'extra','version':'bad\nversion'}], good + [None]):
+            with self.subTest(rows=rows):
+                self.env['MOCK_INSTALLED'] = json.dumps(rows)
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.own().exists())
+                self.assertEqual(self.public.read_text(), PUBLIC)
+
     def test_verifies_before_install_and_preserves_public_feed(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -100,6 +153,28 @@ else: raise SystemExit('Unexpected APK mutation: '+repr(a))
         self.assertEqual(self.own().read_text(), INDEX + '\n')
         self.assertEqual((self.root / 'log').read_text(), 'profile-verify\nindex-verify\nupdate\n')
         self.assertEqual((self.apk / 'world').read_text(), self.world)
+
+    def test_exact_firstboot_mirror_five_public_feeds_are_preserved(self):
+        mirror = '# Public userspace packages; explicitly select with @public.\n# Core, kernel and vendor packages stay bound to this image.\n' + ''.join('@public https://mirrors.vsean.net/openwrt/releases/25.12.0/packages/aarch64_cortex-a53/' + feed + '/packages.adb\n' for feed in ('base','luci','packages','routing','telephony'))
+        self.public.write_text(mirror)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.public.read_text(), mirror)
+        self.assertEqual(self.own().read_text(), INDEX + '\n')
+
+    def test_mirror_allowance_rejects_foreign_roots_versions_architectures_and_untagged_urls(self):
+        mirror = '@public https://mirrors.vsean.net/openwrt/releases/25.12.0/packages/aarch64_cortex-a53/base/packages.adb'
+        for line in (mirror.replace('mirrors.vsean.net','evil.invalid'), mirror.replace('/openwrt/','/other/'),
+                     mirror.replace('25.12.0','25.12-SNAPSHOT'), mirror.replace('25.12.0','25.12.1'),
+                     mirror.replace('aarch64_cortex-a53','aarch64_generic'), mirror.replace('/base/','/video/'),
+                     mirror.replace('@public ','@other '), mirror.replace('@public ',''),
+                     mirror.replace('https://','http://'), mirror + '/extra'):
+            with self.subTest(line=line):
+                self.public.write_text(line + '\n')
+                result = self.run_installer()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.own().exists())
+                self.assertEqual(self.public.read_text(), line + '\n')
 
     def test_same_full_compiled_architecture_also_works(self):
         self.env['MOCK_ARCH']='aarch64_cortex-a53'
