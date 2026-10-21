@@ -1,9 +1,11 @@
 """One reviewed REC Image transition; full payload hashes, never note masking."""
 import hashlib
 import importlib.util
+import json
 import lzma
 from pathlib import Path
 import re
+import struct
 import tarfile
 import tempfile
 import zlib
@@ -77,13 +79,65 @@ def validate_receipt(old, new, proof):
          'V2 migration requires exact native firmware manifest bindings')
 
 
+def fwtool_fit_end(data, layout, *, crc_prefix=0):
+    """Validate an INFO[/SIGNATURE] envelope; return its exact FIT boundary.
+
+    CRC starts at zero for a whole image. A supplied prefix state also permits
+    testing captured real tails without retaining multi-megabyte firmware.
+    Signature bytes are bounded opaque data, not a cryptographic trust claim;
+    the caller separately authenticates the complete immutable asset SHA.
+    """
+    if len(data) < 16 or data[-16:-12] != b'FWx0':
+        return len(data)
+    cursor, types, metadata = len(data), [], None
+    for _ in range(2):
+        need(cursor >= 16, 'Missing fwtool metadata trailer')
+        magic, crc, kind, padding, length = struct.unpack_from('>IIB3sI', data, cursor - 16)
+        need(magic == 0x46577830 and padding == b'\0' * 3, 'Invalid fwtool trailer magic/padding')
+        need(kind in (0, 1) and 16 < length <= cursor, 'Invalid fwtool trailer type/size')
+        cap = 1024 if kind == 0 else 30 * 1024 + 8
+        need(length - 16 <= cap, 'Oversized fwtool trailer payload')
+        need((zlib.crc32(data[:cursor - 16], crc_prefix) ^ 0xffffffff) == crc,
+             'Invalid fwtool envelope CRC')
+        payload = data[cursor - length:cursor - 16]
+        types.append(kind)
+        cursor -= length
+        if kind == 1:
+            need(len(payload) > 8 and payload[:8] == b'\0' * 8, 'Invalid fwtool metadata header')
+            def unique(items):
+                value = {}
+                for key, item in items:
+                    need(key not in value, 'Duplicate fwtool metadata field')
+                    value[key] = item
+                return value
+            try:
+                metadata = json.loads(payload[8:], object_pairs_hook=unique)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ValueError('Invalid fwtool metadata JSON') from error
+            break
+    need(types in ([1], [0, 1]) and isinstance(metadata, dict),
+         'Expected one fwtool metadata chunk and optional signature')
+    version = metadata.get('version')
+    need(metadata.get('supported_devices') == ['xiaomi,redmi-router-ax6000-' + layout]
+         and isinstance(version, dict) and version.get('target') == 'mediatek/filogic'
+         and version.get('board') == 'xiaomi_redmi-router-ax6000-' + layout,
+         'fwtool metadata board/target differs')
+    return cursor
+
+
 def functional_image(image, layout, work):
     """Read actual TAR/FIT payloads, with bounded stdlib decompression only."""
     image = regular(image)
     work = Path(work)
     work.mkdir()
     if layout == 'ubootmod':
+        data = image.read_bytes()
+        end = fwtool_fit_end(data, layout)
         fit_image = image
+        if end != len(data):
+            fit_image = work / 'sysupgrade.fit'
+            with fit_image.open('xb') as output:
+                output.write(data[:end])
     else:
         need(layout in ('stock', 'mtkuboot'), 'Unsupported migration firmware layout')
         prefix = 'sysupgrade-xiaomi_redmi-router-ax6000-' + layout
