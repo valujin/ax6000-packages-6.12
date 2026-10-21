@@ -28,6 +28,9 @@ PROTECTED = {'kernel', 'libc', 'base-files', 'busybox', 'opkg'}
 APK_PROTECTED = PROTECTED | {'apk', 'apk-openssl', 'apk-mbedtls', 'libgcc', 'libstdcpp',
                              'libpthread', 'librt', 'libatomic', 'musl', 'openwrt-keyring', 'usign'}
 APK_CORE_ABIS = {'libgcc': '1', 'libstdcpp': '6', 'libatomic': '1'}
+# Compatibility providers are tied to their actual native package base; they
+# do not become globally allowed essential/provider names.
+APK_COMPAT_PROVIDERS = {'openwrt-keyring': {'lede-keyring'}}
 
 
 def native_provider_names(control, profile):
@@ -54,7 +57,7 @@ def native_provider_names(control, profile):
             raise ValueError('Malformed native essential provider')
         provided = match[1]
         normalized = provided.removeprefix('@').removesuffix('-any')
-        if normalized not in allowed:
+        if normalized not in allowed and provided not in APK_COMPAT_PROVIDERS.get(base, set()):
             raise ValueError('Native essential package provides an unrelated name')
         names.add(provided)
     return names

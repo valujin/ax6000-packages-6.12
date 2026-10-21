@@ -176,6 +176,17 @@ class APKPublication(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unrelated name'):
             snapshot.native_provider_identity(self.tree,self.profile)
 
+    def test_native_keyring_compatibility_alias_satisfies_dependencies_without_public_replacement(self):
+        version='2025.12.11~14e1f88b-r1'
+        self.package('openwrt-keyring',version=version,
+                     provides='lede-keyring='+version+' openwrt-keyring-any')
+        self.package('consumer',depends='lede-keyring='+version)
+        feed=self.channel()
+        self.assertNotIn('openwrt-keyring-'+version+'.apk',{path.name for path in feed.glob('*.apk')})
+        providers=snapshot.native_provider_identity(self.tree,self.profile)
+        self.assertTrue({'openwrt-keyring','lede-keyring','openwrt-keyring-any'}<=providers)
+        snapshot.validate_feed(self.tree,self.profile,self.fixture.public,USIGN,apk=APK)
+
     def test_new_publisher_cli_signs_profile_and_copies_pinned_pem(self):
         self.package()
         (self.raw/'profile.json').write_bytes((self.tree/'profile.json').read_bytes())
