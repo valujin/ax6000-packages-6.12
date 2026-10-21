@@ -10,7 +10,7 @@ apt-get install -y --no-install-recommends build-essential clang flex bison gawk
   git libncurses-dev libssl-dev python3 python3-setuptools python3-pyelftools rsync \
   unzip zlib1g-dev file wget curl zstd xz-utils ca-certificates cmake ninja-build \
   time util-linux libelf-dev libzstd-dev swig device-tree-compiler cpio \
-  libpython3-dev python3-dev perl pkgconf bzip2 patch tar gzip sudo
+  libpython3-dev python3-dev perl pkgconf bzip2 patch tar gzip sudo xxd
 export AX6000_BUILD_LOCK=/global/.build.lock
 builder_uid=$(stat -c %u /workspace)
 builder_user=$(getent passwd "$builder_uid" | cut -d: -f1)

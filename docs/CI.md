@@ -5,6 +5,12 @@ and `latest` (Linux 6.12.112). Each generation has stock, mtkuboot and ubootmod
 images, one matching SDK and one exact kernel ABI. Daily package refreshes keep
 that generation fixed. The inherited 6.6 profiles are never workflow defaults.
 
+New source profiles select **APK v3 on the 25.12 base**, with tagged public
+userspace feeds from ImmortalWrt 25.12.0. Previously published OPKG/IPK generations
+remain separate until new APK artifacts pass acceptance and their exact generated
+profiles are activated. This document describes the tooling; it does not assert
+that either new APK generation is already accepted or published.
+
 `test.yml` runs the Python suite and shell syntax checks on pushes and pull
 requests. It builds official OpenWrt host usign at commit
 `f1f65026a94137c91b5466b149ef3ea3f20091e9`, with one compiler job, for real signing
@@ -18,6 +24,9 @@ publish unverified output. The disposable hosted runner reclaims only the fixed
 unused toolchain directories listed in the workflow, then requires 60 GiB free.
 `FIRMWARE_RUNNER` may name a larger GitHub hosted Ubuntu runner; a runtime guard
 rejects self-hosted runners.
+Both the hosted prerequisite list and isolated `container-entrypoint.sh` install
+`xxd` explicitly: clean U-Boot builds need it. Native APK verification uses an
+independently built pinned host APK, rather than an executable imported from RAW.
 
 Hosted build and publication commands run inside `hosted-publication.py`. A
 transient systemd scope limits the entire descendant tree to half of available
@@ -69,17 +78,27 @@ must explicitly retain the previous ABI before changing its channel pointer.
 Before first publication, configure Pages to use GitHub Actions, enable
 [release immutability](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes),
 and store the private key matching `keys/repository.pub` in `OPKG_SIGNING_KEY`.
-The key payload is checked before staging or release writes. The publisher uses
-the locally built pinned host usign; exported SDK usign relocation wrappers are
-not standalone signers. No public-key secret is needed. Publication jobs receive
+That usign key signs download catalogs, snapshot/site metadata and legacy OPKG
+indexes. APK package/index signing separately requires `APK_SIGNING_KEY`, matching
+the committed `keys/repository-apk.pem` and the profile's `apk_key_sha256`.
+Legacy OPKG publication does not require the APK signing secret. A retained APK
+snapshot needs the trusted decoder, but no APK private key unless new packages
+are actually published. Production APK private keys never enter the native builder.
+
+The key payloads are checked before staging or release writes. The publisher uses
+the locally built pinned host usign and independent host APK from
+`scripts/build-apk-host.sh`; exported SDK signer/decoder files are data, not trusted
+publication executables. No public-key secret is needed. Publication jobs receive
 `contents: write`; only deployment receives `pages: write` and `id-token: write`.
 The default Pages base is `https://valujin.github.io/ax6000-packages-6.12`;
 `PACKAGE_REPOSITORY_URL` may supply a different HTTPS serving base.
 
 For an independently verified initial raw build, use these same local/cloud
 publication interfaces. Set `raw` to its output directory, `channel` to the exact
-channel, `key` to a private mode-0600 key and `trusted_usign` to the pinned host
-executable. Provide `GH_TOKEN` through your authenticated environment with access
+channel, `key` to the private mode-0600 usign key and `trusted_usign` to its pinned
+host executable. For the APK channel-publication command below also set `apk_key`
+to the separate private mode-0600 APK key and `trusted_apk` to an independently
+built host APK. Provide `GH_TOKEN` through your authenticated environment with access
 to this repository. Commit the build's recipe first so its recorded recipe SHA
 exists remotely. Outputs below must be fresh directories.
 
@@ -128,6 +147,14 @@ fingerprint still matches. Repeat generation publication for `latest`, then run
 activated recommended profile allows authenticated restoration of that channel.
 Activate the exact latest generated profile only after the same live checks.
 
+`bootstrap=true` is valid only for an absent live site. Replacing an existing
+OPKG generation with a new ASU/APK generation instead uses the explicit reviewed
+`replace_build_id`, `allow_asu_apk_migration` and `migration_proof_base64` workflow
+inputs, with `bootstrap=false`. The proof must come from the actual old/new native
+kernel-context comparison; a channel name or new profile alone is insufficient.
+Daily refresh never authorizes this migration. Do not activate a generated APK
+daily profile before its corresponding publication and acceptance checks pass.
+
 For local staging of the same first channel transaction, instead of hosted
 `publish-existing.yml`, run:
 
@@ -138,7 +165,9 @@ python3 scripts/channel-snapshot.py publish-channel --raw "$raw" \
   --generation-release-metadata "$transport/generation/release.json" \
   --site-url https://valujin.github.io/ax6000-packages-6.12 --repository "$repository" \
   --profiles profiles --work-root "$transport/channel-work" --output "$transport/public" \
-  --key "$key" --public-key keys/repository.pub --usign "$trusted_usign" --bootstrap
+  --key "$key" --public-key keys/repository.pub --usign "$trusted_usign" \
+  --apk "$trusted_apk" --apk-key "$apk_key" --apk-public-key keys/repository-apk.pem \
+  --bootstrap
 python3 scripts/channel-snapshot.py verify-deployment \
   --check "$transport/channel-work/deployment-check.json" --phase before
 ```
