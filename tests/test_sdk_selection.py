@@ -122,6 +122,43 @@ class SdkKconfigSelectionTest(unittest.TestCase):
         for path, before in self.context.items():
             self.assertEqual(path.read_bytes(), before)
 
+    def test_protected_frozen_apk_kmods_do_not_restore_unrequested_baked_defaults(self):
+        self.profile.update(id='redmi-ax6000-612-recommended', channel='recommended',
+                            package_manager='apk')
+        self.profile['packages'].append('kmod-tun')
+        metadata = self.sdk / 'tmp/.config-package.in'
+        metadata.write_text(metadata.read_text() +
+            'config PACKAGE_kmod-ath9k-common\n\ttristate\n'
+            'config PACKAGE_kmod-tun\n\tbool\n'
+            'config PACKAGE_apk-openssl\n\tbool\n')
+        baked = ('config PACKAGE_kmod-ath9k-common\n\ttristate\n\tdefault m\n'
+                 'config PACKAGE_kmod-crypto-aead\n\ttristate\n\tdefault m\n'
+                 'config PACKAGE_kmod-tun\n\tbool\n\tdefault y\n'
+                 'config PACKAGE_apk-openssl\n\tbool\n\tdefault y\n')
+        snapshot = self.sdk / 'Config-build.in'; snapshot.write_text(baked)
+        self.context[snapshot] = baked.encode()
+        self.configure_top(True)
+        baseline = {'kernel': None, 'apk-openssl': None, 'kmod-ath9k-common': None,
+                    'kmod-crypto-aead': None, 'kmod-tun': None}
+        bank = self.sdk / 'ax6000-baseline'; bank.mkdir()
+        (bank / 'manifest.json').write_text(json.dumps({'protected_packages': sorted(baseline)}))
+        selected = {'tailscale', 'wireguard-tools', 'kmod-amneziawg'}
+        refresh, defaults, config, top = prepare.sdk_refresh_defaults(
+            self.profile, self.sdk, baseline, selected)
+        refresh.write_text(defaults); config.write_text(top)
+        (self.sdk / '.config').write_text('CONFIG_MODULES=y\n' + ''.join(
+            f'CONFIG_PACKAGE_{name}=m\n' for name in sorted(selected)))
+        self.normalize(True)
+        actual = (self.sdk / '.config').read_text()
+        self.assertNotIn('CONFIG_PACKAGE_kmod-ath9k-common=m', actual)
+        self.assertNotIn('CONFIG_PACKAGE_kmod-ath9k-common=y', actual)
+        self.assertIn('CONFIG_PACKAGE_kmod-amneziawg=m\n', actual)
+        self.assertIn('CONFIG_PACKAGE_kmod-crypto-aead=m\n', actual)
+        self.assertIn('CONFIG_PACKAGE_kmod-tun=y\n', actual)
+        self.assertIn('CONFIG_PACKAGE_apk-openssl=y\n', actual)
+        for path, before in self.context.items():
+            self.assertEqual(path.read_bytes(), before)
+
     def test_ordinary_sdk_uses_modules_and_reports_actual_language_selection(self):
         self.configure_top(False)
         prepare.select_packages(self.profile, self.sdk)

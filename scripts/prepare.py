@@ -596,7 +596,12 @@ def sdk_refresh_defaults(profile, sdk, baseline, selected):
         names = re.findall(r"^config PACKAGE_(\S+)\n\tdefault n\n\n", previous, re.M)
         require(set(names) <= baked_packages and len(names) == len(set(names))
                 and previous == header + declarations(names), "refusing foreign SDK refresh defaults file")
-    unwanted = baked_packages - set(profile["packages"]) - set(selected) - {"kernel"} - baseline_protected_packages(profile, sdk)
+    # Frozen modules stay in the exported bank; their baked defaults must not
+    # schedule unrelated driver builds. Requested modules and dependency closure
+    # remain exempt through the explicit requested/selected sets.
+    protected_defaults = baseline_protected_packages(profile, sdk) - {
+        name for name in baseline if name.startswith("kmod-")}
+    unwanted = baked_packages - set(profile["packages"]) - set(selected) - {"kernel"} - protected_defaults
     if not includes:
         text = re.sub(r'^source "Config-build\.in"$', include + "\n" + original, text, flags=re.M)
     return output, header + declarations(unwanted), config, text
