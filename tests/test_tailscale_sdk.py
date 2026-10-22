@@ -1,5 +1,6 @@
 """Real package metadata/payload boundaries; no SDK downloads or Go compilation."""
 import copy
+import gzip
 import importlib.util
 import io
 import json
@@ -24,7 +25,9 @@ class PackageAcceptance(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.lock = json.loads((ROOT / 'tests/fixtures/tailscale-source-1.104.2.json').read_text())
         self.files = {'usr/sbin/tailscale.multicall': b'packed ELF fixture',
-                      'etc/init.d/tailscale': b'unchanged init', 'etc/config/tailscale': b'unchanged config'}
+                      'etc/init.d/tailscale': b'unchanged init', 'etc/config/tailscale': b'unchanged config',
+                      'lib/upgrade/keep.d/tailscale': b'/etc/tailscale/\n'}
+        self.keep = {'content': b'/etc/tailscale/\n', 'mode': 0o644}
         self.links = {name: 'tailscale.multicall' for name in ('usr/sbin/tailscale', 'usr/sbin/tailscaled')}
         self.control = {'Package': 'tailscale', 'Version': '1.104.2-r3', 'Architecture': 'aarch64_cortex-a53',
                         'Depends': 'libc, ca-bundle, kmod-tun', 'Provides': 'tailscaled (= 1.104.2-r3)'}
@@ -35,7 +38,7 @@ class PackageAcceptance(unittest.TestCase):
         with tarfile.open(fileobj=payload, mode='w:gz') as tar:
             for name, content in self.files.items():
                 item = tarfile.TarInfo('./' + name); item.size = len(content)
-                item.mode = 0o644 if name == 'etc/config/tailscale' else 0o755
+                item.mode = 0o755 if name in ('usr/sbin/tailscale.multicall', 'etc/init.d/tailscale') else 0o644
                 tar.addfile(item, io.BytesIO(content))
             for name, target in (self.links if links is None else links).items():
                 item = tarfile.TarInfo('./' + name); item.type = tarfile.SYMTYPE; item.linkname = target
@@ -60,22 +63,22 @@ class PackageAcceptance(unittest.TestCase):
         links = dict(self.links); links['usr/sbin/tailscale'] = '/usr/sbin/tailscale.multicall'
         files, inventory, conffiles = sdk.package_payload(self.ipk(links), None)
         with self.assertRaisesRegex(ValueError, 'aliases'):
-            sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg')
+            sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg', self.keep)
         files, inventory, conffiles = sdk.package_payload(self.ipk(), None)
         files['usr/bin/tailscale'] = b'extra'; inventory['usr/bin/tailscale'] = {'type': 'file', 'mode': 0o755}
         with self.assertRaisesRegex(ValueError, 'inventory'):
-            sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg')
+            sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg', self.keep)
 
     def test_service_bytes_and_modes_cannot_drift(self):
         files, inventory, conffiles = sdk.package_payload(self.ipk(), None)
-        sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg')
+        sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg', self.keep)
         for mutation in ('bytes', 'mode', 'conffiles'):
             f, i, c = copy.deepcopy((files, inventory, conffiles))
             if mutation == 'bytes': f['etc/init.d/tailscale'] = b'changed'
             elif mutation == 'mode': i['usr/sbin/tailscale.multicall']['mode'] = 0o644
             else: c.append('/etc/foreign')
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
-                sdk.validate_payload(f, i, c, self.files, 'opkg')
+                sdk.validate_payload(f, i, c, self.files, 'opkg', self.keep)
 
     def test_controls_preserve_dependencies_and_all_native_providers(self):
         sdk.validate_control(self.control, self.baseline, self.lock, 'aarch64_cortex-a53')
@@ -88,10 +91,34 @@ class PackageAcceptance(unittest.TestCase):
 
     def test_new_overlay_and_package_agreement_cannot_hide_native_service_drift(self):
         wrappers = {name: self.files[name] for name in sdk.WRAPPERS}
-        sdk.validate_native_wrappers(wrappers, self.files, sdk.CONFFILES['opkg'], 'opkg')
+        inventory = {sdk.KEEPFILE: {'type': 'file', 'mode': 0o644}}
+        sdk.validate_native_wrappers(wrappers, self.files, sdk.CONFFILES['opkg'], 'opkg', inventory)
         changed = dict(self.files); changed['etc/init.d/tailscale'] += b'old native difference'
-        with self.assertRaises(ValueError): sdk.validate_native_wrappers(wrappers, changed, sdk.CONFFILES['opkg'], 'opkg')
-        with self.assertRaises(ValueError): sdk.validate_native_wrappers(wrappers, self.files, [], 'opkg')
+        with self.assertRaises(ValueError): sdk.validate_native_wrappers(wrappers, changed, sdk.CONFFILES['opkg'], 'opkg', inventory)
+        with self.assertRaises(ValueError): sdk.validate_native_wrappers(wrappers, self.files, [], 'opkg', inventory)
+
+    def test_exact_native_keep_fragment_generates_state_policy_and_guard_preserves_it(self):
+        text = gzip.decompress((ROOT / 'tests/fixtures/ax6000-612-include-package-pack.mk.gz').read_bytes()).decode()
+        begin = text.index('    ifneq ($$(KEEP_$(1)),)')
+        fragment = text[begin:text.index('    endif', begin) + len('    endif')]
+        for has_directory in (False, True):
+            root = self.root / str(has_directory); (root / 'etc/config').mkdir(parents=True)
+            (root / 'etc/config/tailscale').write_text('native config')
+            if has_directory: (root / 'etc/tailscale').mkdir()
+            makefile = 'KEEP_tailscale:=/etc/config/tailscale /etc/tailscale/\nIDIR_tailscale:=' + str(root) + '\ndefine NativeKeep\nall:\n' + fragment + '\nendef\n$(eval $(call NativeKeep,tailscale))\n'
+            subprocess.run(['make', '--no-print-directory', '-f', '-'], input=makefile, text=True,
+                           check=True, capture_output=True, preexec_fn=lambda: os.umask(0o022))
+            self.assertEqual((root / sdk.KEEPFILE).read_bytes(), self.keep['content'])
+            self.assertEqual((root / sdk.KEEPFILE).stat().st_mode & 0o777, 0o644)
+        files, inventory, conffiles = sdk.package_payload(self.ipk(), None)
+        sdk.validate_payload(files, inventory, conffiles, self.files, 'opkg', self.keep)
+        for mutation in ('bytes', 'mode', 'missing'):
+            f, i = copy.deepcopy((files, inventory))
+            if mutation == 'bytes': f[sdk.KEEPFILE] = b'/etc/foreign/\n'
+            elif mutation == 'mode': i[sdk.KEEPFILE]['mode'] = 0o755
+            else: del f[sdk.KEEPFILE]; del i[sdk.KEEPFILE]
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                sdk.validate_payload(f, i, conffiles, self.files, 'opkg', self.keep)
 
     def test_probe_subset_changes_no_native_identity_and_mutates_no_original_input(self):
         profile = {'id': 'redmi-ax6000-612-recommended', 'firmware': {'kernel_version': 'actual ABI'},
@@ -136,7 +163,7 @@ class PackageAcceptance(unittest.TestCase):
 
     def test_normal_build_plan_never_builds_world_or_injects_a_binary(self):
         commands = sdk.compile_plan(4)
-        self.assertEqual(commands, [['make', '-j4', 'package/ax6000-overrides/tailscale/compile', 'V=s']])
+        self.assertEqual(commands, [['make', '-j4', 'package/ax6000-overrides/tailscale/compile', 'CONFIG_AUTOREMOVE=', 'V=s']])
         source = (ROOT / 'scripts/tailscale_sdk.py').read_text()
         self.assertIn('prepare.export_packages(', source)
         self.assertIn('prepare.close_native(', source)
@@ -178,7 +205,7 @@ class PackageAcceptance(unittest.TestCase):
                         '--info', 'arch:aarch64_cortex-a53', '--files', str(payload), '--output', str(path)],
                        check=True, capture_output=True)
         files, inventory, conffiles = sdk.package_payload(path, apk)
-        sdk.validate_payload(files, inventory, conffiles, self.files, 'apk')
+        sdk.validate_payload(files, inventory, conffiles, self.files, 'apk', self.keep)
 
 
 if __name__ == '__main__': unittest.main()

@@ -47,13 +47,17 @@ The driver calls the normal `prepare.py` SDK/feed/override/configuration,
 native dependency closure and package selection APIs with that explicit
 subset. SDK and kernel guards always use the complete original profile so
 the narrowed selection cannot skip the native ABI checks. It then runs
-`make -j4 package/ax6000-overrides/tailscale/compile V=s`. That target performs
+`make -j4 package/ax6000-overrides/tailscale/compile CONFIG_AUTOREMOVE= V=s`.
+The empty command-line override retains the real compiler/helper proof for
+inspection; it changes no source, SDK `.config`, native bank or package code.
+The compile target performs
 the real generated recipe's Configure, Compile and package install steps,
 including online checksum-verified module prefetch followed by compilation
 with `GOPROXY=off` and the same module cache. It does not inject the earlier
 standalone binary or skip compilation. Each SDK independently recompiles it.
 The normal `package/index` and `prepare.export_packages` APIs produce the
 package export, with the complete native bank available as unchanged fallback.
+The index target indexes existing packages and has no package compile prerequisite.
 Only the separate probe's package selection is narrowed; original inputs are
 never modified.
 
@@ -88,6 +92,9 @@ files are retained. APK retains both declared conffile paths; the native
 so IPK retains `/etc/config/tailscale`. Each actual r2 comparison archive must
 have the corresponding unchanged conffiles. The packaged ELF SHA256 must equal the normal Make
 source-helper proof, including successful UPX test and exact unpack roundtrip.
+Both native packers also generate `/lib/upgrade/keep.d/tailscale` to preserve
+the state-directory conffile declaration. Its exact bytes and mode must match
+the separately authenticated r2 comparison package; extra paths remain errors.
 
 A second container has no network, capabilities or host TUN. The existing
 explicit QEMU probe executes that exact packaged ELF, verifies full Tailscale

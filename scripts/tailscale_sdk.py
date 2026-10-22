@@ -19,6 +19,7 @@ import tailscale_source as source
 
 ALIASES = {name: 'tailscale.multicall' for name in ('usr/sbin/tailscale', 'usr/sbin/tailscaled')}
 BINARY = 'usr/sbin/tailscale.multicall'
+KEEPFILE = 'lib/upgrade/keep.d/tailscale'
 WRAPPERS = {'etc/init.d/tailscale': 'tailscale.init', 'etc/config/tailscale': 'tailscale.conf'}
 CONFFILES = {'apk': ['/etc/config/tailscale', '/etc/tailscale/'], 'opkg': ['/etc/config/tailscale']}
 REFERENCES = {
@@ -91,17 +92,23 @@ def package_payload(path, apk):
     return files, inventory, conffiles
 
 
-def validate_payload(files, inventory, conffiles, wrappers, manager):
-    expected = {BINARY, *WRAPPERS, *ALIASES}
+def validate_payload(files, inventory, conffiles, wrappers, manager, native_keep):
+    expected = {BINARY, KEEPFILE, *WRAPPERS, *ALIASES}
     if manager == 'apk':
         expected |= {'lib/apk/packages/tailscale.' + tail for tail in ('list', 'conffiles', 'conffiles_static')}
-    need(set(inventory) == expected, 'Unexpected package payload inventory')
+    if set(inventory) != expected:
+        names = lambda values: [name[:200] for name in sorted(values)[:16]]
+        raise ValueError('Unexpected package payload inventory: ' + json.dumps({
+            'missing': names(expected - set(inventory)), 'extra': names(set(inventory) - expected),
+            'actual_count': len(inventory), 'actual': names(inventory)}, sort_keys=True))
     need({name: item.get('target') for name, item in inventory.items() if item['type'] == 'symlink'} == ALIASES,
          'Package aliases must be the two exact relative symlinks')
     need(set(files) == expected - ALIASES.keys(), 'Unexpected regular package payload inventory')
     need(conffiles == CONFFILES[manager], 'Package conffiles differ from unchanged native format')
     for name in WRAPPERS:
         need(files[name] == wrappers[name], 'Pinned service/config bytes changed')
+    need(files[KEEPFILE] == native_keep['content'] and inventory[KEEPFILE]['mode'] == native_keep['mode'],
+         'Native state-directory keep file bytes/mode changed')
     for name, mode in [(BINARY, 0o755), ('etc/init.d/tailscale', 0o755), ('etc/config/tailscale', 0o644)]:
         need(inventory[name]['mode'] == mode, 'Package executable/config mode differs')
 
@@ -117,15 +124,20 @@ def validate_control(control, baseline, lock, architecture):
         need(tokens(control.get(field, '')) == tokens(expected), 'Package ' + field + ' differs from native baseline')
 
 
-def validate_native_wrappers(wrappers, baseline_files, baseline_conffiles, manager):
+def validate_native_wrappers(wrappers, baseline_files, baseline_conffiles, manager, baseline_inventory):
     need(all(baseline_files.get(name) == content for name, content in wrappers.items())
          and baseline_conffiles == CONFFILES[manager],
          'Pinned service/config/conffiles differ from the actual native package')
+    need(baseline_files.get(KEEPFILE) == b'/etc/tailscale/\n'
+         and baseline_inventory.get(KEEPFILE, {}).get('type') == 'file'
+         and baseline_inventory[KEEPFILE]['mode'] == 0o644,
+         'Native state-directory keep policy is missing or changed')
+    return {'content': baseline_files[KEEPFILE], 'mode': baseline_inventory[KEEPFILE]['mode']}
 
 
 def compile_plan(jobs):
     need(type(jobs) is int and 1 <= jobs <= 4, 'jobs must be 1..4')
-    return [['make', '-j' + str(jobs), 'package/ax6000-overrides/tailscale/compile', 'V=s']]
+    return [['make', '-j' + str(jobs), 'package/ax6000-overrides/tailscale/compile', 'CONFIG_AUTOREMOVE=', 'V=s']]
 
 
 def probe_inputs(profile, lock):
@@ -239,7 +251,7 @@ def build(recipe, profile_path, lock_path, work, output, expected_sdk, jobs):
     need((baseline_control.get('Package'), baseline_control.get('Version'), baseline_control.get('Architecture')) ==
          ('tailscale', lock['tailscale']['version'] + '-r2', original['firmware']['architecture']),
          'Pinned comparison package differs from issued native package identity')
-    baseline_files, _, baseline_conffiles = package_payload(reference_path, apk)
+    baseline_files, baseline_inventory, baseline_conffiles = package_payload(reference_path, apk)
     prepare.configure_feeds(profile, lock, sdk)
     run(['./scripts/feeds', 'update', '-a'], sdk); prepare.verify_feeds(profile, lock, sdk)
     run(['./scripts/feeds', 'install', '-a'], sdk); prepare.apply_overrides(lock, sdk, profile)
@@ -248,7 +260,7 @@ def build(recipe, profile_path, lock_path, work, output, expected_sdk, jobs):
          and record(overlay / 'files/tailscale_source.py') == record(Path(__file__).with_name('tailscale_source.py')),
          'Generated native Makefile/helper differs from reviewed override')
     wrappers = {name: (overlay / 'files' / original).read_bytes() for name, original in WRAPPERS.items()}
-    validate_native_wrappers(wrappers, baseline_files, baseline_conffiles, manager)
+    native_keep = validate_native_wrappers(wrappers, baseline_files, baseline_conffiles, manager, baseline_inventory)
     del baseline_files
     run(['make', '-j' + str(jobs), 'defconfig'], sdk)
     prepare.check_sdk_identity(original, sdk); prepare.check_kernel(original, sdk)
@@ -271,7 +283,7 @@ def build(recipe, profile_path, lock_path, work, output, expected_sdk, jobs):
     need(len(matches) == 1, 'Expected one exported real Tailscale package')
     package, control = matches[0]; validate_control(control, baseline_control, lock['tailscale'], profile['firmware']['architecture'])
     files, inventory, conffiles = package_payload(package, apk)
-    validate_payload(files, inventory, conffiles, wrappers, manager)
+    validate_payload(files, inventory, conffiles, wrappers, manager, native_keep)
     proofs = list((sdk / 'build_dir').glob('target-*/tailscale-' + lock['tailscale']['commit'] + '/tailscale.multicall.proof.json'))
     need(len(proofs) == 1, 'Normal Make compile did not emit one shared-helper proof')
     proof = json.loads(proofs[0].read_text())
@@ -291,6 +303,9 @@ def build(recipe, profile_path, lock_path, work, output, expected_sdk, jobs):
                   'luci_languages': [], 'removed_unrelated_hooks': sorted(set(original) - set(profile)),
                   'original_profile_unchanged': True, 'kernel_guard_uses_original_profile': True},
               'reference_package': dict(reference, control=baseline_control),
+              'native_keep_policy': {'path': KEEPFILE, 'sha256': hashlib.sha256(native_keep['content']).hexdigest(),
+                                     'size': len(native_keep['content']), 'mode': native_keep['mode']},
+              'source_proof_retention': 'Tail compile command-line CONFIG_AUTOREMOVE=; no .config or native source change',
               'package': dict(record(output / package.name), filename=package.name, control=control),
               'payload': inventory, 'conffiles': conffiles, 'source_helper': record(recipe / 'scripts/tailscale_source.py'),
               'packaged_elf_sha256': binary_sha, 'normal_make_configure_compile_install_export': True,
