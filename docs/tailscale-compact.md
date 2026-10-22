@@ -64,13 +64,32 @@ CLI-to-daemon IPC all passed. This tests the shared build helper and emulated
 binary; it does **not** verify a completed APK/IPK package, actual SDK host-tool
 compatibility, real router performance or VPN data-plane operation.
 
-The next package acceptance step uses the matching real SDK and generated
-override: configure/prefetch with access to pinned downloads, then
-`make package/ax6000-overrides/tailscale/compile V=s`, inspect the emitted actual
-APK/IPK control/payload, and verify the one-file/two-relative-symlink layout,
-unchanged wrappers, providers and actual version. It needs no firmware/kernel
-rebuild. Full native Make install expansion is covered by the lightweight tests;
-real package creation and router testing remain required before feed promotion.
+The [real SDK APK/IPK workflow](https://github.com/valujin/ax6000-packages-6.12/actions/runs/39702777128)
+subsequently passed. The APK producer is `bd433580538c5cb611e32881ad0bbe9ac5ba5a7e`;
+the separate 6.6 IPK recipe is `3ce41f233b6f91bf04a7570b9703088caf27cdd7`.
+Both matching SDKs performed normal configure, compile, install and export.
+Accepted packages retain the one-ELF/two-relative-link layout, native init/config,
+KEEP bytes, conffiles, dependencies and providers. The packaged ELF passed
+isolated ARM64 QEMU command and private CLI-to-daemon IPC checks. No native
+firmware, SDK or kernel rebuild was needed for this userland supplement.
+
+The [published REC snapshot](https://github.com/valujin/ax6000-packages-6.12/releases/tag/packages-recommended-bcdea0807dc03fbd6639e63b19f161e01404d391499740174faf26bf21f3b4ed)
+contains `tailscale-1.104.2-r3.apk`, **11,921,395 bytes (11.37 MiB)**,
+SHA256 `4600a0a499dd8484247c8217adf5f6a43cb86b44528c1afeec954ae188287a00`.
+It is 67.63% smaller than the historical r2 APK; Installed-Size is
+**12,225,198 bytes (11.66 MiB)**. Stock UBI root remains 80 MiB: available overlay
+space must still account for dependencies and persistent state.
+
+[Activation 39711729943](https://github.com/valujin/ax6000-packages-6.12/actions/runs/39711729943)
+passed. Fresh HTTPS verification checked 18 recommended files plus signed state
+before/after (22 records), actual APK bytes and the signed ADB identity. The other
+1,393 APKs, including ASU r3, and 19 catalog assets are unchanged and inherit the
+earlier complete checks; they were not downloaded again. Receipt SHA256:
+`3120cfcef01fbe7179b15cc6ee648dda6ff55583107689cabebab639e420ecaf`.
+Native firmware, SDK, ImageBuilder, profile/seed and the latest OPKG pointer remain
+unchanged. Latest APK has not been published. These checks do not establish
+real-router performance or VPN data-plane operation; no Tailscale hardware test
+or new personalized ASU image is claimed. [Acceptance details](tailscale-sdk-acceptance.md).
 
 Primary implementation references:
 

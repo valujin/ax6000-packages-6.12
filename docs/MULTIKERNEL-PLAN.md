@@ -19,7 +19,18 @@
 
 **Linux 6.18 отложен по явному решению пользователя до появления полного vendor-порта для MT7986/AX6000.** Репозиторий, профиль и сборку 6.18 сейчас не создавать. Наличие official OpenWrt 6.18 с mt76 не выполняет это условие; исследование и пробелы доказательств приведены в [KERNEL-6.18.md](KERNEL-6.18.md).
 
-## Проверенные отличия и необходимые изменения builder
+## Исторический план builder и последующие изменения
+
+Пункты ниже сохраняют исходный OPKG/IPK-план. Текущий опубликованный recommended
+уже использует APK; опубликованный latest по-прежнему OPKG (снимок `074e68e5…19ea3`).
+Не применять историческое отключение USE_APK к принятому recommended APK-поколению.
+Tailscale r2/static в этом плане также исторический: реальная SDK-сборка r3
+использует upstream source-multicall/UPX, один ELF и две ссылки, без Go backport
+в SDK. APK — 11 921 395 байт, Installed-Size 12 225 198 байт. Подписанный
+REC Release `bcdea080…3b4ed` опубликован, активация 39711729943 и свежая HTTPS-проверка
+изменённых файлов успешны; неизменённые файлы наследуют прежние полные проверки.
+Обычный ROM не включает Tailscale; ASU сохраняет его только если он уже установлен.
+[Текущие факты и ограничения](tailscale-sdk-acceptance.md).
 
 1. **Формат пакетов.** В 25.12 `USE_APK` имеет default `y`. Source configure/select и SDK select должны явно записывать `# CONFIG_USE_APK is not set`, включать `CONFIG_PACKAGE_opkg=y` для образа, сохранять `CONFIG_SIGNED_PACKAGES=y` и `CONFIG_SIGNATURE_CHECK=y` в прошивке. После `defconfig` проверить эти значения и отсутствие выбранного APK package manager. После сборки проверять IPK-выход и manifest образа; выполнить отдельную проверку LuCI package manager с opkg. SDK может отключать собственное индексное подписание: итоговый feed по-прежнему подписывает publisher. Первичные источники: [Kconfig](https://github.com/chasey-dev/immortalwrt-mt798x-rebase/blob/ae65e1de69971b5a2e3cf7e39390ee93f274d488/config/Config-build.in), [opkg](https://github.com/chasey-dev/immortalwrt-mt798x-rebase/blob/ae65e1de69971b5a2e3cf7e39390ee93f274d488/package/system/opkg/Makefile), [выбор IPK/APK](https://github.com/chasey-dev/immortalwrt-mt798x-rebase/blob/ae65e1de69971b5a2e3cf7e39390ee93f274d488/include/package-pack.mk).
 
@@ -31,7 +42,7 @@
 
 5. **SDK и ABI.** Формат kernel dependency остаётся `kernel (= VERSION~VERMAGIC-rRELEASE)`. Нельзя брать SDK или kmods 6.6. Подготовленный SDK 6.12 сохраняет `.config`, headers/scripts, Module.symvers, modules.builtin и `.ko`, но проверенный список также не содержит `.vermagic`, `.config.set`, modules.builtin.modinfo. Перенести существующее augmentation с проверкой byte-equality `.config`/Module.symvers и дополнением этих файлов. Для каждого из двух full builds заново обнаруживать ABI из kernel IPK, сверять его с manifest всех трёх образов, kmod Depends и экспортированным SDK. Только при совпадении использовать общий SDK/feed внутри канала; при расхождении остановить публикацию до выяснения причины. [kernel.mk](https://github.com/chasey-dev/immortalwrt-mt798x-rebase/blob/ae65e1de69971b5a2e3cf7e39390ee93f274d488/include/kernel.mk), [SDK](https://github.com/chasey-dev/immortalwrt-mt798x-rebase/blob/ae65e1de69971b5a2e3cf7e39390ee93f274d488/target/sdk/Makefile).
 
-6. **Выбор пакетов.** Сохранить список VPN/Tailscale/AWG/WireGuard/PBR/mwan3/GeoIP и русского LuCI, проверяя реальные symbols 25.12 после `defconfig`; версии пакетов и названия зависят от новых feeds. Tailscale остаётся официальным static ARM64 с проверенной SHA256; Go backport не требуется. ALL_KMODS выбирает только совместимые с новым контекстом модули. Зафиксировать selected/incompatible report и сравнить выбранные имена с реально построенными IPK. AWG на 6.12 требует отдельной полной compile-проверки.
+6. **Выбор пакетов.** Сохранить список VPN/Tailscale/AWG/WireGuard/PBR/mwan3/GeoIP и русского LuCI, проверяя реальные symbols 25.12 после `defconfig`; версии пакетов и названия зависят от новых feeds. В первоначальном плане Tailscale использовал официальные static ARM64 с проверенной SHA256; это сохранено для воспроизводимости r2. Текущий r3 source-multicall/UPX описан выше; его отдельный закреплённый Go toolchain не заменяет компилятор SDK. ALL_KMODS выбирает только совместимые с новым контекстом модули. Зафиксировать selected/incompatible report и сравнить выбранные имена с реально построенными IPK. AWG на 6.12 требует отдельной полной compile-проверки.
 
 ## Layout как часть идентичности
 

@@ -14,7 +14,32 @@ hashes; future firmware profiles are not used.
 The reviewed initial OPKG input is
 `3ce41f233b6f91bf04a7570b9703088caf27cdd7`; it includes the same source helper
 as the 6.12 `0120e0932682dc45c361520a415615caa28edc92` commit, including its
-private writable Go temporary directory. Both actual SDK jobs still have to run.
+private writable Go temporary directory. Both actual SDK jobs subsequently passed in
+[workflow 39702777128](https://github.com/valujin/ax6000-packages-6.12/actions/runs/39702777128)
+on workflow commit `bd433580538c5cb611e32881ad0bbe9ac5ba5a7e`; that same commit is
+the APK recipe, while the IPK recipe remains the separate 3ce41f commit above.
+
+Accepted 1.104.2-r3 packages:
+
+| Format | Archive bytes | Installed-Size bytes | Archive SHA256 |
+| --- | --- | --- | --- |
+| REC APK | 11,921,395 (11.37 MiB) | 12,225,198 (11.66 MiB) | `4600a0a499dd8484247c8217adf5f6a43cb86b44528c1afeec954ae188287a00` |
+| 6.6 IPK | 11,911,941 | 12,236,800 | `8b423aade0647b2147533f5811a425f26e47d521f6330f87b116b928710dafb2` |
+
+REC's [signed snapshot bcdea080…3b4ed](https://github.com/valujin/ax6000-packages-6.12/releases/tag/packages-recommended-bcdea0807dc03fbd6639e63b19f161e01404d391499740174faf26bf21f3b4ed)
+(Release 420243400) was activated by
+[39711729943](https://github.com/valujin/ax6000-packages-6.12/actions/runs/39711729943).
+Fresh HTTPS checks verified 18 channel files and signed state before/after:
+22 records, 13,944,633 bytes, including actual r3 APK bytes and signed index
+identity. Receipt SHA256 is
+`3120cfcef01fbe7179b15cc6ee648dda6ff55583107689cabebab639e420ecaf`.
+The other 1,393 APKs, including ASU r3, and 19 catalog assets inherit the earlier
+complete verification, without a fresh full-bank download. Original native
+firmware/SDK/IB, profile/seed and latest OPKG snapshot `074e68e5…19ea3` remain
+unchanged. No latest APK feed or new native/personalized ASU image is implied.
+Ordinary ROMs omit Tailscale; ASU retains it only if already installed. Native
+client simulations from the actual stage are separate from this light HTTPS
+readback. No real-router Tailscale/VPN test was performed.
 
 | Package | Native SDK SHA256 | Active profile SHA256 |
 | --- | --- | --- |
@@ -78,8 +103,10 @@ full SHA256 and size are pinned from authenticated deployment evidence:
 
 Comparison downloads fail if the exact expected bytes are unavailable. Both
 URLs are moving GitHub Pages feed locations; accepted payload bytes are fixed.
-The OPKG URL received HTTP 200 and the expected size in a bounded HEAD probe;
-its full hash still must be checked by the future hosted download.
+The accepted hosted run downloaded and verified both complete r2 archives.
+These moving URLs now serve newer feed generations; a repeat cannot substitute
+r3 bytes for the pinned r2 comparison. The original hashes remain historical
+acceptance inputs, even when an old moving filename is no longer available.
 No signature check is replaced: these comparison files are public,
 operator-approved exact hashes, never installed or used as build input.
 

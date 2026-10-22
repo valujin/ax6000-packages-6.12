@@ -1,9 +1,15 @@
 # Ручная проверка прошивки 6.12 на AX6000
 
-Recommended: [новый Release](https://github.com/valujin/ax6000-packages-6.12/releases/tag/firmware-redmi-ax6000-612-recommended-ae65e1de6997-6ef19743b104),
+Исторический recommended OPKG: [Release](https://github.com/valujin/ax6000-packages-6.12/releases/tag/firmware-redmi-ax6000-612-recommended-ae65e1de6997-6ef19743b104),
 [SHA256SUMS](https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-6ef19743b104/SHA256SUMS).
-Latest: [новый Release](https://github.com/valujin/ax6000-packages-6.12/releases/tag/firmware-redmi-ax6000-612-latest-a99b0888b88f-0b1249707848),
+Текущий latest OPKG: [Release](https://github.com/valujin/ax6000-packages-6.12/releases/tag/firmware-redmi-ax6000-612-latest-a99b0888b88f-0b1249707848),
 [SHA256SUMS](https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-latest-a99b0888b88f-0b1249707848/SHA256SUMS).
+
+Текущий recommended уже APK: поколение `5a57052ba472`, factory UBI
+18 874 368 байт, точные ссылки и инструкции подключения APK feed — в
+[README](../README.md#подключение-пакетов). Приведённые ниже OPKG-команды и размер
+17 825 792 байта относятся к прежнему recommended OPKG и текущему latest OPKG;
+это не инструкция заменить APK на OPKG.
 
 Обе линии собирают stock, mtkuboot и ubootmod. Для первого испытания выбрать
 `xiaomi,redmi-router-ax6000-stock` и recommended. Другие разметки требуют
@@ -44,7 +50,7 @@ sysupgrade -T /tmp/immortalwrt-...-xiaomi_redmi-router-ax6000-stock-squashfs-sys
 загрузчика и состояния разделов. Проверка файлов не подтверждает загрузку,
 Ethernet, Wi-Fi или аппаратный NAT на физическом устройстве.
 
-## После ручной установки
+## После ручной установки прежнего OPKG-поколения
 
 Сначала проверить Ethernet, Wi-Fi и точный `opkg status kernel`, затем выполнить
 **на самом роутере от root**:
@@ -74,23 +80,30 @@ installer откажется до изменения ключей или feeds.
 
 ## Tailscale и место в flash
 
-Tailscale отсутствует **и в initramfs, и в постоянном rootfs** нового набора,
-но IPK остаётся в подписанном feed и обновляется. Его официальные ARM64 ELF
-при упаковке не изменяются. Наличие пакета в feed не означает, что он
-помещается в текущую разметку.
+Tailscale отсутствует **и в initramfs, и в постоянном rootfs** обычных образов.
+Он остаётся отдельным пакетом соответствующего формата; ASU сохраняет его
+только если он уже установлен. Историческая static r2 содержала два официальных
+ELF и занимала около 69,2 MiB после распаковки. Эти размеры не относятся к r3.
 
-На stock раздел UBI root имеет всего **80 MiB**. Пакет Tailscale 1.104.2-r2
-требует около **69,2 MiB после распаковки**, сверх места, занятого остальной
-системой и служебными данными UBI/overlay. Поэтому штатного свободного места
-для него недостаточно. Не выполнять установку Tailscale на stock без
-отдельно подготовленного достаточного хранилища.
+Для recommended APK принят компактный source-multicall/UPX **1.104.2-r3**:
+один ARM64 ELF, две ссылки, сохранённые init/config, providers и состояние.
+APK — **11 921 395 байт (11,37 MiB)**, Installed-Size — **12 225 198 байт (11,66 MiB)**.
+Подписанный REC Release `bcdea080…3b4ed` опубликован; активация 39711729943 и
+свежая проверка изменённых файлов по HTTPS успешны. Неизменённый банк наследует
+прежние полные проверки. Пакеты старого OPKG feed не подходят для нового REC APK. На stock UBI root остаётся 80 MiB; проверить место
+в overlay с учётом зависимостей, служебных данных и состояния Tailscale.
+Реальные SDK/QEMU проверки не являются аппаратным тестом на AX6000.
 
-Проверка на уже установленной постоянной системе:
+Проверка места на установленной постоянной системе:
 
 ```sh
 df -h /overlay
-opkg info tailscale
 ```
+
+Сведения о пакете получать своим менеджером: `apk info tailscale` на
+recommended APK, `opkg info tailscale` на опубликованном latest OPKG.
+В recommended feed опубликована r3; latest остаётся на прежнем OPKG-поколении.
+Размеры r3 относятся к новому REC APK, не к старому latest IPK.
 
 Это информационные команды. Их вывод нужно оценивать вместе с расходом
 места зависимостей и overlay; они не являются автоматическим разрешением
@@ -105,7 +118,7 @@ Ubootmod выделяет UBI около **122,5 MiB**. Это иной загр
 Больший раздел не гарантирует достаточный overlay или успешную установку;
 такое изменение и физические испытания здесь не выполнялись.
 
-Каждая линия имеет свой ABI и SDK. Recommended:
+Каждая линия имеет свой ABI и SDK. Исторический recommended OPKG:
 `6.12.108~942ed17ba3e2c90bc1373619dd44dedc-r1`,
 SDK `6ef19743b104b7f2de0c3d3dffb91b3b782222cc60184ea0cc294fa653d39426`.
 Latest: ABI `6.12.112~d405163bfdb42254c245797a894994c0-r1`, SDK `0b124970784803d24235d999ba77862919f651496283f4b865264bbebd575fbd`.
