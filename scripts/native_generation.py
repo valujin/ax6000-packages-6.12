@@ -143,6 +143,25 @@ REBUILT_BANK_POLICY = {'cohort': '612-recommended',
                                          'path': 'bin/targets/mediatek/filogic/packages/kmod-v4l2loopback-6.12.108.0.15.1-r1.apk'},
                              'classification': 'exact-source-buildpath-literal-in-diagnostic-strings-and-only-its-corresponding-relocation-addends'}]}
 
+# Only the independently measured APP archive/timestamp pair in the new REC context.
+APP_METADATA_RELATION = {'kind': 'rec-native-exact-app-metadata-relation-v1',
+ 'root_decision_sha256': '8b0abb2559ddb67e8683c03acb4dce7f4c0b509d7086a7d8b2e851da3e2dc1c0',
+ 'diagnosis_sha256': 'c7bb3d44f369dff984014878f7784b3d59f5f48d7224f311d14e3587ac989d83',
+ 'root_bank_decision_sha256': '1418d193361e2dca9931dec9fe6aef4cace1d8daad838d5b5cdba7b0530ff0aa',
+ 'archives': {'before': {'sha256': '9188d87fe19aaf186c4f164b3ff797e97d6df54b4e09c70893ee8af07f541bad',
+                         'size': 12186},
+              'after': {'sha256': '53a62fd5d393d1cfbe903f139b06c7be5a045da2e55bedfcab3fe30566e4bb4e',
+                        'size': 12186}},
+ 'mtime': {'before': 1792597204, 'after': 1792626715},
+ 'exact_regular_paths': ['etc/uci-defaults/95-luci-app-attendedsysupgrade-housekeeping',
+                         'lib/apk/packages/luci-app-attendedsysupgrade.list',
+                         'usr/share/luci/menu.d/luci-app-attendedsysupgrade.json',
+                         'usr/share/rpcd/acl.d/luci-app-attendedsysupgrade.json',
+                         'www/luci-static/resources/ax6000_asu.js',
+                         'www/luci-static/resources/view/attendedsysupgrade/configuration.js',
+                         'www/luci-static/resources/view/attendedsysupgrade/overview.js',
+                         'www/luci-static/resources/view/status/include/11_upgrades.js']}
+
 OLD_PRODUCER = 'ea6de11283a6d83728e50b4b9ced214761ecc1c0'
 MODULE = 'www/luci-static/resources/ax6000_asu.js'
 MODULE_SHA = 'cbafbc641774f22ad1e47cbe8e1a8af80a8c1e36383c1d66d54dc40926ff23ff'
@@ -1002,6 +1021,62 @@ def app_payload(before, after, apk_ref):
          == {k: v for k, v in payloads['after'].items() if k != MODULE}, 'Native APP changed unrelated regular payloads')
 
 
+
+def reviewed_app_paths(paths):
+    """Permit exactly the eight measured timestamp pairs, preserving all other metadata."""
+    views = {}
+    for phase in ('before', 'after'):
+        view = copy.deepcopy(paths[phase]); seen = set()
+        for directory in view:
+            for item in directory.get('files', []):
+                name = (directory.get('name', '') + '/' + item['name']).lstrip('/')
+                need(name in APP_METADATA_RELATION['exact_regular_paths'] and name not in seen
+                     and type(item.get('mtime')) is int
+                     and item['mtime'] == APP_METADATA_RELATION['mtime'][phase],
+                     'APP timestamp/path differs from the exact reviewed eight-file relation')
+                seen.add(name)
+                # This comparison view is never written back to APKs or published metadata.
+                item['mtime'] = APP_METADATA_RELATION['mtime']['before']
+                if name == MODULE:
+                    item.pop('hash', None); item.pop('size', None)
+        need(seen == set(APP_METADATA_RELATION['exact_regular_paths']), 'Reviewed APP file inventory differs')
+        views[phase] = view
+    need(views['before'] == views['after'], 'Native APP modes/owners/hooks/path metadata changed')
+
+
+def app_payload_new_context(before, after, apk_ref):
+    """Finite new-context APP archive pair; the original V1 app_payload remains strict."""
+    need(before.get('producer_commit') == OLD_PRODUCER and after.get('producer_commit') == NEW_PRODUCER,
+         'Reviewed APP metadata relation is restricted to the enrolled REC producers')
+    apk = checked_ref(apk_ref, 8 * MIB)
+    need(apk_ref['sha256'] == 'ec6f3df6b3e295ad4395649bfd5bc5ca8f2afe52c8fe7bff04df3617f78952f8',
+         'Exact trusted EC6 APK required')
+    fmt = module('package_format'); controls, payloads, paths = {}, {}, {}
+    for phase, side, release in [('before', before, '2'), ('after', after, '3')]:
+        row = REBUILT_BANK_POLICY['app_transition'][phase]
+        path = regular(Path(side['raw']) / relative(row['path']), 16 * MIB)
+        need(identity(path) == APP_METADATA_RELATION['archives'][phase]
+             == {k: row[k] for k in ('sha256', 'size')}, 'Exact reviewed native APP archive differs')
+        need(not apk.is_relative_to(Path(side['raw'])) and not apk.is_relative_to(Path(side['source'])),
+             'RAW/native tool must not execute')
+        control = fmt.read_control(path, apk=apk)
+        need(control.get('Package') == 'luci-app-attendedsysupgrade'
+             and control.get('Version') == '20261021.2-r' + release, 'Actual native APP control differs')
+        controls[phase] = {k: v for k, v in control.items() if k not in ('Version', 'Installed-Size', 'APK-Raw')}
+        controls[phase]['APK-Raw-policy'] = {k: v for k, v in control['APK-Raw'].items()
+                                           if k not in ('version', 'hashes', 'installed-size')}
+        paths[phase] = fmt.apk_json(path, apk)['paths']
+        payloads[phase] = fmt.payload_files(path, apk=apk)
+    need(controls['before'] == controls['after'], 'Native APP controls changed beyond the reviewed revision')
+    reviewed_app_paths(paths)
+    need(hashlib.sha256(payloads['after'].get(MODULE, b'')).hexdigest() == MODULE_SHA,
+         'Actual APP payload is not the reviewed constructor module')
+    need(set(payloads['before']) == set(payloads['after']) == set(APP_METADATA_RELATION['exact_regular_paths'])
+         and {k: v for k, v in payloads['before'].items() if k != MODULE}
+         == {k: v for k, v in payloads['after'].items() if k != MODULE},
+         'Native APP changed unrelated regular payloads/hooks')
+
+
 def predecessor(inputs, before):
     """Authenticate the retained live state/snapshot; publication later rechecks its pointer."""
     tree = Path(inputs['predecessor_root'])
@@ -1094,7 +1169,10 @@ def evaluate(inputs):
                               right['metadata'], after['native_evidence'], inputs['staging_receipt'],
                               after['source_context'], after['sdk_context'], right['profile'], right['manifest'])
     root_delta(left['evidence'], right['evidence'], images)
-    app_payload(before, after, inputs['trusted_apk'])
+    if new_context:
+        app_payload_new_context(before, after, inputs['trusted_apk'])
+    else:
+        app_payload(before, after, inputs['trusted_apk'])
     pointer = predecessor(inputs, left)
     summary = {'predecessor_build_id': left['profile']['build_id'], 'successor_build_id': right['profile']['build_id'],
                'predecessor_pointer': pointer, 'source_commit': SOURCE, 'kernel_abi': ABI,
@@ -1126,7 +1204,8 @@ def evaluate(inputs):
             'native_acceptance_sha256': after['native_status']['sha256'], **transition_refs,
             'production_receipt_sha256': inputs['production_receipt']['sha256'],
             'prior_world_producer_completed': False, 'prior_world_process_wait_status': None,
-            'prior_world_exit_code': 1, 'world_command_exit_zero_inferred': True}
+            'prior_world_exit_code': 1, 'world_command_exit_zero_inferred': True,
+            'app_metadata_relation': copy.deepcopy(APP_METADATA_RELATION)}
         validate_new_summary(summary)
     return left['profile'], right['profile'], summary
 
@@ -1141,7 +1220,7 @@ def validate_new_summary(summary):
               'prior_image_equal', 'functional_image', 'context7', 'native_acceptance_sha256',
               'candidate_context_sha256', 'world_success_custody_sha256', 'production_receipt_sha256',
               'prior_world_producer_completed', 'prior_world_process_wait_status', 'prior_world_exit_code',
-              'world_command_exit_zero_inferred'}
+              'world_command_exit_zero_inferred', 'app_metadata_relation'}
     need(isinstance(transition, dict) and set(transition) == fields
          and transition['kind'] == NEW_CONTEXT_KIND and transition['cohort'] == COHORT
          and transition['source_commit'] == SOURCE and transition['kernel_abi'] == ABI
@@ -1155,6 +1234,8 @@ def validate_new_summary(summary):
          and all(isinstance(transition[k], str) and SHA.fullmatch(transition[k]) for k in
                  ('native_acceptance_sha256', 'candidate_context_sha256', 'world_success_custody_sha256', 'production_receipt_sha256')),
          'New context requires actual independent acceptance and packaging/world custody digests')
+    need(transition['app_metadata_relation'] == APP_METADATA_RELATION,
+         'Unreviewed native APP archive/timestamp authority')
     validate_bank_bindings(summary)
     need(transition['prior_world_producer_completed'] is False
          and transition['prior_world_process_wait_status'] is None
