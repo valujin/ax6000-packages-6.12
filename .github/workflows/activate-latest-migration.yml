@@ -1,0 +1,155 @@
+name: Activate the approved LATEST 31599 APK migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_proof_base64:
+        description: Exact portable LATEST schema3 receipt (64KiB maximum decoded)
+        required: true
+        type: string
+      migration_proof_sha256:
+        description: Root-reviewed decoded LATEST schema3 receipt SHA256
+        required: true
+        type: string
+      authorization_base64:
+        description: Root-reviewed fresh all-layout client and signed-smoke authorization
+        required: true
+        type: string
+      authorization_sha256:
+        description: Exact decoded authorization SHA256
+        required: true
+        type: string
+      channel:
+        description: Fixed same-firmware package channel
+        required: true
+        default: latest
+        type: choice
+        options:
+          - latest
+      snapshot_pointer_base64:
+        description: Canonical base64 JSON pointer from publish-snapshot (maximum 4096 decoded bytes)
+        required: true
+        type: string
+      expected_predecessor:
+        description: Exact currently authenticated latest snapshot manifest SHA256
+        required: true
+        type: string
+
+concurrency:
+  group: package-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check finite authorization before tools or signing secrets
+        env:
+          SNAPSHOT_POINTER_BASE64: ${{ inputs.snapshot_pointer_base64 }}
+          MIGRATION_PROOF_BASE64: ${{ inputs.migration_proof_base64 }}
+          MIGRATION_PROOF_SHA256: ${{ inputs.migration_proof_sha256 }}
+          AUTHORIZATION_BASE64: ${{ inputs.authorization_base64 }}
+          AUTHORIZATION_SHA256: ${{ inputs.authorization_sha256 }}
+          EXPECTED_PREDECESSOR: ${{ inputs.expected_predecessor }}
+          PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
+        run: |
+          site="${PACKAGE_REPOSITORY_URL:-https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}}"
+          python3 scripts/activate-latest-migration.py --check-inputs \
+            --pointer-base64 "$SNAPSHOT_POINTER_BASE64" --expected-predecessor "$EXPECTED_PREDECESSOR" \
+            --migration-proof-base64 "$MIGRATION_PROOF_BASE64" --migration-proof-sha256 "$MIGRATION_PROOF_SHA256" \
+            --authorization-base64 "$AUTHORIZATION_BASE64" --authorization-sha256 "$AUTHORIZATION_SHA256" \
+            --site-url "$site" --repository "$GITHUB_REPOSITORY" --profiles profiles --public-key keys/repository.pub
+      - name: Install bounded snapshot and signing prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd cmake build-essential libjson-c-dev \
+            ninja-build pkg-config libssl-dev zlib1g-dev libzstd-dev python3 wget curl
+      - name: Build pinned official host usign
+        run: |
+          pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
+          git init "$RUNNER_TEMP/usign-source"
+          git -C "$RUNNER_TEMP/usign-source" fetch --depth 1 https://github.com/openwrt/usign.git "$pin"
+          git -C "$RUNNER_TEMP/usign-source" checkout --detach FETCH_HEAD
+          [[ $(git -C "$RUNNER_TEMP/usign-source" rev-parse HEAD) == "$pin" ]]
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
+            -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
+          python3 scripts/hosted-publication.py -- bash scripts/resource-limit.sh --jobs 1 -- cmake \
+            --build "$RUNNER_TEMP/usign-build" --parallel 1
+      - name: Build pinned independent host APK
+        run: |
+          python3 scripts/hosted-publication.py -- bash scripts/build-apk-host.sh --work-dir "$RUNNER_TEMP/apk-host"
+      - name: Authenticate the published snapshot and compose both channels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+          SNAPSHOT_POINTER_BASE64: ${{ inputs.snapshot_pointer_base64 }}
+          MIGRATION_PROOF_BASE64: ${{ inputs.migration_proof_base64 }}
+          MIGRATION_PROOF_SHA256: ${{ inputs.migration_proof_sha256 }}
+          AUTHORIZATION_BASE64: ${{ inputs.authorization_base64 }}
+          AUTHORIZATION_SHA256: ${{ inputs.authorization_sha256 }}
+          EXPECTED_PREDECESSOR: ${{ inputs.expected_predecessor }}
+          PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
+        run: |
+          [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before activation.' >&2; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/opkg-signing.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
+          unset OPKG_SIGNING_KEY
+          site="${PACKAGE_REPOSITORY_URL:-https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}}"
+          python3 scripts/hosted-publication.py -- python3 scripts/activate-latest-migration.py --execute \
+            --pointer-base64 "$SNAPSHOT_POINTER_BASE64" \
+            --expected-predecessor "$EXPECTED_PREDECESSOR" \
+            --migration-proof-base64 "$MIGRATION_PROOF_BASE64" --migration-proof-sha256 "$MIGRATION_PROOF_SHA256" \
+            --authorization-base64 "$AUTHORIZATION_BASE64" --authorization-sha256 "$AUTHORIZATION_SHA256" \
+            --site-url "$site" --repository "$GITHUB_REPOSITORY" --profiles profiles \
+            --work-root "$RUNNER_TEMP/channel-publication" --output public --key "$key" \
+            --public-key keys/repository.pub --usign "$RUNNER_TEMP/usign-build/usign" \
+            --apk "$RUNNER_TEMP/apk-host/build/src/apk"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deployment-check
+          path: ${{ runner.temp }}/channel-publication/deployment-check.json
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-check
+          path: deployment-check
+      - name: Require the authenticated live predecessor
+        run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase before
+      - name: Deploy both signed channels atomically
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify the intended live signed state
+        run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase after
