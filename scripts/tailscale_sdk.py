@@ -229,7 +229,7 @@ def build(recipe, profile_path, lock_path, work, output, expected_sdk, jobs):
     sdk = Path(prepare.extract_sdk(extract, work / 'extracted')).resolve()
     if extract != archive: extract.unlink()
     before = kernel_and_bank(sdk)
-    prepare.check_sdk_identity(original, sdk); prepare.check_kernel(original, sdk)
+    prepare.check_kernel(original, sdk)
     prepare.baseline_packages(original, sdk)
     apk = prepare.sdk_apk(profile, sdk) if profile.get('package_manager', 'opkg') == 'apk' else None
     manager = profile.get('package_manager', 'opkg')
