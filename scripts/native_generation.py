@@ -20,6 +20,129 @@ SDK_ROLES = ('.config', '.config.set', '.vermagic', 'Module.symvers',
              'modules.builtin.modinfo', 'include/config/kernel.release', 'include/generated/autoconf.h')
 ROOT = Path(__file__).resolve().parents[1]
 KIND = 'rec-native-apk-generation-transition-v1'
+NEW_KIND = 'rec-native-apk-generation-transition-v2'
+NEW_CONTEXT_KIND = 'rec-ae-b122-full-image-context-v1'
+NEW_PRODUCER = 'b122c35046ab1c3cd03828aabd168bb35466e2c8'
+P4_MANIFEST_SHA = '7e6ec14d7ace5439355331a78e94c5dfde28804a28704942664cc9775049aaa4'
+CANDIDATE_SHA = '7198fc7893cb983354694167923236852fc40558d8ff327489461810a0e026f2'
+WORLD_CUSTODY_SHA = '24df2dbb20d014de20ea8973a9aabbb4d29e6731162711fac310266f8364bd78'
+DIAGNOSIS_SHA = 'e0ab55804a42a4972cb157c3cd19584b2dae57175a6bb6821bdc4c651823bec9'
+NEW_IMAGES = {
+    'before': {'size': 14661640, 'sha256': '5a0eedece2116a8dd046bd8337b487bdfc6913eaf1465d3dc6b711d0851ad611'},
+    'after': {'size': 14661640, 'sha256': 'ac19e2c554e40219aed043a0760aef2a609743ec0437d295c4f7f15f51886d8f'},
+}
+NEW_CONTEXT7 = {
+    '.config': {'size': 216405, 'sha256': 'f245fc96a9db54159662d86f32e57e86a07106bd029719ad5bdb7af6581e552e'},
+    '.config.set': {'size': 288680, 'sha256': '0aa3b0483eb2142a107243fb7695df512de4fee95989ac82ffbc0bdb4f8c716c'},
+    '.vermagic': {'size': 33, 'sha256': '555c28901ca8ca4023945b27b62b924fdbb3a2fc951bb234cca9b8ab8b61ec0b'},
+    'Module.symvers': {'size': 889880, 'sha256': '405d5e270cb79b7e3acd8d8a0ec8b2c593f86d0a37342e3311a0e0f7ed8dcd41'},
+    'modules.builtin.modinfo': {'size': 30961, 'sha256': 'a3e566ab54c5cc030c7c2cb58e9cbadae7264215626c6636061a58a1cea9f6e9'},
+    'include/config/kernel.release': {'size': 9, 'sha256': '70ab81f7d2e0021fb2fca26461be33b18a0dc73828a383953ef5693f222b36ed'},
+    'include/generated/autoconf.h': {'size': 95984, 'sha256': 'c44e5bc0b47b66fda079278dd8cdab4be33484c232b95b54f48175acc1d85168'},
+}
+
+# Exact root-reviewed whole archive pairs; no normalized payload identities.
+REBUILT_BANK_POLICY = {'cohort': '612-recommended',
+ 'source_commit': 'ae65e1de69971b5a2e3cf7e39390ee93f274d488',
+ 'producer_commit': 'b122c35046ab1c3cd03828aabd168bb35466e2c8',
+ 'kernel_abi': '6.12.108~942ed17ba3e2c90bc1373619dd44dedc-r1',
+ 'build_id': 'redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1',
+ 'seed': '3254dd70ea96217f41221b29998780639bbf2e7f33deb735c8bd7b380274c4e3',
+ 'before_full_Image': {'sha256': '5a0eedece2116a8dd046bd8337b487bdfc6913eaf1465d3dc6b711d0851ad611',
+                       'size': 14661640},
+ 'after_full_Image': {'sha256': 'ac19e2c554e40219aed043a0760aef2a609743ec0437d295c4f7f15f51886d8f',
+                      'size': 14661640},
+ 'before_bank_inventory_sha256': 'eb74353e81799e2ea0451c207fea57ad6297c4613fa159ad555088add44a706d',
+ 'after_bank_inventory_sha256': '464d804889f430550d84a21bdaee9801043afcb4b1fb1192b2dd9ee30963f946',
+ 'unchanged_whole_archive_count': 1395,
+ 'rebuilt_same_path_archive_count': 10,
+ 'app_transition': {'after': {'path': 'bin/packages/aarch64_cortex-a53/luci/luci-app-attendedsysupgrade-20261021.2-r3.apk',
+                              'sha256': '53a62fd5d393d1cfbe903f139b06c7be5a045da2e55bedfcab3fe30566e4bb4e',
+                              'size': 12186},
+                    'before': {'path': 'bin/packages/aarch64_cortex-a53/luci/luci-app-attendedsysupgrade-20261021.2-r2.apk',
+                               'sha256': '9188d87fe19aaf186c4f164b3ff797e97d6df54b4e09c70893ee8af07f541bad',
+                               'size': 12186}},
+ 'kind': 'rec-native-exact-rebuilt-bank-relation-v1',
+ 'decision_sha256': '1418d193361e2dca9931dec9fe6aef4cace1d8daad838d5b5cdba7b0530ff0aa',
+ 'proofs': {'after_manifest': {'sha256': 'bceaddf5185120fe57cba4d2ce9a6ce47806569750038bab256e63ae82aa5e17',
+                               'size': 301249},
+            'archive_diagnosis': {'sha256': '931d8eb4bcc442cb2533c48042b87fe9064c10d60b544f016fbd8b0cff4700c2',
+                                  'size': 67068},
+            'before_manifest': {'sha256': 'e82ee7868876b37d04ddaf460448d891cb19636c4592c4c99e411593932f8d20',
+                                'size': 301249},
+            'module_sections': {'sha256': '88023a2b3dbd8ce2af25702bb38c4b4d8722a20aa06778c32cc76b9824e148ca',
+                                'size': 16826},
+            'module_strings': {'sha256': '6954c6587787faeff0d4388ed61ba32c7238e0223af77904119e887529900f06',
+                               'size': 3703},
+            'new_IB_approval': {'sha256': '12d0488a8a748f00b7537557c499a04b4a78c8fce98e7f9bd7ae2904cb2e5d39',
+                                'size': 4381},
+            'new_native_acceptance': {'sha256': 'e7bfbf6ad2698eb05718b0c379c81468b681a5f84b07161d9da252dcc979dbf6',
+                                      'size': 10188},
+            'new_native_bank': {'sha256': 'ee9e9f5a2893b5b4a5a83e64d9d3fda34aca7cc3f09e160845ccfb7e8c53e5a5',
+                                'size': 387515},
+            'new_native_evidence': {'sha256': 'c71d134343482bd84c8cb9d465aeebdec38a203d4d53b20730186a3f68da46e0',
+                                    'size': 229470}},
+ 'exact_rebuilt_archives': [{'archive': {'after': {'sha256': '3fd4d51fb8a0e7ae0c98589a3898a867c9b90cc2b6e90f5443db63fad9e21e67',
+                                                   'size': 156566},
+                                         'before': {'sha256': '8587ef03019f2c28e2468ef9bfc6bd2d05b790c96b8ea31d51d5fdcc92c8e584',
+                                                    'size': 156566},
+                                         'path': 'bin/packages/aarch64_cortex-a53/luci/luci-base-26.249.28459~d6167ea.apk'},
+                             'classification': 'identical-complete-file-payloads-with-exact-recorded-build-mtimes-and-ADB-identity-change'},
+                            {'archive': {'after': {'sha256': '929cde658fb0619cd28f775a504aecd135907c8596a825e92d85b9411008e32d',
+                                                   'size': 4047},
+                                         'before': {'sha256': 'e097f0024b88f053577d493f03478cd1d1088a0040f945bfe0a3d3bed9613c35',
+                                                    'size': 4045},
+                                         'path': 'bin/packages/aarch64_cortex-a53/luci/luci-i18n-attendedsysupgrade-ru-26.249.28459~d6167ea.apk'},
+                             'classification': 'identical-complete-file-payloads-with-exact-recorded-build-mtimes-and-ADB-identity-change'},
+                            {'archive': {'after': {'sha256': '49b8ca8d54ea2418872023e6bdc6311b2202969ab91a71c6417ed24e75e3504a',
+                                                   'size': 3407},
+                                         'before': {'sha256': '77fcc19d616ab842c8e1f3cba9bbb146b2c85b492123e8a414a0229e8e4e26b0',
+                                                    'size': 3405},
+                                         'path': 'bin/packages/aarch64_cortex-a53/luci/luci-i18n-attendedsysupgrade-zh-cn-26.249.28459~d6167ea.apk'},
+                             'classification': 'identical-complete-file-payloads-with-exact-recorded-build-mtimes-and-ADB-identity-change'},
+                            {'archive': {'after': {'sha256': '4966a5088a3ca80808201925157f4f7c30b0e88a67e1a1ce4010f0a73604a8d5',
+                                                   'size': 82631},
+                                         'before': {'sha256': 'aedd42f105c11e9ef52e471634d4313970fc9e0b4b918e031e1046a3bb231758',
+                                                    'size': 82634},
+                                         'path': 'bin/packages/aarch64_cortex-a53/luci/luci-i18n-base-ru-26.249.28459~d6167ea.apk'},
+                             'classification': 'identical-complete-file-payloads-with-exact-recorded-build-mtimes-and-ADB-identity-change'},
+                            {'archive': {'after': {'sha256': 'd4f91903a91bd060245f4bd91b5a5cad0c6f12c4d46d1b869cb44bfaabd00672',
+                                                   'size': 65617},
+                                         'before': {'sha256': '69c19327726062f5bbe6ba576fb71cd75b7b2f1f217f5b71f03e5aa8773aff89',
+                                                    'size': 65615},
+                                         'path': 'bin/packages/aarch64_cortex-a53/luci/luci-i18n-base-zh-cn-26.249.28459~d6167ea.apk'},
+                             'classification': 'identical-complete-file-payloads-with-exact-recorded-build-mtimes-and-ADB-identity-change'},
+                            {'archive': {'after': {'sha256': '26866b653c1ce1e075250256807c3a1d24d66bb45e86c167a7ab3a40f101fed8',
+                                                   'size': 2543939},
+                                         'before': {'sha256': 'e2a2056afaf53f0edb523ca699101f440c7f87ade8f1869a36810b5301d13017',
+                                                    'size': 2543950},
+                                         'path': 'bin/packages/aarch64_cortex-a53/packages/geoipupdate-8.0.0-r1.apk'},
+                             'classification': 'Go-build-ID-descriptor-only-byte-change'},
+                            {'archive': {'after': {'sha256': '55d0a1bf6935bdcd431d0a4546273c1caf36154672204232a55342aa9f2bb6e2',
+                                                   'size': 2732596},
+                                         'before': {'sha256': '1bd9e0208e2bdc1b0a5bcf098bdf92441ba78cac8bceaccc79657e2ef24f1814',
+                                                    'size': 2732597},
+                                         'path': 'bin/packages/aarch64_cortex-a53/packages/geoview-0.2.6-r1.apk'},
+                             'classification': 'Go-build-ID-descriptor-only-byte-change'},
+                            {'archive': {'after': {'sha256': '2cfc6ad9987543e4e7927c919ddc52e5bb037f969d28ba99f1402332264acaf8',
+                                                   'size': 178216},
+                                         'before': {'sha256': 'b29507266eaf9de14034317711fce2d84e0b5f293f40bab0e7aa74743f878650',
+                                                    'size': 178186},
+                                         'path': 'bin/targets/mediatek/filogic/packages/kmod-oaf-6.12.108.2026.04.20~569f93bf-r1.apk'},
+                             'classification': 'nonloaded-debug-buildpath-string-order-and-corresponding-debug-relocations-plus-GNU-build-ID'},
+                            {'archive': {'after': {'sha256': '6ffca2ba304716796592510137b5e630d0e407fa0a3fe17f61a3ee1056d4df88',
+                                                   'size': 5880},
+                                         'before': {'sha256': '9c2389e07f41bb75c5692b5a75de7e501527e8c59b3290b545712cafa55e9187',
+                                                    'size': 5862},
+                                         'path': 'bin/targets/mediatek/filogic/packages/kmod-usb-serial-dmx_usb_module-6.12.108.19.12.1-r2.apk'},
+                             'classification': 'exact-source-buildpath-literal-in-diagnostic-strings-and-only-its-corresponding-relocation-addends'},
+                            {'archive': {'after': {'sha256': '5deb200e700bbacc35b0e8477f15fab3015f6adf9efe1ccef19531aecd764af5',
+                                                   'size': 21729},
+                                         'before': {'sha256': '5ff8a3739555347b40535646c64f7ef6b382a283a0917c6dd17de0a41a14b633',
+                                                    'size': 21716},
+                                         'path': 'bin/targets/mediatek/filogic/packages/kmod-v4l2loopback-6.12.108.0.15.1-r1.apk'},
+                             'classification': 'exact-source-buildpath-literal-in-diagnostic-strings-and-only-its-corresponding-relocation-addends'}]}
+
 OLD_PRODUCER = 'ea6de11283a6d83728e50b4b9ced214761ecc1c0'
 MODULE = 'www/luci-static/resources/ax6000_asu.js'
 MODULE_SHA = 'cbafbc641774f22ad1e47cbe8e1a8af80a8c1e36383c1d66d54dc40926ff23ff'
@@ -185,6 +308,193 @@ def compare_banks(before, after):
     need(not changed, 'Unreviewed native archive changes (including core/vendor/common/translations): ' + ', '.join(changed[:20]))
 
 
+
+def bank_decision_projection(data):
+    """Strip operator-local paths; the whole original root decision is independently pinned."""
+    fields = ('cohort', 'source_commit', 'producer_commit', 'kernel_abi', 'build_id', 'seed',
+              'before_full_Image', 'after_full_Image', 'before_bank_inventory_sha256',
+              'after_bank_inventory_sha256', 'unchanged_whole_archive_count',
+              'rebuilt_same_path_archive_count', 'app_transition')
+    result = {name: data[name] for name in fields}
+    result.update(kind='rec-native-exact-rebuilt-bank-relation-v1',
+                  decision_sha256=REBUILT_BANK_POLICY['decision_sha256'],
+                  proofs={name: {k: ref[k] for k in ('sha256', 'size')} for name, ref in data['proofs'].items()},
+                  exact_rebuilt_archives=[{k: row[k] for k in ('archive', 'classification')}
+                                          for row in data['exact_rebuilt_archives']])
+    return result
+
+
+def compare_reviewed_banks(before, after, manifests, relation):
+    """Only the ten literal reviewed rebuilt pairs in this complete REC native generation."""
+    need(relation == REBUILT_BANK_POLICY, 'Unreviewed exact native bank decision/relation')
+    for phase, bank in (('before', before), ('after', after)):
+        manifest = manifests[phase]
+        need(bank == manifest_bank(manifest) and len(bank) == 1406,
+             'Reviewed native bank membership/count differs')
+        paths = {row['path']: {k: row[k] for k in ('sha256', 'size')}
+                 for row in manifest['files'] if row['path'].endswith('.apk')}
+        digest = hashlib.sha256(json.dumps(paths, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        need(digest == relation[phase + '_bank_inventory_sha256'],
+             'Reviewed whole native bank path/control/archive identity differs')
+    left, right = dict(before), dict(after)
+    for phase, bank in (('before', left), ('after', right)):
+        app = relation['app_transition'][phase]; leaf = PurePosixPath(app['path']).name
+        need(bank.pop(leaf, None) == {k: app[k] for k in ('sha256', 'size')},
+             'Reviewed native APP2/APP3 archive differs')
+    need(set(left) == set(right), 'Reviewed rebuilt native package membership differs')
+    changed = {name: {'before': left[name], 'after': right[name]}
+               for name in left if left[name] != right[name]}
+    expected = {PurePosixPath(row['archive']['path']).name:
+                {phase: row['archive'][phase] for phase in ('before', 'after')}
+                for row in relation['exact_rebuilt_archives']}
+    need(changed == expected and len(changed) == relation['rebuilt_same_path_archive_count'] == 10
+         and len(left) - len(changed) == relation['unchanged_whole_archive_count'] == 1395,
+         'Unreviewed rebuilt native archive row/hash/size/count')
+
+
+def validate_bank_bindings(summary):
+    relation = summary.get('bank_transition')
+    need(relation == REBUILT_BANK_POLICY, 'Missing exact root-reviewed native bank authority')
+    need(summary['functional_image'] == {'before': relation['before_full_Image'], 'after': relation['after_full_Image']}
+         and summary['successor_build_id'] == relation['build_id']
+         and summary['seeds']['after'] == relation['seed']
+         and summary['source_commit'] == relation['source_commit']
+         and summary['producer_commit'] == relation['producer_commit'], 'Reviewed bank generation/Image identity differs')
+    for phase in ('before', 'after'):
+        need(summary[phase + '_metadata']['firmware-manifest.json'] == relation['proofs'][phase + '_manifest'],
+             'Reviewed bank native manifest identity differs')
+    for field, name in (('native_status', 'new_native_acceptance'), ('native_evidence', 'new_native_evidence'),
+                        ('ib_approval', 'new_IB_approval')):
+        need(summary['local_proof_sha256']['after'][field] == relation['proofs'][name]['sha256'],
+             'Reviewed rebuilt bank independent native/IB proof differs')
+
+
+def local_bank_decision(ref, left, right, after):
+    need(isinstance(ref, dict) and ref.get('sha256') == REBUILT_BANK_POLICY['decision_sha256'],
+         'Exact root-reviewed bank decision SHA required')
+    data = read_json(checked_ref(ref, 8 * MIB))
+    need(data.get('kind') == 'rec-native-exact-rebuilt-bank-root-decision-v1'
+         and type(data.get('schema_version')) is int and data['schema_version'] == 1
+         and data.get('approved') is True and data.get('artifacts_mutated_or_normalized') is False
+         and bank_decision_projection(data) == REBUILT_BANK_POLICY, 'Unreviewed rebuilt native bank decision')
+    for proof in data['proofs'].values(): checked_ref(proof, 8 * MIB)
+    need(data['proofs']['new_native_acceptance'] == after['native_status']
+         and data['proofs']['new_native_evidence'] == after['native_evidence']
+         and data['proofs']['new_IB_approval'] == after['ib_approval']
+         and all(data['proofs'][phase + '_manifest'] == side['metadata']['firmware-manifest.json']
+                 for phase, side in (('before', left), ('after', right))),
+         'Root decision binds a different actual native generation')
+    relation = copy.deepcopy(REBUILT_BANK_POLICY)
+    compare_reviewed_banks(left['bank'], right['bank'],
+                           {'before': left['manifest'], 'after': right['manifest']}, relation)
+    return relation
+
+
+def five_context(phase):
+    return {**{k: NEW_CONTEXT7[k] for k in ('.config', '.vermagic', 'Module.symvers', 'include/config/kernel.release')},
+            'KDIR/Image': NEW_IMAGES[phase]}
+
+
+def validate_candidate(data):
+    """Authenticate the typed candidate separately from any later native acceptance."""
+    need(type(data.get('schema_version')) is int and data['schema_version'] == 1
+         and data.get('kind') == 'rec-native-candidate-context-p5-v1'
+         and data.get('native_acceptance', False) is None and data.get('independently_verified') is False
+         and data.get('prior_image_equal') is False and data.get('prior_abi_context_equal') is True
+         and data.get('sdk_context_expected') == NEW_CONTEXT7
+         and data.get('diagnosis', {}).get('sha256') == DIAGNOSIS_SHA, 'New candidate is not the measured unaccepted REC context')
+    old = data.get('original_context', {})
+    need(old.get('kind') == 'ax6000-accepted-native-kernel-context-v2' and old.get('source_commit') == SOURCE
+         and old.get('cohort') == COHORT and old.get('recipe_commit') == OLD_PRODUCER
+         and old.get('kernel_abi') == ABI, 'Candidate original source/cohort differs')
+    records = old.get('required_files', {})
+    need(set(records) == set(five_context('before'))
+         and all({k: row[k] for k in ('sha256', 'size')} == five_context('before')[name]
+                 for name, row in records.items()), 'Candidate original complete context differs')
+    for row in records.values(): relative(row['path'])
+    expected = {'kind': 'rec-native-candidate-owned-context-p5-v1', 'kernel_abi': ABI,
+                'required_files': copy.deepcopy(records), 'native_acceptance': None, 'independently_verified': False}
+    expected['required_files']['KDIR/Image'].update(NEW_IMAGES['after'])
+    need(data.get('owned_context') == expected, 'Candidate changes more than the exact full owned Image')
+
+
+def new_context_status(status):
+    """A schema3 independent verification status, never candidate-only approval."""
+    need(type(status.get('schema_version')) is int and status['schema_version'] == 3
+         and status.get('kind') == 'ax6000-native-new-context-acceptance-v1'
+         and status.get('prior_image_equal') is False and status.get('prior_abi_context_equal') is True
+         and status.get('strict_accepted_context_unchanged') is False
+         and status.get('strict_new_context_unchanged') is True
+         and status.get('original_source_readonly_guards_passed') is True
+         and status.get('prior_kernel_image') == NEW_IMAGES['before']
+         and status.get('accepted_kernel_image') == NEW_IMAGES['after']
+         and status.get('prior_context') == status.get('original_source_context_before')
+         == status.get('original_source_context_after') == five_context('before')
+         and status.get('strict_context_before') == status.get('strict_context_after') == five_context('after')
+         and status.get('source_context7') == NEW_CONTEXT7
+         and type(status.get('container_exit_code')) is int and status['container_exit_code'] == 0
+         and status.get('oom_killed') is False and status.get('full_native_verifier_unchanged') is True,
+         'Actual independent new-context acceptance and truthful prior Image scope required')
+    need(isinstance(status.get('original_source'), str) and Path(status['original_source']).is_absolute(),
+         'Original source identity required')
+    for name in ('candidate_context', 'world_success_custody', 'producer_completion', 'native_evidence'):
+        checked_ref(status.get(name), 8 * MIB)
+    need(status['candidate_context']['sha256'] == CANDIDATE_SHA
+         and status['world_success_custody']['sha256'] == WORLD_CUSTODY_SHA,
+         'New independent status references an unreviewed candidate or world custody')
+
+
+def world_custody(ref):
+    """Pin failed P4 history and its immutable checked-world call graph, not a fake completed world."""
+    need(isinstance(ref, dict) and ref.get('sha256') == WORLD_CUSTODY_SHA, 'Unreviewed P4 world custody')
+    data = read_json(checked_ref(ref, 8 * MIB))
+    need(type(data.get('schema_version')) is int and data['schema_version'] == 1
+         and data.get('kind') == 'rec-native-world-success-custody-v1'
+         and data.get('producer_commit') == NEW_PRODUCER and data.get('source_commit') == SOURCE
+         and data.get('world_command_exit_zero_inferred') is True and data.get('raw_process_wait_status', False) is None
+         and data.get('producer_completed') is False and type(data.get('producer_exit_code')) is int
+         and data['producer_exit_code'] == 1 and data.get('native_acceptance', False) is None,
+         'P4 world custody must retain the actual failed producer and inferred subprocess scope')
+    need(data['diagnosis']['sha256'] == DIAGNOSIS_SHA
+         and data['runner_manifest']['sha256'] == P4_MANIFEST_SHA,
+         'Unknown P4 diagnosis or immutable checked-world launcher')
+    diagnosis = read_json(checked_ref(data['diagnosis'], 8 * MIB))
+    manifest = read_json(checked_ref(data['runner_manifest'], 8 * MIB))
+    need(set(data['producer_code']) == set(manifest['code']), 'Incomplete immutable P4 code custody')
+    for name, row in data['producer_code'].items():
+        checked_ref(row, 8 * MIB)
+        need({k: row[k] for k in ('sha256', 'size')} == manifest['code'][name], 'P4 immutable code changed')
+    for key, name in (('build_script', 'build.sh'), ('world_executor', 'world.py'), ('world_argv', 'world-argv.json')):
+        need(data[key] == data['producer_code'][name], 'P4 checked world call graph differs')
+    for key, name in (('producer_completion', 'producer-completion.json'), ('producer_inspect', 'output/terminal-inspect.json'),
+                      ('result', 'output/result.json'), ('build_log', 'output/build.log')):
+        checked_ref(data[key], 64 * MIB)
+        need({k: data[key][k] for k in ('sha256', 'size')}
+             == {k: diagnosis['inputs'][name][k] for k in ('sha256', 'size')}, 'P4 actual failure evidence differs')
+    inspected, result, completion = (read_json(data[k]['path']) for k in ('producer_inspect', 'result', 'producer_completion'))
+    state = inspected['State']
+    need(inspected.get('Id') == '002de6aea85d64daa3e6098ad19019b7e7d12a37822c9f5963cefcffa6ad4fa0'
+         and state.get('Status') == 'exited' and state.get('Running') is False and state.get('OOMKilled') is False
+         and type(state.get('ExitCode')) is int and state['ExitCode'] == 1
+         and type(result.get('exit_code')) is int and type(result.get('child_exit_code')) is int
+         and result['exit_code'] == result['child_exit_code'] == 1 and result.get('termination_reason', False) is None
+         and completion.get('completed') is False and completion.get('native_evidence', False) is None
+         and completion.get('producer_commit') == NEW_PRODUCER and completion.get('source_commit') == SOURCE
+         and len(completion.get('stages', [])) == 1 and completion['stages'][0].get('steps') == [],
+         'P4 failure was relabelled as successful native production')
+    need(diagnosis.get('world_shell_succeeded_before_strict_guard') is True
+         and diagnosis.get('producer_completed') is False and diagnosis.get('full_Image_equal') is False
+         and diagnosis.get('byte_normalization_performed') is False
+         and data.get('guard_failure') == {'role': 'KDIR/Image', 'after_phase': 'after-world',
+                                          'expected': NEW_IMAGES['before'], 'observed': NEW_IMAGES['after']},
+         'P4 checked-world/strict-guard scope differs')
+    for role, row in diagnosis['SDK7'].items():
+        need(role in NEW_CONTEXT7 and all({k: row[phase][k] for k in ('sha256', 'size')} == NEW_CONTEXT7[role]
+                                        for phase in ('current', 'original')), 'P4 diagnosed SDK context differs')
+    need(set(diagnosis['SDK7']) == set(NEW_CONTEXT7), 'P4 diagnosed SDK7 incomplete')
+    return data
+
+
 def production_completion(data, producer, metadata, evidence, staging, source_context, sdk_context, profile, manifest):
     """Consume real successful process inspections; staging is never completion."""
     need(isinstance(data, dict) and set(data) == {'schema_version', 'kind', 'producer_commit',
@@ -237,6 +547,80 @@ def production_completion(data, producer, metadata, evidence, staging, source_co
             sums = {'bin/targets/mediatek/filogic/' + filename for filename in ('sha256sums', 'SHA256SUMS')}
             need(set(actual) == set(expected) and all(actual[path] == row for path, row in expected.items() if path not in sums),
                  'Final full source/RAW native inventory differs')
+
+
+def packaging_completion(data, before, after, right, staging):
+    """Successful P5 IB/export with separately authenticated failed-P4 world custody."""
+    fields = {'schema_version', 'kind', 'producer_commit', 'source_commit', 'completed', 'native_evidence',
+              'staging_receipt', 'candidate_context', 'world_success_custody', 'raw_metadata4', 'stages', 'phase_receipts'}
+    need(isinstance(data, dict) and set(data) == fields and type(data['schema_version']) is int
+         and data['schema_version'] == 1 and data['kind'] == 'rec-native-packaging-completion-v1'
+         and data['producer_commit'] == NEW_PRODUCER and data['source_commit'] == SOURCE
+         and data['completed'] is True and data['native_evidence'] is None
+         and data['raw_metadata4'] == right['metadata'] and data['staging_receipt'] == staging,
+         'Actual completed P5 packaging and exact native metadata required')
+    for ref in [staging, *right['metadata'].values()]: checked_ref(ref, 8 * MIB)
+    need(isinstance(data['candidate_context'], dict) and data['candidate_context'].get('sha256') == CANDIDATE_SHA,
+         'P5 candidate must be the exact reviewed new context')
+    candidate = read_json(checked_ref(data['candidate_context'], 8 * MIB)); validate_candidate(candidate)
+    world = world_custody(data['world_success_custody'])
+    need(candidate['diagnosis'] == world['diagnosis']
+         and all(right['status'].get(name) == data[name] for name in ('candidate_context', 'world_success_custody')),
+         'P5 candidate/world custody differs from independent native acceptance')
+    stages = data['stages']
+    need(isinstance(stages, list) and len(stages) == 1 and set(stages[0]) == {'steps', 'inspect'}
+         and stages[0]['steps'] == ['imagebuilder', 'export'], 'P5 must not claim a completed world production stage')
+    inspected = read_json(checked_ref(stages[0]['inspect'], 8 * MIB))
+    if isinstance(inspected, list):
+        need(len(inspected) == 1, 'Ambiguous P5 producer inspection'); inspected = inspected[0]
+    state = inspected.get('State', {})
+    need(re.fullmatch('[0-9a-f]{64}', inspected.get('Id', ''))
+         and state.get('Status') == 'exited' and state.get('Running') is False
+         and state.get('OOMKilled') is False and type(state.get('ExitCode')) is int and state['ExitCode'] == 0,
+         'P5 packaging did not actually exit successfully')
+    phases = ('before-packaging', 'after-imagebuilder', 'after-export')
+    need(isinstance(data['phase_receipts'], dict) and set(data['phase_receipts']) == set(phases),
+         'All three actual P5 packaging phase receipts required')
+    current = {name: after['source_context'][name] for name in five_context('after')}
+    original = {name: before['source_context'][name] for name in five_context('before')}
+    seven = {name: after['source_context'][name] for name in SDK_ROLES}
+    observed = {}
+    for name in phases:
+        phase = read_json(checked_ref(data['phase_receipts'][name], 8 * MIB)); observed[name] = phase
+        need(phase.get('phase') == name and phase.get('native_context') == current
+             and phase.get('original_native_context') == original and phase.get('source_context7') == seven
+             and phase.get('source_config_sha256') == right['metadata']['build.config']['sha256']
+             and phase.get('original_source_readonly_guards_passed') is True
+             and phase.get('prior_owned_Image_byte_identity') is False and phase.get('candidate_context') is True
+             and phase.get('native_acceptance', False) is None, 'Actual new/original P5 phase context differs: ' + name)
+    for ref in [*current.values(), *original.values(), *seven.values(), *after['sdk_context'].values()]:
+        checked_ref(ref, 64 * MIB)
+    pre = observed['before-packaging'].get('source_bin'); built = observed['after-imagebuilder'].get('source_bin')
+    ib = 'bin/targets/mediatek/filogic/' + right['profile']['imagebuilder']['url'].rsplit('/', 1)[-1]
+    need(isinstance(pre, dict) and isinstance(built, dict) and ib in pre and set(pre) == set(built)
+         and all(pre[name] == built[name] for name in pre if name != ib),
+         'P5 packaging changes native bank/firmware beyond the actual IB archive')
+    pristine = observed['after-imagebuilder'].get('pristine_imagebuilder', {})
+    need(built[ib] == pristine.get('archive'),
+         'P5 after-imagebuilder archive differs from its actual pristine IB proof')
+    expected = {row['path']: {k: row[k] for k in ('sha256', 'size')} for row in right['manifest']['files']}
+    apks = {name: row for name, row in expected.items() if name.endswith('.apk')}
+    need(apks and {name: row for name, row in pre.items() if name.endswith('.apk')} == apks,
+         'P5 before-packaging bank is not the actual final native bank')
+    export = observed['after-export'].get('export', {})
+    need(export.get('source_equals_raw_current_final_archives') is True
+         and export.get('sdk_context') == after['sdk_context']
+         and export.get('sdk', {}).get('sha256') == right['profile']['sdk']['sha256']
+         and export.get('imagebuilder') == {k: right['profile']['imagebuilder'][k] for k in ('sha256', 'size')},
+         'P5 final actual SDK/IB/context binding differs')
+    sums = {'bin/targets/mediatek/filogic/' + n for n in ('sha256sums', 'SHA256SUMS')}
+    actual = export.get('source_bin', {})
+    need(set(actual) - sums == set(expected) - sums
+         and all(actual[name] == row for name, row in expected.items() if name not in sums)
+         and actual.get(ib) == {k: right['profile']['imagebuilder'][k] for k in ('sha256', 'size')},
+         'P5 final complete source/RAW inventory differs')
+    return {'candidate_context_sha256': data['candidate_context']['sha256'],
+            'world_success_custody_sha256': data['world_success_custody']['sha256']}
 
 
 def git_blob(recipe, commit, name):
@@ -374,7 +758,29 @@ def asset(raw, manifest, filename, expected):
     return current
 
 
-def side_records(side):
+def new_status_bank(status, side, bank):
+    """Bind schema3's complete independently decoded control inventory to actual whole archives."""
+    path = regular(Path(side['native_status']['path']).parent / 'native-bank.json', 8 * MIB)
+    need(identity(path)['sha256'] == status.get('native_bank_sha256'), 'New native bank proof digest differs')
+    proof = read_json(path); rows = proof.get('packages')
+    need(proof.get('all_packages_verified') is True and proof.get('kernel_abi') == ABI
+         and type(proof.get('count')) is int and proof['count'] == 1406
+         and type(proof.get('kmods')) is int and proof['kmods'] == 1079
+         and isinstance(rows, list) and len(rows) == len(bank) == 1406, 'Complete accepted REC native bank proof required')
+    actual, names, paths = {}, set(), set()
+    for row in rows:
+        need(isinstance(row, dict) and set(row) == {'path', 'package', 'version', 'sha256', 'size'}, 'Malformed decoded native bank row')
+        name = relative(row['path']); leaf = PurePosixPath(name).name
+        need(name.startswith('bin/') and name.endswith('.apk') and name not in paths and leaf not in actual
+             and isinstance(row['package'], str) and row['package'] and row['package'] not in names
+             and isinstance(row['version'], str) and row['version'], 'Ambiguous decoded native package inventory')
+        actual[leaf] = {k: row[k] for k in ('sha256', 'size')}; names.add(row['package']); paths.add(name)
+    need(actual == bank and sum(name.startswith('kmod-') for name in names) == 1079,
+         'Independent full native control inventory differs from actual manifest archives')
+
+
+def side_records(side, *, context_transition=None):
+    need(context_transition in (None, NEW_CONTEXT_KIND), 'Unknown native context enrollment route')
     fields = {'raw', 'source', 'recipe', 'producer_commit', 'source_profile', 'native_status',
               'native_evidence', 'sdk_baseline', 'source_context', 'sdk_context', 'ib_approval'}
     need(isinstance(side, dict) and set(side) == fields, 'Exact actual native side inputs required')
@@ -387,9 +793,16 @@ def side_records(side):
     profile, lock, manifest = (read_json(raw / name) for name in ('profile.json', 'lock.json', 'firmware-manifest.json'))
     evidence = read_json(checked_ref(side['native_evidence'], 8 * MIB))
     status = read_json(checked_ref(side['native_status'], 8 * MIB))
-    need(status.get('kind') == 'ax6000-native-completion-acceptance-v2' and status.get('schema_version') == 2
-         and status.get('ok') is True and status.get('all_layouts_verified') is True
-         and status.get('strict_accepted_context_unchanged') is True, 'Actual completed native acceptance required')
+    if context_transition is None:
+        need(status.get('kind') == 'ax6000-native-completion-acceptance-v2' and status.get('schema_version') == 2
+             and status.get('ok') is True and status.get('all_layouts_verified') is True
+             and status.get('strict_accepted_context_unchanged') is True, 'Actual completed native acceptance required')
+    else:
+        new_context_status(status)
+        need(side['producer_commit'] == NEW_PRODUCER and status.get('ok') is True
+             and status.get('all_layouts_verified') is True and status.get('channel') == 'recommended'
+             and status.get('cohort') == COHORT and status.get('package_manager') == 'apk',
+             'New context requires independent accepted REC/b122 native verification')
     for field, value in [('producer_commit', side['producer_commit']), ('source_commit', SOURCE),
                          ('build_id', profile['build_id']), ('kernel_abi', ABI), ('seed', profile['asu']['seed'])]:
         need(status.get(field) == value, 'Native acceptance identity differs: ' + field)
@@ -411,12 +824,21 @@ def side_records(side):
     source_records = context_records(contexts, expected); context_records(side['sdk_context'], expected)
     need(set(side['source_context']) == set(SDK_ROLES) | {'KDIR/Image'}
          and all(source_records.get(name) == value for name, value in CONTEXT.items()), 'Enrolled native ABI context changed')
+    if context_transition is not None:
+        need(source_records == NEW_CONTEXT7 and status.get('source') == side['source']
+             and status.get('raw') == side['raw'] and status.get('sdk') == profile['sdk']
+             and status.get('native_evidence') == side['native_evidence']
+             and status.get('sdk_baseline') == side['sdk_baseline']
+             and status.get('native_input_records') == {row['path']: {k: row[k] for k in ('sha256', 'size')}
+                                                        for row in metadata.values()},
+             'Independent new-context status does not bind actual source/RAW/SDK/evidence')
     kernel = Path(side['source']) / relative(evidence['sdk_context']['kernel_relative_path'])
     for name in SDK_ROLES:
         need(side['source_context'][name]['path'] == str(kernel / name), 'Actual source context path differs')
     image = identity(checked_ref(side['source_context']['KDIR/Image'], 64 * MIB))
     need(side['source_context']['KDIR/Image']['path'] == str(kernel.parent / 'Image')
-         and image == IMAGES['after'] and image == {k: evidence.get('sysupgrade_input', {}).get(k) for k in ('sha256', 'size')},
+         and image == (IMAGES['after'] if context_transition is None else NEW_IMAGES['after'])
+         and image == {k: evidence.get('sysupgrade_input', {}).get(k) for k in ('sha256', 'size')},
          'Whole accepted functional native Image changed')
     for layout in evidence['layouts'].values():
         need({k: layout['kernel'].get(k) for k in ('sha256', 'size')} == image, 'Actual layout kernel differs')
@@ -432,6 +854,10 @@ def side_records(side):
         asset(raw, manifest, filename, {k: profile[name][k] for k in ('sha256', 'size') if k in profile[name]})
     need(evidence['sdk_context'].get('sdk_sha256') == profile['sdk']['sha256'], 'Full native SDK verification differs')
     bank = native_bank(raw, manifest)
+    if context_transition is not None:
+        new_status_bank(status, side, bank)
+        need(all(len(item['root']['installed_packages']) == 293 for item in evidence['layouts'].values()),
+             'Actual new native layout databases differ')
     baseline = check_baseline(side['sdk_baseline'], evidence['sdk_context'].get('apk_baseline'), bank)
     bound = {**side, 'metadata': metadata}
     check_ib(bound, profile, bank)
@@ -443,7 +869,7 @@ def side_records(side):
          'Native seed/source profile is not bound to its actual producer')
     generated_profile(source_profile, profile)
     return {'profile': profile, 'manifest': manifest, 'metadata': metadata, 'evidence': evidence,
-            'bank': bank, 'baseline': baseline, 'context': source_records, 'image': image}
+            'bank': bank, 'baseline': baseline, 'context': source_records, 'image': image, 'status': status}
 
 
 def staged_source(data, before, after):
@@ -616,28 +1042,57 @@ def predecessor(inputs, before):
 def evaluate(inputs):
     fields = {'schema_version', 'kind', 'before', 'after', 'staging_receipt', 'production_receipt',
               'trusted_apk', 'trusted_usign', 'predecessor_root', 'predecessor_site_state', 'predecessor_snapshot'}
+    if isinstance(inputs, dict) and inputs.get('schema_version') == 2:
+        fields.add('bank_transition_decision')
     need(isinstance(inputs, dict) and set(inputs) == fields and type(inputs['schema_version']) is int
-         and inputs['schema_version'] == 1 and inputs['kind'] == 'rec-native-apk-replacement-inputs-v1',
+         and ((inputs['schema_version'] == 1 and inputs['kind'] == 'rec-native-apk-replacement-inputs-v1')
+              or (inputs['schema_version'] == 2 and inputs['kind'] == 'rec-native-apk-replacement-inputs-v2')),
          'Exact actual native replacement inputs required; pending/null staging cannot pass')
+    new_context = inputs['schema_version'] == 2
     before, after = inputs['before'], inputs['after']
     need(isinstance(before, dict) and isinstance(after, dict) and before.get('producer_commit') == OLD_PRODUCER
          and isinstance(after.get('producer_commit'), str) and re.fullmatch('[0-9a-f]{40}', after['producer_commit'])
          and after['producer_commit'] != OLD_PRODUCER, 'Actual old/new native producers required')
-    left, right = side_records(before), side_records(after)
+    if new_context:
+        need(after.get('producer_commit') == NEW_PRODUCER, 'New REC context is restricted to the measured b122 producer')
+    left = side_records(before)
+    right = side_records(after, context_transition=NEW_CONTEXT_KIND) if new_context else side_records(after)
     validate_profiles(left['profile'], right['profile'])
-    compare_banks(left['bank'], right['bank'])
+    if new_context:
+        bank_relation = local_bank_decision(inputs['bank_transition_decision'], left, right, after)
+    else:
+        compare_banks(left['bank'], right['bank'])
     for name in ('protected_packages', 'frozen_packages', 'frozen_kmods'):
         need(left['baseline'][name] == right['baseline'][name], 'Native SDK protected/frozen package set changed')
-    need(left['context'] == right['context'] and left['image'] == right['image']
+    if new_context:
+        need(left['context'] == right['context'] == NEW_CONTEXT7
+             and left['image'] == NEW_IMAGES['before'] and right['image'] == NEW_IMAGES['after'],
+             'New REC enrollment changes the measured whole-Image pair or ABI context')
+    else:
+        need(left['image'] == right['image'], 'Whole accepted functional native Image changed')
+    need(left['context'] == right['context']
          and left['manifest'].get('source_patches', []) == right['manifest'].get('source_patches', [])
          and {k: left['metadata']['build.config'][k] for k in ('sha256', 'size')}
          == {k: right['metadata']['build.config'][k] for k in ('sha256', 'size')},
          'Native ABI/config/source patch ledger changed')
     staging = read_json(checked_ref(inputs['staging_receipt'], 8 * MIB))
-    images = staged_source(staging, before, after)
-    production_completion(read_json(checked_ref(inputs['production_receipt'], 8 * MIB)), after['producer_commit'],
-                          right['metadata'], after['native_evidence'], inputs['staging_receipt'],
-                          after['source_context'], after['sdk_context'], right['profile'], right['manifest'])
+    if new_context:
+        # The genuine initial staging copy contained the old Image on both sides.
+        # This historical view never replaces the actually verified new source context.
+        copied_after = copy.deepcopy(after)
+        copied_after['source_context']['KDIR/Image'] = {**before['source_context']['KDIR/Image'],
+                                                        'path': after['source_context']['KDIR/Image']['path']}
+        images = staged_source(staging, before, copied_after)
+        need(right['status'].get('original_source') == before['source']
+             and right['status'].get('producer_completion') == inputs['production_receipt'],
+             'Independent new acceptance binds a different original source or P5 completion')
+        transition_refs = packaging_completion(read_json(checked_ref(inputs['production_receipt'], 8 * MIB)),
+                                               before, after, right, inputs['staging_receipt'])
+    else:
+        images = staged_source(staging, before, after)
+        production_completion(read_json(checked_ref(inputs['production_receipt'], 8 * MIB)), after['producer_commit'],
+                              right['metadata'], after['native_evidence'], inputs['staging_receipt'],
+                              after['source_context'], after['sdk_context'], right['profile'], right['manifest'])
     root_delta(left['evidence'], right['evidence'], images)
     app_payload(before, after, inputs['trusted_apk'])
     pointer = predecessor(inputs, left)
@@ -661,7 +1116,51 @@ def evaluate(inputs):
                                       for phase, side in [('before', before), ('after', after)]},
                'staging_receipt_sha256': inputs['staging_receipt']['sha256'],
                'production_receipt_sha256': inputs['production_receipt']['sha256']}
+    if new_context:
+        summary.update(prior_image_equal=False, functional_image=copy.deepcopy(NEW_IMAGES),
+                       bank_transition=bank_relation, unchanged_native_archives=1395)
+        summary['context_transition'] = {
+            'kind': NEW_CONTEXT_KIND, 'cohort': COHORT, 'source_commit': SOURCE, 'kernel_abi': ABI,
+            'producer_commit': NEW_PRODUCER, 'diagnosis_sha256': DIAGNOSIS_SHA,
+            'prior_image_equal': False, 'functional_image': copy.deepcopy(NEW_IMAGES), 'context7': left['context'],
+            'native_acceptance_sha256': after['native_status']['sha256'], **transition_refs,
+            'production_receipt_sha256': inputs['production_receipt']['sha256'],
+            'prior_world_producer_completed': False, 'prior_world_process_wait_status': None,
+            'prior_world_exit_code': 1, 'world_command_exit_zero_inferred': True}
+        validate_new_summary(summary)
     return left['profile'], right['profile'], summary
+
+
+def validate_new_summary(summary):
+    """Only the measured REC/b122 full-Image pair; candidate facts alone never approve it."""
+    need(summary.get('prior_image_equal') is False and summary.get('functional_image') == NEW_IMAGES
+         and summary.get('native_context') == NEW_CONTEXT7 and summary.get('producer_commit') == NEW_PRODUCER,
+         'New REC context requires the exact distinct complete Images and all seven ABI roles')
+    transition = summary.get('context_transition')
+    fields = {'kind', 'cohort', 'source_commit', 'kernel_abi', 'producer_commit', 'diagnosis_sha256',
+              'prior_image_equal', 'functional_image', 'context7', 'native_acceptance_sha256',
+              'candidate_context_sha256', 'world_success_custody_sha256', 'production_receipt_sha256',
+              'prior_world_producer_completed', 'prior_world_process_wait_status', 'prior_world_exit_code',
+              'world_command_exit_zero_inferred'}
+    need(isinstance(transition, dict) and set(transition) == fields
+         and transition['kind'] == NEW_CONTEXT_KIND and transition['cohort'] == COHORT
+         and transition['source_commit'] == SOURCE and transition['kernel_abi'] == ABI
+         and transition['producer_commit'] == NEW_PRODUCER and transition['diagnosis_sha256'] == DIAGNOSIS_SHA
+         and transition['prior_image_equal'] is False and transition['functional_image'] == NEW_IMAGES
+         and transition['context7'] == NEW_CONTEXT7, 'Unknown or unmeasured new native context relation')
+    need(transition['native_acceptance_sha256'] == summary['local_proof_sha256']['after']['native_status']
+         and transition['production_receipt_sha256'] == summary['production_receipt_sha256']
+         and transition['candidate_context_sha256'] == CANDIDATE_SHA
+         and transition['world_success_custody_sha256'] == WORLD_CUSTODY_SHA
+         and all(isinstance(transition[k], str) and SHA.fullmatch(transition[k]) for k in
+                 ('native_acceptance_sha256', 'candidate_context_sha256', 'world_success_custody_sha256', 'production_receipt_sha256')),
+         'New context requires actual independent acceptance and packaging/world custody digests')
+    validate_bank_bindings(summary)
+    need(transition['prior_world_producer_completed'] is False
+         and transition['prior_world_process_wait_status'] is None
+         and type(transition['prior_world_exit_code']) is int and transition['prior_world_exit_code'] == 1
+         and transition['world_command_exit_zero_inferred'] is True,
+         'P4 failed completion or inferred checked world status was relabelled')
 
 
 def load_receipt(old, new, path, pin):
@@ -671,7 +1170,9 @@ def load_receipt(old, new, path, pin):
     need(identity(path)['sha256'] == pin, 'Reviewed native replacement proof SHA differs')
     proof = read_json(path)
     need(isinstance(proof, dict) and set(proof) == {'schema_version', 'kind', 'summary'}
-         and type(proof['schema_version']) is int and proof['schema_version'] == 1 and proof['kind'] == KIND,
+         and type(proof['schema_version']) is int
+         and ((proof['schema_version'] == 1 and proof['kind'] == KIND)
+              or (proof['schema_version'] == 2 and proof['kind'] == NEW_KIND)),
          'Actual native replacement receipt required')
     summary = proof.get('summary', {})
     need(isinstance(summary, dict) and summary.get('predecessor_build_id') == old.get('build_id')
@@ -689,12 +1190,17 @@ def validate_receipt(old, new, path, pin, *, predecessor_pointer=None, old_tree=
               'protected_baseline_packages', 'changed_source_paths', 'new_app_version', 'before_metadata', 'after_metadata',
               'native_archive_inventory_sha256', 'source_patch_ledger', 'source_postimages', 'source_profile', 'seeds',
               'local_proof_sha256', 'staging_receipt_sha256', 'production_receipt_sha256'}
+    if proof['schema_version'] == 2:
+        fields |= {'prior_image_equal', 'context_transition', 'bank_transition'}
     need(set(summary) == fields, 'Unexpected portable native approval fields')
     migration = module('kernel_migration')
-    need(summary['functional_image'] == migration.IMAGES['after']
-         and isinstance(summary['native_context'], dict) and set(summary['native_context']) == set(SDK_ROLES)
-         and all(summary['native_context'].get(name) == row for name, row in migration.CONTEXT.items()),
-         'Portable native approval changes complete Image or enrolled ABI contexts')
+    if proof['schema_version'] == 2:
+        validate_new_summary(summary)
+    else:
+        need(summary['functional_image'] == migration.IMAGES['after']
+             and isinstance(summary['native_context'], dict) and set(summary['native_context']) == set(SDK_ROLES)
+             and all(summary['native_context'].get(name) == row for name, row in migration.CONTEXT.items()),
+             'Portable native approval changes complete Image or enrolled ABI contexts')
     def valid_identity(row):
         return isinstance(row, dict) and set(row) == {'sha256', 'size'} and isinstance(row['sha256'], str) \
             and SHA.fullmatch(row['sha256']) and type(row['size']) is int and 0 < row['size'] <= 64 * MIB
@@ -747,8 +1253,13 @@ def validate_receipt(old, new, path, pin, *, predecessor_pointer=None, old_tree=
              and manifest.get('source_patches', []) == summary['source_patch_ledger'], 'Portable receipt native manifest/source ledger differs')
         need(json_sha(manifest_bank(manifest)) == summary['native_archive_inventory_sha256'][phase], 'Portable native archive inventory digest differs')
     left, right = (manifest_bank(manifests[phase]) for phase in ('before', 'after'))
-    compare_banks(left, right)
-    need(type(summary['unchanged_native_archives']) is int and summary['unchanged_native_archives'] == len(left) - 1
+    if proof['schema_version'] == 2:
+        compare_reviewed_banks(left, right, manifests, summary['bank_transition'])
+        unchanged = len(left) - 11
+    else:
+        compare_banks(left, right)
+        unchanged = len(left) - 1
+    need(type(summary['unchanged_native_archives']) is int and summary['unchanged_native_archives'] == unchanged
          and type(summary['protected_baseline_packages']) is int and 0 < summary['protected_baseline_packages'] <= len(left)
          and summary['before_metadata']['build.config'] == summary['after_metadata']['build.config'], 'Native protected/archive/config facts differ')
     return summary
@@ -757,7 +1268,8 @@ def validate_receipt(old, new, path, pin, *, predecessor_pointer=None, old_tree=
 def validate_payloads(old_tree, new_tree, summary, read, transport, cache, budget):
     """Reuse the existing bounded immutable-asset decoder; no local operator paths."""
     proof = {'predecessor_build_id': summary['predecessor_build_id'], 'successor_build_id': summary['successor_build_id'],
-             'functional_image': {phase: summary['functional_image'] for phase in ('before', 'after')},
+             'functional_image': (summary['functional_image'] if summary.get('prior_image_equal') is False
+                                  else {phase: summary['functional_image'] for phase in ('before', 'after')}),
              'firmware_manifest_sha256': {phase: summary[phase + '_metadata']['firmware-manifest.json']['sha256']
                                         for phase in ('before', 'after')}}
     module('kernel_migration').validate_payloads([('before', old_tree), ('after', new_tree)], proof, read, transport, cache, budget)
@@ -779,7 +1291,8 @@ def main():
          and args.output.parent.is_dir() and not args.output.exists() and not args.output.is_symlink()
          and not any(x.is_symlink() for x in args.output.parents), 'Fresh proof output required')
     _, _, summary = evaluate(read_json(args.inputs))
-    value = {'schema_version': 1, 'kind': KIND, 'summary': summary}
+    new_context = summary.get('prior_image_equal') is False
+    value = {'schema_version': 2 if new_context else 1, 'kind': NEW_KIND if new_context else KIND, 'summary': summary}
     with args.output.open('x') as stream:
         json.dump(value, stream, indent=2, sort_keys=True); stream.write('\n')
     print(json.dumps(full_ref(args.output)))

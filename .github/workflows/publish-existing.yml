@@ -171,8 +171,10 @@ jobs:
                       raise ValueError('non-finite native proof JSON')
                   proof = json.loads(decoded.decode('utf-8'), object_pairs_hook=unique_object, parse_constant=finite_constant)
                   if (not isinstance(proof, dict) or set(proof) != {'schema_version', 'kind', 'summary'}
-                          or type(proof['schema_version']) is not int or proof['schema_version'] != 1
-                          or proof['kind'] != 'rec-native-apk-generation-transition-v1'
+                          or type(proof['schema_version']) is not int
+                          or (proof['schema_version'], proof['kind']) not in (
+                              (1, 'rec-native-apk-generation-transition-v1'),
+                              (2, 'rec-native-apk-generation-transition-v2'))
                           or not isinstance(proof['summary'], dict)):
                       raise ValueError('unexpected portable native proof kind/schema')
               except (ValueError, UnicodeError) as error:

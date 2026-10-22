@@ -152,6 +152,35 @@ class NativeProofTransportTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), raw); self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertIn('sha256=' + hashlib.sha256(raw).hexdigest(), (self.root / 'outputs').read_text())
 
+    def test_exact_v2_pair_preserves_full_bytes_and_all_authorization_guards(self):
+        raw = b'{"schema_version":2,"kind":"rec-native-apk-generation-transition-v2","summary":{"actual":"operator reviewed new context"}}'
+        values = {'NATIVE_REPLACEMENT_PROOF_BASE64': base64.b64encode(raw).decode(),
+                  'NATIVE_REPLACEMENT_PROOF_SHA256': hashlib.sha256(raw).hexdigest()}
+        result, _ = self.run_block(**values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.root / 'native-replacement-proof.json'
+        self.assertEqual(path.read_bytes(), raw); self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        path.unlink(); (self.root / 'outputs').unlink()
+        for changes in ({'ALLOW_NATIVE_APK_REPLACEMENT': 'false'}, {'REPLACE_BUILD_ID': ''}, {'CHANNEL': 'latest'},
+                        {'ALLOW_ASU_APK_MIGRATION': 'true'}, {'BOOTSTRAP': 'true'},
+                        {'NATIVE_REPLACEMENT_PROOF_SHA256': '0' * 64}):
+            with self.subTest(changes=changes):
+                result, _ = self.run_block(**{**values, **changes}); self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(path.exists()); self.assertFalse((self.root / 'outputs').exists())
+
+    def test_crossed_unknown_and_noninteger_native_transport_pairs_are_rejected(self):
+        for schema, kind in ((1, 'rec-native-apk-generation-transition-v2'),
+                             (2, 'rec-native-apk-generation-transition-v1'),
+                             (3, 'rec-native-apk-generation-transition-v2'),
+                             (2, 'unknown'), ('2', 'rec-native-apk-generation-transition-v2'),
+                             (True, 'rec-native-apk-generation-transition-v1')):
+            raw = json.dumps({'schema_version': schema, 'kind': kind, 'summary': {}}).encode()
+            with self.subTest(schema=schema, kind=kind):
+                result, _ = self.run_block(NATIVE_REPLACEMENT_PROOF_BASE64=base64.b64encode(raw).decode(),
+                                           NATIVE_REPLACEMENT_PROOF_SHA256=hashlib.sha256(raw).hexdigest())
+                self.assertNotEqual(result.returncode, 0); self.assertFalse((self.root / 'native-replacement-proof.json').exists())
+                self.assertFalse((self.root / 'outputs').exists())
+
     def test_absent_flag_sha_predecessor_wrong_channel_conflict_bootstrap_or_invalid_json_refuse(self):
         for changes in ({'ALLOW_NATIVE_APK_REPLACEMENT': 'false'}, {'REPLACE_BUILD_ID': ''}, {'CHANNEL': 'latest'},
                         {'ALLOW_ASU_APK_MIGRATION': 'true'}, {'BOOTSTRAP': 'true'}, {'NATIVE_REPLACEMENT_PROOF_SHA256': ''},
