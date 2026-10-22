@@ -187,7 +187,7 @@ def build_commands(lock, source, goroot, upxroot, work, output, jobs, module_cac
     source,goroot,upxroot,work,output=map(Path,(source,goroot,upxroot,work,output))
     env={k:v for k,v in os.environ.items() if not k.startswith(('GO','TS_','CGO_')) and k not in ('UPX','GH_TOKEN','GITHUB_TOKEN','OPKG_SIGNING_KEY','APK_SIGNING_KEY')}
     env.update(CGO_ENABLED='0',GOOS='linux',GOARCH='arm64',GOARM64='v8.0',GOTOOLCHAIN='local',GOENV='off',GOWORK='off',
-               GOMAXPROCS=str(jobs),GOPATH=str(work/'gopath'),GOCACHE=str(work/'cache'),GOMODCACHE=str(Path(module_cache).resolve() if module_cache else work/'mod'),
+               GOMAXPROCS=str(jobs),GOPATH=str(work/'gopath'),GOCACHE=str(work/'cache'),GOTMPDIR=str(work/'tmp'),GOMODCACHE=str(Path(module_cache).resolve() if module_cache else work/'mod'),
                GOPROXY='off' if offline else 'https://proxy.golang.org',GOSUMDB='sum.golang.org',GONOSUMDB='',GOPRIVATE='',GONOPROXY='')
     flags='-s -w -X tailscale.com/version.shortStamp='+lock['version']+' -X tailscale.com/version.longStamp='+lock['version']+'-t'+lock['commit'][:9]+' -X tailscale.com/version.gitCommitStamp='+lock['commit']
     raw=work/'tailscale.multicall.unpacked';upx=str(upxroot/'upx')
@@ -229,6 +229,7 @@ def build(lock, source_archive, go_archive, upx_archive, work, output, jobs, sou
     need((source/'VERSION.txt').read_text().strip()==lock['version'],'Source Tailscale version differs')
     goroot=unpack(go_archive,work/'toolchain');upxroot=unpack(upx_archive,work/'compressor')
     env,commands=build_commands(lock,source,goroot,upxroot,work,output,jobs,module_cache,offline)
+    Path(env['GOTMPDIR']).mkdir()
     version=subprocess.check_output([str(goroot/'bin/go'),'version'],env=env,text=True).strip()
     need(version.split()[:3]==['go','version','go'+lock['go']['version']], 'Actual isolated Go version differs')
     need((goroot/'VERSION').read_text().splitlines()[0]=='go'+lock['go']['version'],'Go archive VERSION differs')

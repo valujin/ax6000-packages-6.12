@@ -85,6 +85,7 @@ class CompactTailscale(unittest.TestCase):
         self.assertEqual(env['GOARCH'], 'arm64'); self.assertEqual(env['GOMAXPROCS'], '4')
         self.assertEqual(env['GOSUMDB'], 'sum.golang.org'); self.assertEqual(env['GOPROXY'], 'https://proxy.golang.org')
         self.assertTrue(env['GOMODCACHE'].startswith('/work/'))
+        self.assertEqual(env['GOTMPDIR'], '/work/tmp')
         self.assertNotIn('ts_omit', ' '.join(go))
         self.assertNotIn('--force', ' '.join(commands['compress']))
         self.assertIn('--no-lzma', commands['compress'])
