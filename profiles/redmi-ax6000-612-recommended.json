@@ -4,10 +4,10 @@
   "asu": {
     "cohort": "612-recommended",
     "enabled": true,
-    "seed": "ff3a83d4df51fbe2d952538fa020f71bbae650bc88fe636ee273f7828e3022ad",
+    "seed": "3254dd70ea96217f41221b29998780639bbf2e7f33deb735c8bd7b380274c4e3",
     "server_url": "https://asu.ezon.by/612/recommended"
   },
-  "build_id": "redmi-ax6000-612-recommended-ae65e1de6997-5a57052ba472",
+  "build_id": "redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1",
   "build_source": {
     "defconfig": "defconfig/mt7986-ax6000.config",
     "device": "xiaomi_redmi-router-ax6000-stock",
@@ -103,9 +103,9 @@
     "luci-i18n-attendedsysupgrade-ru"
   ],
   "imagebuilder": {
-    "sha256": "9ba719b9fe50b53fc1f95a8cdaacd2d1c1aeb0e06b301542d764ed1179993b45",
-    "size": 932025254,
-    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-5a57052ba472/immortalwrt-imagebuilder-mediatek-filogic.Linux-x86_64.tar.zst"
+    "sha256": "952871ae7a71285445fd68c01df13ee68b9be51da1d51ef0e2b9fe549adcb5e2",
+    "size": 262861586,
+    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1/immortalwrt-imagebuilder-mediatek-filogic.Linux-x86_64.tar.zst"
   },
   "luci_languages": [
     "ru"
@@ -163,8 +163,8 @@
   },
   "schema_version": 1,
   "sdk": {
-    "sha256": "5a57052ba4722e7731b57104966034f9c813d94ee84077d667318a8c9afa3019",
-    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-5a57052ba472/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+    "sha256": "50a1bd72eee117acf22d353e11b93930820f3a5c72fbf1cead663043320b163d",
+    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
   },
   "vendor_country_db": true
 }
