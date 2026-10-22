@@ -54,9 +54,13 @@ The uploaded artifact contains the packed binary and measured hashes/sizes,
 UPX integrity/roundtrip proof, build metadata, container limits and QEMU result.
 The unpacked comparison binary and tool/module caches stay in temporary storage.
 
-At preparation time no Go/UPX build or ARM64 execution has occurred. The manual
-workflow must succeed before claiming measured compact-binary size or runtime
-compatibility. This first workflow tests the shared build helper and emulated
+The [hosted verification on 2026-10-22](https://github.com/valujin/ax6000-packages-6.12/actions/runs/39699280195)
+passed on recipe commit `0120e0932682dc45c361520a415615caa28edc92`.
+The single executable measured 41,681,056 bytes before UPX and 12,223,164 bytes
+after UPX (11.66 MiB, a 70.67% reduction). Its packed SHA256 is
+`cbc98a1f7c0c142829bfbb660923fc4afa4ab2afd8588852f59b9ca34149ae8f`.
+UPX integrity and exact decompression checks, ARM64 QEMU commands and private
+CLI-to-daemon IPC all passed. This tests the shared build helper and emulated
 binary; it does **not** verify a completed APK/IPK package, actual SDK host-tool
 compatibility, real router performance or VPN data-plane operation.
 

@@ -1,0 +1,147 @@
+name: Verify compact Tailscale in both real SDKs (no publication)
+
+on:
+  workflow_dispatch:
+    inputs:
+      opkg_ref:
+        description: Reviewed 66 repository full commit including the compact source override
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tailscale-real-sdk-acceptance
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - cohort: 612-apk
+            repository: valujin/ax6000-packages-6.12
+            profile: redmi-ax6000-612-recommended.json
+            profile_sha256: 94dfcdca38c122a2ea0f8cac3a780d6cf6c6f91e12464a99caf0ffd9698ca9a9
+            sdk_sha256: 5a57052ba4722e7731b57104966034f9c813d94ee84077d667318a8c9afa3019
+          - cohort: 66-opkg
+            repository: valujin/ax6000-packages
+            profile: redmi-ax6000.json
+            profile_sha256: 42092ea80f9d1131f19807c0810732fcd0a96773c108c816f1448dafae92b6bf
+            sdk_sha256: 940de134c620a168e5cb71be59cdbaef32e4fb5e9a1946ec6af10445b8067624
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: acceptance
+      - name: Validate explicit OPKG recipe commit
+        env:
+          OPKG_REF: ${{ inputs.opkg_ref }}
+        run: |
+          [[ "$OPKG_REF" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.cohort == '66-opkg' && inputs.opkg_ref || github.sha }}
+          persist-credentials: false
+          path: package-recipe
+      - name: Bind the published firmware profile and normal source lock
+        env:
+          EXPECTED_PROFILE: ${{ matrix.profile_sha256 }}
+          PROFILE: ${{ matrix.profile }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s  %s\n' "$EXPECTED_PROFILE" "package-recipe/profiles/$PROFILE" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/tailscale-sdk"
+          # Normal monitor APIs pin feed commits and paired author PBR sources.
+          # The build helper additionally requires the reviewed compact source lock.
+          python3 package-recipe/scripts/monitor.py --pinned-feeds --profile "package-recipe/profiles/$PROFILE" \
+            --output "$RUNNER_TEMP/tailscale-sdk/lock.json"
+      - name: Prepare disposable SDK tools
+        run: |
+          cat > "$RUNNER_TEMP/Containerfile" <<'EOF'
+          FROM python@sha256:fbecd461fc72d21b2143c6eaba25143738079154a6d0ea3da3aec724f50eed4a
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              build-essential clang cmake flex bison gawk gettext git libncurses-dev libssl-dev \
+              python3-setuptools rsync unzip zlib1g-dev file wget curl zstd xz-utils qemu-user pkg-config \
+              && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -f "$RUNNER_TEMP/Containerfile" -t ax6000-tailscale-sdk "$RUNNER_TEMP"
+      - name: Compile, install and export through the actual SDK Makefile
+        env:
+          PROFILE: ${{ matrix.profile }}
+          EXPECTED_SDK: ${{ matrix.sdk_sha256 }}
+        run: |
+          output="$RUNNER_TEMP/tailscale-sdk"
+          cid=$(docker create --name tailscale-sdk-build --cpu-period 100000 --cpu-quota 400000 --cpuset-cpus 0-3 \
+            --memory 10g --memory-swap 10g --pids-limit 2048 --user "$(id -u):$(id -g)" --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --env HOME=/out/home --env BUILD_JOBS=4 --env PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/acceptance,target=/acceptance,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/package-recipe,target=/recipe,readonly" \
+            --mount "type=bind,source=$output,target=/out" --entrypoint python3 ax6000-tailscale-sdk \
+            /acceptance/scripts/tailscale_sdk.py --recipe /recipe --profile "/recipe/profiles/$PROFILE" \
+            --lock /out/lock.json --work /out/work --output /out/artifact --expected-sdk-sha256 "$EXPECTED_SDK" --jobs 4)
+          docker inspect "$cid" > "$output/build-container.json"
+          python3 - "$output/build-container.json" <<'PY'
+          import json,os,sys
+          x=json.load(open(sys.argv[1]))[0];h=x['HostConfig']
+          assert h['CpuPeriod']==100000 and h['CpuQuota']==400000 and h['CpusetCpus']=='0-3'
+          assert h['Memory']==10*1024**3 and h['MemorySwap']==h['Memory'] and h['PidsLimit']==2048
+          assert x['Config']['User']==f'{os.getuid()}:{os.getgid()}' and h['ReadonlyRootfs']
+          assert h['CapDrop']==['ALL'] and 'no-new-privileges' in h['SecurityOpt'] and not h['Privileged']
+          PY
+          docker start --attach "$cid"
+          docker inspect "$cid" > "$output/build-container.json"
+          python3 - "$output/build-container.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))[0]
+          assert x['State']['Status']=='exited' and x['State']['ExitCode']==0 and not x['State']['OOMKilled']
+          PY
+          cp "$output/build-container.json" "$output/artifact/"
+      - name: Run the actual packaged ARM64 ELF with no network or host TUN
+        run: |
+          output="$RUNNER_TEMP/tailscale-sdk"
+          cid=$(docker create --name tailscale-sdk-runtime --cpu-period 100000 --cpu-quota 100000 --cpuset-cpus 0 \
+            --memory 1g --memory-swap 1g --pids-limit 128 --network none --user "$(id -u):$(id -g)" --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/acceptance,target=/recipe,readonly" \
+            --mount "type=bind,source=$output/artifact,target=/out" --entrypoint python3 ax6000-tailscale-sdk \
+            /recipe/scripts/tailscale_probe.py --binary /out/tailscale.multicall --lock /out/source-lock.json --output /out/qemu-proof.json)
+          docker inspect "$cid" > "$output/artifact/runtime-container.json"
+          python3 - "$output/artifact/runtime-container.json" <<'PY'
+          import json,os,sys
+          x=json.load(open(sys.argv[1]))[0];h=x['HostConfig']
+          assert h['NetworkMode']=='none' and h['CpuQuota']==100000 and h['CpuPeriod']==100000 and h['CpusetCpus']=='0'
+          assert h['Memory']==1024**3 and h['MemorySwap']==h['Memory'] and h['PidsLimit']==128
+          assert x['Config']['User']==f'{os.getuid()}:{os.getgid()}' and h['ReadonlyRootfs']
+          assert h['CapDrop']==['ALL'] and 'no-new-privileges' in h['SecurityOpt'] and not h['Privileged']
+          PY
+          docker start --attach "$cid"
+          docker inspect "$cid" > "$output/artifact/runtime-container.json"
+          python3 - "$output/artifact" <<'PY'
+          import hashlib,json,pathlib,sys
+          p=pathlib.Path(sys.argv[1]);x=json.loads((p/'runtime-container.json').read_text())[0]
+          assert x['State']['Status']=='exited' and x['State']['ExitCode']==0 and not x['State']['OOMKilled']
+          package=json.loads((p/'package-proof.json').read_text());qemu=json.loads((p/'qemu-proof.json').read_text())
+          sha=hashlib.sha256((p/'tailscale.multicall').read_bytes()).hexdigest()
+          assert package['packaged_elf_sha256']==sha and qemu['ok'] and qemu['private_socket_ipc']
+          (p/'acceptance.json').write_text(json.dumps({'ok':True,'package':package['package'],
+              'packaged_elf_sha256':sha,'normal_sdk_package_built':True,'packaged_elf_qemu_tested':True,
+              'signed_or_published':False,'actual_router_tested':False},indent=2,sort_keys=True)+'\n')
+          PY
+          # No SDK, firmware, native bank, Go/module cache or plain ELF is uploaded.
+          (cd "$output/artifact" && sha256sum * > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compact-tailscale-real-package-${{ matrix.cohort }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/tailscale-sdk/artifact
+          if-no-files-found: error
+          retention-days: 7
