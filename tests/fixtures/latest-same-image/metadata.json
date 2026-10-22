@@ -1,0 +1,452 @@
+{
+  "context": {
+    ".config": {
+      "sha256": "355fb252048e9cc3448aa12efdd8e7d3cf0d92143d4f092a3bb3de067126b177",
+      "size": 216472
+    },
+    ".config.set": {
+      "sha256": "454dc126d759d8df5af0ee2abbcbbf181984d691b4840ecd7b525bad4d9f78c7",
+      "size": 288687
+    },
+    ".vermagic": {
+      "sha256": "bfd25ae6e6d2c2a7f4ee66e523cc45af696b6db67f87ed638043ad90fd2bcc7e",
+      "size": 33
+    },
+    "Module.symvers": {
+      "sha256": "a10a247bc0b3cf9738c49631dcfeeb7cb4e6bed04f6eb4ff7cd3a8b05a5fe939",
+      "size": 890860
+    },
+    "include/config/kernel.release": {
+      "sha256": "2749ccde17f026de34696677d00a322e7f3046c29ee8a7550d7d8782a3e61783",
+      "size": 9
+    },
+    "include/generated/autoconf.h": {
+      "sha256": "2f7948708021aa3b5ffd8f2113ba48476b890e73e631cfbf2480610522aeaca1",
+      "size": 96028
+    },
+    "modules.builtin.modinfo": {
+      "sha256": "a3e566ab54c5cc030c7c2cb58e9cbadae7264215626c6636061a58a1cea9f6e9",
+      "size": 30961
+    },
+    "retained/.config": {
+      "sha256": "355fb252048e9cc3448aa12efdd8e7d3cf0d92143d4f092a3bb3de067126b177",
+      "size": 216472
+    },
+    "retained/Image": {
+      "sha256": "a1db81320a822eab661310185948456cef216faa7fac0a11d689ce61233a8681",
+      "size": 14661640
+    },
+    "retained/Module.symvers": {
+      "sha256": "a10a247bc0b3cf9738c49631dcfeeb7cb4e6bed04f6eb4ff7cd3a8b05a5fe939",
+      "size": 890860
+    }
+  },
+  "predecessor_pointer": {
+    "archive_sha256": "5f261e4480d32d4237df0f6318290f0aa6b3ba32c62c802a4c756ee4050920f8",
+    "archive_size": 107107048,
+    "asset_id": 661561069,
+    "build_id": "redmi-ax6000-612-latest-a99b0888b88f-0b1249707848",
+    "channel": "latest",
+    "kernel_version": "6.12.112~d405163bfdb42254c245797a894994c0-r1",
+    "manifest_sha256": "074e68e5f9d0105e2f3f19719271f5a68ff5339ab7dcfe6baac0b7f2b1619ea3",
+    "profile_id": "redmi-ax6000-612-latest",
+    "release_id": 419221190,
+    "tag": "packages-latest-074e68e5f9d0105e2f3f19719271f5a68ff5339ab7dcfe6baac0b7f2b1619ea3"
+  },
+  "profiles": {
+    "after": {
+      "all_kmods": false,
+      "apk_key_sha256": "279ea19b627e16d0807e099de8bd6cf8b69830281defa9bdb9e4ae96f5beb751",
+      "asu": {
+        "cohort": "612-latest",
+        "enabled": true,
+        "seed": "7578632e519ac983062468679ea9f7f52c8a4466ef2685dafafe56961801c4a5",
+        "server_url": "https://asu.ezon.by/612/latest"
+      },
+      "build_id": "redmi-ax6000-612-latest-a99b0888b88f-31599e148e45",
+      "build_source": {
+        "defconfig": "defconfig/mt7986-ax6000.config",
+        "device": "xiaomi_redmi-router-ax6000-stock",
+        "publication_url": "https://valujin.github.io/ax6000-packages-6.12/channels/latest"
+      },
+      "channel": "latest",
+      "enabled": true,
+      "feeds": [
+        {
+          "commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
+          "name": "base",
+          "root": "package",
+          "url": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git"
+        },
+        {
+          "commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "packages",
+          "url": "https://github.com/immortalwrt/packages.git"
+        },
+        {
+          "commit": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "luci",
+          "url": "https://github.com/immortalwrt/luci.git"
+        },
+        {
+          "commit": "23912fb99fc2fd0888466eb5f4f550651bc12aa3",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "routing",
+          "url": "https://github.com/openwrt/routing.git"
+        },
+        {
+          "commit": "2618106d5846a4a542fdf5809f0d3ed228ce439b",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "telephony",
+          "url": "https://github.com/openwrt/telephony.git"
+        },
+        {
+          "commit": "094bf58da6682f895255a35a84349a79dab4bf95",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "video",
+          "url": "https://github.com/openwrt/video.git"
+        },
+        {
+          "commit": "3f3ec68d594c8e965c988af75ac5314616229c88",
+          "monitor_ref": "refs/heads/master",
+          "name": "amneziawg",
+          "url": "https://github.com/2Grey/awg-openwrt.git"
+        }
+      ],
+      "firmware": {
+        "architecture": "aarch64_cortex-a53",
+        "commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
+        "device": "xiaomi_redmi-router-ax6000-stock",
+        "devices": [
+          {
+            "device": "xiaomi_redmi-router-ax6000-stock",
+            "layout": "stock"
+          },
+          {
+            "device": "xiaomi_redmi-router-ax6000-mtkuboot",
+            "layout": "mtkuboot"
+          },
+          {
+            "device": "xiaomi_redmi-router-ax6000-ubootmod",
+            "layout": "ubootmod"
+          }
+        ],
+        "kernel_version": "6.12.112~d405163bfdb42254c245797a894994c0-r1",
+        "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git",
+        "subtarget": "filogic",
+        "target": "mediatek"
+      },
+      "id": "redmi-ax6000-612-latest",
+      "image_packages": [
+        "kmod-amneziawg",
+        "amneziawg-tools",
+        "luci-proto-amneziawg",
+        "wireguard-tools",
+        "luci-proto-wireguard",
+        "pbr",
+        "luci-app-pbr",
+        "luci",
+        "luci-ssl",
+        "luci-i18n-base-ru",
+        "luci-i18n-pbr-ru",
+        "luci-app-package-manager",
+        "luci-i18n-package-manager-ru",
+        "luci-i18n-amneziawg-ru",
+        "attendedsysupgrade-common",
+        "luci-app-attendedsysupgrade",
+        "luci-i18n-attendedsysupgrade-ru"
+      ],
+      "imagebuilder": {
+        "sha256": "aac3e05c2d1465cf509d6c67db1eebacb87578bca4abd028455073c6a1e884c5",
+        "size": 256748778,
+        "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-latest-a99b0888b88f-31599e148e45/immortalwrt-imagebuilder-mediatek-filogic.Linux-x86_64.tar.zst"
+      },
+      "luci_languages": [
+        "ru"
+      ],
+      "package_manager": "apk",
+      "package_only": [
+        "tailscale"
+      ],
+      "packages": [
+        "tailscale",
+        "kmod-amneziawg",
+        "amneziawg-tools",
+        "luci-proto-amneziawg",
+        "kmod-wireguard",
+        "wireguard-tools",
+        "luci-proto-wireguard",
+        "pbr",
+        "luci-app-pbr",
+        "mwan3",
+        "luci-app-mwan3",
+        "banip",
+        "luci-app-banip",
+        "openvpn-openssl",
+        "luci-app-openvpn",
+        "xl2tpd",
+        "ppp-mod-pptp",
+        "kmod-tun",
+        "ip-full",
+        "resolveip",
+        "luci",
+        "luci-ssl",
+        "luci-i18n-base-ru",
+        "luci-i18n-pbr-ru",
+        "luci-i18n-mwan3-ru",
+        "strongswan",
+        "strongswan-default",
+        "strongswan-swanctl",
+        "luci-app-package-manager",
+        "luci-i18n-package-manager-ru",
+        "luci-i18n-banip-ru",
+        "luci-i18n-openvpn-ru",
+        "luci-i18n-amneziawg-ru",
+        "geoip-shell",
+        "geoview",
+        "geoipupdate",
+        "attendedsysupgrade-common",
+        "luci-app-attendedsysupgrade",
+        "luci-i18n-attendedsysupgrade-ru"
+      ],
+      "pbr_source": "mossdef-stable",
+      "publication": {
+        "firmware_assets": "github-release",
+        "repository": "valujin/ax6000-packages-6.12",
+        "site_url": "https://valujin.github.io/ax6000-packages-6.12"
+      },
+      "schema_version": 1,
+      "sdk": {
+        "sha256": "31599e148e45f95ec1d6bdfb36308c48e4ec12e3d489be302ef9c372acd2b6eb",
+        "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-latest-a99b0888b88f-31599e148e45/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+      },
+      "vendor_country_db": true
+    },
+    "before": {
+      "all_kmods": false,
+      "build_id": "redmi-ax6000-612-latest-a99b0888b88f-0b1249707848",
+      "build_source": {
+        "defconfig": "defconfig/mt7986-ax6000.config",
+        "device": "xiaomi_redmi-router-ax6000-stock",
+        "publication_url": "https://valujin.github.io/ax6000-packages-6.12/channels/latest"
+      },
+      "channel": "latest",
+      "enabled": true,
+      "feeds": [
+        {
+          "commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
+          "name": "base",
+          "root": "package",
+          "url": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git"
+        },
+        {
+          "commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "packages",
+          "url": "https://github.com/immortalwrt/packages.git"
+        },
+        {
+          "commit": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "luci",
+          "url": "https://github.com/immortalwrt/luci.git"
+        },
+        {
+          "commit": "23912fb99fc2fd0888466eb5f4f550651bc12aa3",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "routing",
+          "url": "https://github.com/openwrt/routing.git"
+        },
+        {
+          "commit": "2618106d5846a4a542fdf5809f0d3ed228ce439b",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "telephony",
+          "url": "https://github.com/openwrt/telephony.git"
+        },
+        {
+          "commit": "094bf58da6682f895255a35a84349a79dab4bf95",
+          "monitor_ref": "refs/heads/openwrt-25.12",
+          "name": "video",
+          "url": "https://github.com/openwrt/video.git"
+        },
+        {
+          "commit": "3f3ec68d594c8e965c988af75ac5314616229c88",
+          "monitor_ref": "refs/heads/master",
+          "name": "amneziawg",
+          "url": "https://github.com/2Grey/awg-openwrt.git"
+        }
+      ],
+      "firmware": {
+        "architecture": "aarch64_cortex-a53",
+        "commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
+        "device": "xiaomi_redmi-router-ax6000-stock",
+        "devices": [
+          {
+            "device": "xiaomi_redmi-router-ax6000-stock",
+            "layout": "stock"
+          },
+          {
+            "device": "xiaomi_redmi-router-ax6000-mtkuboot",
+            "layout": "mtkuboot"
+          },
+          {
+            "device": "xiaomi_redmi-router-ax6000-ubootmod",
+            "layout": "ubootmod"
+          }
+        ],
+        "kernel_version": "6.12.112~d405163bfdb42254c245797a894994c0-r1",
+        "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git",
+        "subtarget": "filogic",
+        "target": "mediatek"
+      },
+      "id": "redmi-ax6000-612-latest",
+      "image_packages": [
+        "kmod-amneziawg",
+        "amneziawg-tools",
+        "luci-proto-amneziawg",
+        "wireguard-tools",
+        "luci-proto-wireguard",
+        "pbr",
+        "luci-app-pbr",
+        "luci",
+        "luci-ssl",
+        "luci-i18n-base-ru",
+        "luci-i18n-pbr-ru",
+        "luci-app-package-manager",
+        "luci-i18n-package-manager-ru",
+        "luci-i18n-amneziawg-ru"
+      ],
+      "luci_languages": [
+        "ru"
+      ],
+      "package_only": [
+        "tailscale"
+      ],
+      "packages": [
+        "tailscale",
+        "kmod-amneziawg",
+        "amneziawg-tools",
+        "luci-proto-amneziawg",
+        "kmod-wireguard",
+        "wireguard-tools",
+        "luci-proto-wireguard",
+        "pbr",
+        "luci-app-pbr",
+        "mwan3",
+        "luci-app-mwan3",
+        "banip",
+        "luci-app-banip",
+        "openvpn-openssl",
+        "luci-app-openvpn",
+        "xl2tpd",
+        "ppp-mod-pptp",
+        "kmod-tun",
+        "ip-full",
+        "resolveip",
+        "luci",
+        "luci-ssl",
+        "luci-i18n-base-ru",
+        "luci-i18n-pbr-ru",
+        "luci-i18n-mwan3-ru",
+        "strongswan",
+        "strongswan-default",
+        "strongswan-swanctl",
+        "luci-app-package-manager",
+        "luci-i18n-package-manager-ru",
+        "luci-i18n-banip-ru",
+        "luci-i18n-openvpn-ru",
+        "luci-i18n-amneziawg-ru",
+        "geoip-shell",
+        "geoview",
+        "geoipupdate"
+      ],
+      "publication": {
+        "firmware_assets": "github-release",
+        "repository": "valujin/ax6000-packages-6.12",
+        "site_url": "https://valujin.github.io/ax6000-packages-6.12"
+      },
+      "schema_version": 1,
+      "sdk": {
+        "sha256": "0b124970784803d24235d999ba77862919f651496283f4b865264bbebd575fbd",
+        "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-latest-a99b0888b88f-0b1249707848/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+      }
+    }
+  },
+  "release": {
+    "assets": [
+      {
+        "browser_download_url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-latest-a99b0888b88f-0b1249707848/firmware-manifest.json",
+        "digest": "sha256:459a7e06661b22e3b21a66ecb2e67d4416c3e0b1aef8c279305c97e0a1f49567",
+        "id": 661318733,
+        "name": "firmware-manifest.json",
+        "size": 327805,
+        "state": "uploaded",
+        "updated_at": "2026-10-21T04:13:44Z",
+        "url": "https://api.github.com/repos/valujin/ax6000-packages-6.12/releases/assets/661318733"
+      }
+    ],
+    "draft": false,
+    "id": 419152056,
+    "immutable": true,
+    "tag_name": "firmware-redmi-ax6000-612-latest-a99b0888b88f-0b1249707848",
+    "target_commitish": "6359d43b321f6049824a880a82081f93add13b98"
+  },
+  "scope": "Public policy metadata fixtures; tests never grant native acceptance or publish.",
+  "source_patches": [
+    {
+      "after_sha256": "2595267671b70a18922dbefd8bbcd27956761a924c422c9ea8c4eccf80eb1683",
+      "before_sha256": "3b3f133dc439cc15bb29ecff87bf4ccce6e7b7893f5c3f66e629b0c57c5a7679",
+      "patch": "100-initramfs-xz-single-thread.patch",
+      "path": "include/kernel-defaults.mk",
+      "sha256": "08d9282458473babea6408a254395789a13eb700853cb680c11eb2c9758a44ad"
+    },
+    {
+      "after_sha256": "c62fee2efd4d2e3a2303619d7bf9bfde7fab22edd0241ea76fa71e367420bb60",
+      "before_sha256": "359009a4191a85eb725fe96fd161a5e5a4ea6f2eff0e387d69a40bea2837d35b",
+      "feed_commit": "52ddbd11d66106615543af7352bf84ae20e5f1f8",
+      "feed_name": "packages",
+      "patch": "110-openvswitch-linux-6.12-intree-availability.patch",
+      "path": "feeds/packages/net/openvswitch/Makefile",
+      "sha256": "0974ce219cce261174a5a630e100f611efef19e7f36cc99608773d9b78bd8fc9"
+    },
+    {
+      "after_sha256": "29a3f5cd67b0fef4689e07c50b6e284bb4f54ae610712ba6d450c2321fbb896a",
+      "before_sha256": "b7e25ca6e9173c0051213b33bebc8292149adb8c2d69cdd798395aa449ec2783",
+      "patch": "120-pressure-sensor-stable-config-defaults.patch",
+      "path": "target/linux/generic/config-6.12",
+      "sha256": "6c572f41f7036b5f9b44a779dbe5e2af3fe8b9359bd36fcfd9c3da5b7dcda8ca"
+    },
+    {
+      "after_sha256": "c4edbd8a2b08d60748f1c12dccdcd5dfda8854d32d6a4e36b2c05fd50d3194a2",
+      "before_sha256": null,
+      "operation": "add",
+      "patch": "130-mtk-ethernet-ptp-dependency.patch",
+      "path": "target/linux/mediatek/patches-6.12/999-zzz-5400-net-mediatek-select-reachable-ptp-clock.patch",
+      "sha256": "7b07552afa9a8c8d08aae00830a4d95c3f24d0d30bde79fea2f9438cddf4a34b"
+    },
+    {
+      "after_sha256": "8039846f555f0a3c142b568a271ef8cdbebe1c83ec357e62aee6f2f4d7a4f08e",
+      "before_sha256": "bbaf34425009736eb81ea371e38284ed048ded112d912bfc1327f3ad6e012af6",
+      "patch": "140-aeonsemi-as21xxx-module-name.patch",
+      "path": "package/kernel/linux/modules/netdevices.mk",
+      "sha256": "d49d4d5074111ba326b31b7565a88917e8f782064d2c326a8c9b75f576ffab07"
+    },
+    {
+      "after_sha256": "1ed634ab4875877dfd7f0bfc0c7ff83a0c92b3370b42dc27df4d7d31620c46c3",
+      "before_sha256": null,
+      "operation": "add",
+      "patch": "150-rtl8812au-ct-self-append.patch",
+      "path": "package/kernel/rtl8812au-ct/patches/120-fix-mp-ioctl-sprintf-self-append.patch",
+      "sha256": "f3d68ad979b56f21f3f5db557e4d621e22ce7edf1776a895c175986164f7c291"
+    },
+    {
+      "after_sha256": "a36898879349e589d5b0454f8f428221fda64ad573123a6048213035f3c3ee08",
+      "before_sha256": "76d38742bbc16cbf6489b4735a09c1ecd22a74b48df978c2fe37789f94f902ed",
+      "patch": "160-stock-initramfs-factory-partition-limit.patch",
+      "path": "target/linux/mediatek/image/filogic.mk",
+      "sha256": "b884ad613d9a6072aa40d1338e206c988f29c861579e307a98c57ca1a0b6bd3e"
+    }
+  ]
+}

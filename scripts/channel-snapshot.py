@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import types
 import tarfile
 import tempfile
 
@@ -198,6 +199,9 @@ def validate_migration_proof(old,new,proof):
     if not isinstance(proof,dict):
         raise ValueError('ASU/APK migration requires an explicit native migration proof')
     version=proof.get('schema_version')
+    if type(version) is int and version==3:
+        module('latest_kernel_migration').validate_receipt(old,new,proof)
+        return
     expected={'schema_version':2 if version==2 else 1,'kind':'asu-apk-native-migration',
               'predecessor_build_id':old['build_id'],'successor_build_id':new['build_id'],
               'source_commit':old['firmware']['commit'],'kernel_version':old['firmware']['kernel_version']}
@@ -275,7 +279,13 @@ def legacy_migration_metadata(tree,proof,workspace):
     return resolved
 
 
-def validate_migration_manifests(old_tree,new_tree,proof):
+def validate_migration_manifests(old_tree,new_tree,proof,*,predecessor_pointer=None):
+    if proof.get('schema_version')==3:
+        backend=types.SimpleNamespace(read_json=read_json,legacy_migration_metadata=legacy_migration_metadata,
+            module=module,_MIGRATION_IMAGE_CACHE=_MIGRATION_IMAGE_CACHE,
+            _MIGRATION_DOWNLOAD_BUDGET=_MIGRATION_DOWNLOAD_BUDGET)
+        return module('latest_kernel_migration').validate_manifests(
+            backend,old_tree,new_tree,proof,predecessor_pointer)
     with tempfile.TemporaryDirectory(prefix='ax6000-migration-metadata-') as workspace:
         trees=[]
         for phase,tree,build_id in [('before',old_tree,proof['predecessor_build_id']),
@@ -636,7 +646,7 @@ def compose_site(live_state,live_signature,channels,repository,key,public_key,us
                     predecessor_pointer=old_pointer,old_tree=Path(old_tree)/'channel',new_tree=restored/'channel')
                 native.validate_payloads(Path(old_tree)/'channel',restored/'channel',reviewed,read_json,module('publication_api'),_MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
             if allow_asu_apk_migration:
-                validate_migration_manifests(Path(old_tree)/'channel',restored/'channel',migration_proof)
+                validate_migration_manifests(Path(old_tree)/'channel',restored/'channel',migration_proof,predecessor_pointer=old_pointer)
         elif old is not None and any(old.get(k)!=pointer.get(k) for k in ('profile_id','build_id','kernel_version')):
             raise ValueError('Daily publication cannot switch firmware generation')
         total+=sum(item['size'] for item in files)
@@ -1019,7 +1029,7 @@ def publish_channel(raw,catalog,signature,metadata,site_url,repository,profiles,
                 predecessor_pointer=old[1],old_tree=Path(old[0])/'channel',new_tree=raw)
             native.validate_payloads(Path(old[0])/'channel',raw,reviewed,read_json,module('publication_api'),_MIGRATION_IMAGE_CACHE,_MIGRATION_DOWNLOAD_BUDGET)
         if allow_asu_apk_migration:
-            validate_migration_manifests(Path(old[0])/'channel',raw,migration_proof)
+            validate_migration_manifests(Path(old[0])/'channel',raw,migration_proof,predecessor_pointer=old[1])
         replacements[channel]=(old,replace_build_id)
     elif old and cohort(read_json(old[0]/'channel/profile.json'))!=cohort(profile):
         raise ValueError('Manual generation migration requires --replace-build-id')
