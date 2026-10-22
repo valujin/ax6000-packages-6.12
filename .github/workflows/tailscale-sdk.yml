@@ -1,12 +1,7 @@
-name: Verify compact Tailscale in both real SDKs (no publication)
+name: Verify compact Tailscale in the recommended APK SDK (no publication)
 
 on:
   workflow_dispatch:
-    inputs:
-      opkg_ref:
-        description: Reviewed 66 repository full commit including the compact source override
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -20,44 +15,37 @@ jobs:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - cohort: 612-apk
-            repository: valujin/ax6000-packages-6.12
-            profile: redmi-ax6000-612-recommended.json
-            profile_sha256: 94dfcdca38c122a2ea0f8cac3a780d6cf6c6f91e12464a99caf0ffd9698ca9a9
-            sdk_sha256: 5a57052ba4722e7731b57104966034f9c813d94ee84077d667318a8c9afa3019
-          - cohort: 66-opkg
-            repository: valujin/ax6000-packages
-            profile: redmi-ax6000.json
-            profile_sha256: 42092ea80f9d1131f19807c0810732fcd0a96773c108c816f1448dafae92b6bf
-            sdk_sha256: 940de134c620a168e5cb71be59cdbaef32e4fb5e9a1946ec6af10445b8067624
+    env:
+      PROFILE: redmi-ax6000-612-recommended.json
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           path: acceptance
-      - name: Validate explicit OPKG recipe commit
-        env:
-          OPKG_REF: ${{ inputs.opkg_ref }}
-        run: |
-          [[ "$OPKG_REF" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.repository }}
-          ref: ${{ matrix.cohort == '66-opkg' && inputs.opkg_ref || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           path: package-recipe
       - name: Bind the published firmware profile and normal source lock
         env:
-          EXPECTED_PROFILE: ${{ matrix.profile_sha256 }}
-          PROFILE: ${{ matrix.profile }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '%s  %s\n' "$EXPECTED_PROFILE" "package-recipe/profiles/$PROFILE" | sha256sum -c -
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          path = Path('package-recipe/profiles') / os.environ['PROFILE']
+          profile = json.loads(path.read_text())
+          if (profile.get('id') != 'redmi-ax6000-612-recommended'
+                  or profile.get('channel') != 'recommended'
+                  or profile.get('package_manager') != 'apk' or profile.get('enabled') is not True
+                  or profile.get('exclude_asu') is not True or 'asu' in profile
+                  or not re.fullmatch('[a-f0-9]{64}', profile.get('sdk', {}).get('sha256') or '')):
+              raise SystemExit('Activate the genuine recommended no-ASU APK generation before SDK acceptance')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('EXPECTED_SDK=' + profile['sdk']['sha256'] + '\n')
+              output.write('EXPECTED_PROFILE=' + hashlib.sha256(path.read_bytes()).hexdigest() + '\n')
+          PY
           mkdir -p "$RUNNER_TEMP/tailscale-sdk"
           # Normal monitor APIs pin feed commits and paired author PBR sources.
           # The build helper additionally requires the reviewed compact source lock.
@@ -74,9 +62,6 @@ jobs:
           EOF
           docker build -f "$RUNNER_TEMP/Containerfile" -t ax6000-tailscale-sdk "$RUNNER_TEMP"
       - name: Compile, install and export through the actual SDK Makefile
-        env:
-          PROFILE: ${{ matrix.profile }}
-          EXPECTED_SDK: ${{ matrix.sdk_sha256 }}
         run: |
           output="$RUNNER_TEMP/tailscale-sdk"
           cid=$(docker create --name tailscale-sdk-build --cpu-period 100000 --cpu-quota 400000 --cpuset-cpus 0-3 \
@@ -141,7 +126,7 @@ jobs:
           (cd "$output/artifact" && sha256sum * > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
-          name: compact-tailscale-real-package-${{ matrix.cohort }}-${{ github.run_id }}
+          name: compact-tailscale-real-package-612-apk-${{ github.run_id }}
           path: ${{ runner.temp }}/tailscale-sdk/artifact
           if-no-files-found: error
           retention-days: 7

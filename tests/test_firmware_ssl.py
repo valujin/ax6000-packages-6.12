@@ -304,6 +304,7 @@ all:
         scripts = self.source / "scripts"
         scripts.mkdir()
         shutil.copy2(ROOT / "scripts/build-firmware.sh", scripts / "build-firmware.sh")
+        shutil.copyfile(ROOT / 'scripts/no_asu.py', scripts / 'no_asu.py')
         (scripts / "prepare-firmware.py").write_text('''import argparse, importlib.util, json, os, pathlib, subprocess, sys
 p = argparse.ArgumentParser()
 for name in ("profile", "lock", "source-dir", "output-dir", "cleanup-receipt", "phase"):

@@ -55,6 +55,7 @@ class ReleaseImportTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.profile = json.loads((ROOT / 'profiles/redmi-ax6000-new.json').read_text())
+        self.profile['enabled'] = True  # Historical importer fixture, not an enabled source build.
         self.expected = self.root / 'expected.json'
         self.expected.write_text(json.dumps(self.profile))
         self.profile['firmware']['kernel_version'] = '6.6.133~' + 'a' * 32 + '-r1'

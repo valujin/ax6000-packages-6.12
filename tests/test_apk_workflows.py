@@ -128,15 +128,15 @@ class APKWorkflowTests(unittest.TestCase):
                     result = subprocess.run(['bash', '-n'], input=block, text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_legacy_daily_publication_does_not_require_apk_secret_or_options(self):
-        result = self.run_step('packages.yml', 'Refresh serial channel snapshots and compose the complete site', NEEDS_APK='false')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        record = self.record()
-        self.assertNotIn('--apk', record['args'])
-        self.assertEqual(list(record['keys']), ['--key'])
+    def test_retired_opkg_or_inactive_daily_publication_is_refused_before_key_files(self):
+        for values in ({'NEEDS_APK':'false','NEEDS_APK_SIGNING':'false'}, {'NEEDS_APK':'true','NEEDS_APK_SIGNING':'false'}):
+            with self.subTest(values=values):
+                result = self.run_step('packages.yml', 'Refresh recommended packages and compose the complete site', **values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / 'record.json').exists())
 
     def test_apk_daily_publication_passes_separate_signing_key_and_independent_tool(self):
-        result = self.run_step('packages.yml', 'Refresh serial channel snapshots and compose the complete site',
+        result = self.run_step('packages.yml', 'Refresh recommended packages and compose the complete site',
                                NEEDS_APK='true', NEEDS_APK_SIGNING='true', APK_SIGNING_KEY='fixture APK PEM')
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record()
@@ -145,100 +145,28 @@ class APKWorkflowTests(unittest.TestCase):
         self.assertEqual(record['keys']['--apk-key'], 'fixture APK PEM\n')
         self.assertNotEqual(record['keys']['--key'], record['keys']['--apk-key'])
 
-    def test_daily_opkg_publication_restores_disabled_apk_channel_without_apk_signing_key(self):
-        result = self.run_step('packages.yml', 'Refresh serial channel snapshots and compose the complete site',
-                               NEEDS_APK='true', NEEDS_APK_SIGNING='false')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        record = self.record()
-        self.assertIn('--apk', record['args'])
-        self.assertNotIn('--apk-key', record['args'])
-
-    def test_manual_legacy_opkg_publication_has_no_apk_requirement(self):
-        result = self.run_step('publish-existing.yml', 'Publish a signed durable snapshot and compose both channels',
-                               NEEDS_APK='false', INCOMING_MANAGER='opkg')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn('--apk', self.record()['args'])
-
-    def test_manual_opkg_publication_retains_apk_channel_without_requiring_apk_private_key(self):
-        result = self.run_step('publish-existing.yml', 'Publish a signed durable snapshot and compose both channels',
+    def test_manual_opkg_publication_is_refused_before_signing(self):
+        result = self.run_step('publish-existing.yml', 'Publish a signed durable recommended snapshot',
                                NEEDS_APK='true', INCOMING_MANAGER='opkg')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        record = self.record()
-        self.assertIn('--apk', record['args'])
-        self.assertNotIn('--apk-key', record['args'])
-        self.assertNotIn('--apk-public-key', record['args'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'record.json').exists())
 
-    def test_manual_apk_migration_passes_explicit_authorization_and_own_key(self):
-        proof = self.root / 'reviewed.json'
-        proof.write_text('{"schema_version": 1}')
-        result = self.run_step('publish-existing.yml', 'Publish a signed durable snapshot and compose both channels',
+    def test_manual_recommended_apk_uses_normal_exact_replacement_without_ASU_flags(self):
+        result = self.run_step('publish-existing.yml', 'Publish a signed durable recommended snapshot',
                                NEEDS_APK='true', INCOMING_MANAGER='apk', APK_SIGNING_KEY='fixture APK PEM',
-                               ALLOW_ASU_APK_MIGRATION='true', REPLACE_BUILD_ID='exact-authenticated-old-build', MIGRATION_PROOF=str(proof))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        record = self.record()
-        self.assertIn('--allow-asu-apk-migration', record['args'])
-        self.assertIn('--replace-build-id', record['args'])
-        self.assertEqual(record['args'][record['args'].index('--migration-proof') + 1], str(proof))
-        self.assertEqual(record['keys']['--apk-key'], 'fixture APK PEM\n')
-
-    def migration_receipt_step(self, *, allowed='true', predecessor='old-build', encoded=''):
-        block = shell_blocks('publish-existing.yml')['Prepare the operator-reviewed native migration receipt']
-        code = block.split("<<'PYCODE'\n", 1)[1].rsplit('\nPYCODE', 1)[0]
-        return subprocess.run([sys.executable, '-'], input=code, cwd=self.root,
-            env=dict(os.environ, RUNNER_TEMP=str(self.root), GITHUB_OUTPUT=str(self.root / 'outputs'),
-                     ALLOW_ASU_APK_MIGRATION=allowed, REPLACE_BUILD_ID=predecessor, MIGRATION_PROOF_BASE64=encoded),
-            text=True, capture_output=True)
-
-    def test_manual_native_apk_replacement_passes_its_own_proof_sha_without_opkg_flag(self):
-        import hashlib
-        proof = self.root / 'native-reviewed.json'; proof.write_text('{"fixture":"reviewed operator data"}')
-        digest = hashlib.sha256(proof.read_bytes()).hexdigest()
-        result = self.run_step('publish-existing.yml', 'Publish a signed durable snapshot and compose both channels',
-                               NEEDS_APK='true', INCOMING_MANAGER='apk', APK_SIGNING_KEY='fixture APK PEM',
-                               ALLOW_NATIVE_APK_REPLACEMENT='true', REPLACE_BUILD_ID='exact-authenticated-old-build',
-                               NATIVE_REPLACEMENT_PROOF=str(proof), NATIVE_REPLACEMENT_PROOF_SHA256=digest)
+                               REPLACE_BUILD_ID='exact-authenticated-old-build')
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record(); args = record['args']
-        self.assertIn('--allow-native-apk-replacement', args)
-        self.assertEqual(args[args.index('--native-replacement-proof') + 1], str(proof))
-        self.assertEqual(args[args.index('--native-replacement-proof-sha256') + 1], digest)
+        self.assertEqual(args[args.index('--replace-build-id') + 1], 'exact-authenticated-old-build')
+        self.assertNotIn('--allow-native-apk-replacement', args)
         self.assertNotIn('--allow-asu-apk-migration', args)
         self.assertNotIn('--migration-proof', args)
+        self.assertEqual(record['keys']['--apk-key'], 'fixture APK PEM\n')
 
-    def test_legacy_publication_does_not_require_a_migration_receipt(self):
-        result = self.migration_receipt_step(allowed='false')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.root / 'migration-proof.json').exists())
-
-    def test_operator_receipt_is_strictly_decoded_to_private_file(self):
-        raw = b'{"schema_version":1,"nested":{"field":"value"}}'
-        result = self.migration_receipt_step(encoded=base64.b64encode(raw).decode())
-        self.assertEqual(result.returncode, 0, result.stderr)
-        proof = self.root / 'migration-proof.json'
-        self.assertEqual(proof.read_bytes(), raw)
-        self.assertEqual(proof.stat().st_mode & 0o777, 0o600)
-        self.assertEqual((self.root / 'outputs').read_text(), 'path=' + str(proof) + '\n')
-
-    def test_operator_receipt_missing_flag_predecessor_duplicate_json_and_bad_base64_fail(self):
-        valid = base64.b64encode(b'{"schema_version":1}').decode()
-        for args in ({'allowed': 'false', 'encoded': valid}, {'encoded': ''},
-                     {'predecessor': '', 'encoded': valid}, {'encoded': '!not-base64'},
-                     {'encoded': base64.b64encode(b'{"a":1,"a":2}').decode()},
-                     {'encoded': base64.b64encode(b'{"nested":{"a":1,"a":2}}').decode()},
-                     {'encoded': base64.b64encode(b'[]').decode()},
-                     {'encoded': base64.b64encode(b'{"a":NaN}').decode()},
-                     {'encoded': base64.b64encode(b'x' * 65537).decode()}):
-            with self.subTest(args=list(args)):
-                result = self.migration_receipt_step(**args)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse((self.root / 'migration-proof.json').exists())
-                self.assertFalse((self.root / 'outputs').exists())
-
-    def test_missing_apk_key_fails_only_for_actual_apk_publication(self):
+    def test_missing_apk_key_fails_for_recommended_publication(self):
         for workflow, name, environment in (
-            ('packages.yml', 'Refresh serial channel snapshots and compose the complete site', {'NEEDS_APK': 'true', 'NEEDS_APK_SIGNING': 'true'}),
-            ('publish-existing.yml', 'Publish a signed durable snapshot and compose both channels',
-             {'NEEDS_APK': 'true', 'INCOMING_MANAGER': 'apk'})):
+            ('packages.yml', 'Refresh recommended packages and compose the complete site', {'NEEDS_APK': 'true', 'NEEDS_APK_SIGNING': 'true'}),
+            ('publish-existing.yml', 'Publish a signed durable recommended snapshot', {'NEEDS_APK': 'true', 'INCOMING_MANAGER': 'apk'})):
             with self.subTest(workflow=workflow):
                 result = self.run_step(workflow, name, **environment)
                 self.assertNotEqual(result.returncode, 0)

@@ -97,6 +97,7 @@ class NativeBuildGraphTest(unittest.TestCase):
         runner = root / 'runner'
         runner.mkdir()
         shutil.copyfile(ROOT / 'scripts/build-firmware.sh', runner / 'build-firmware.sh')
+        shutil.copyfile(ROOT / 'scripts/no_asu.py', runner / 'no_asu.py')
         (runner / 'prepare-firmware.py').write_text(PREPARE)
         env = {**os.environ, 'AX6000_LIMITED_FIRMWARE_BUILD': '1', 'BUILD_JOBS': '1',
                'AX6000_BUILD_LOCK': str(root / 'fixture.lock'), 'IB_ARTIFACT_KIND': kind}

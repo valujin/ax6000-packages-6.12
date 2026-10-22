@@ -77,13 +77,8 @@ class LatestActivation(unittest.TestCase):
    self.a.require_live_unchanged(snapshot,state,self.a.SITE,None,None,Path(temp))
    snapshot.fetch_live=lambda *a:state|{'changed':True}
    with self.assertRaises(ValueError):self.a.require_live_unchanged(snapshot,state,self.a.SITE,None,None,Path(temp))
- def test_workflow_checks_inputs_before_secret_and_keeps_atomic_deployment_gates(self):
-  workflow=(ROOT/'.github/workflows/activate-latest-migration.yml').read_text()
-  self.assertLess(workflow.index('--check-inputs'),workflow.index('OPKG_SIGNING_KEY:'))
-  self.assertLess(workflow.index('--check-inputs'),workflow.index('Install bounded'))
-  self.assertIn('group: package-publication',workflow);self.assertIn('cancel-in-progress: false',workflow)
-  self.assertIn('--phase before',workflow);self.assertIn('--phase after',workflow)
-  self.assertNotIn('activate-native-generation.py',workflow)
+ def test_retired_latest_ASU_workflow_is_absent(self):
+  self.assertFalse((ROOT/'.github/workflows/activate-latest-migration.yml').exists())
  def test_clean_cli_checks_exact_real_proof_bytes_and_refuses_pending_smokes_without_secrets(self):
   import subprocess
   raw=(json.dumps(self.fixture().proof(),sort_keys=True,indent=2)+'\n').encode()

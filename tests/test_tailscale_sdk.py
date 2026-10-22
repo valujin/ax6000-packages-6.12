@@ -184,9 +184,20 @@ class PackageAcceptance(unittest.TestCase):
 
     def test_hosted_workflow_uses_current_runner_uid_and_no_secrets_or_publication(self):
         workflow = (ROOT / '.github/workflows/tailscale-sdk.yml').read_text()
-        self.assertIn('workflow_dispatch:', workflow); self.assertIn('max-parallel: 1', workflow)
+        self.assertIn('workflow_dispatch:', workflow)
+        self.assertNotIn('matrix:', workflow); self.assertNotIn('opkg_ref', workflow)
+        self.assertNotIn('66-opkg', workflow)
+        self.assertIn('PROFILE: redmi-ax6000-612-recommended.json', workflow)
+        self.assertIn("profile.get('channel') != 'recommended'", workflow)
+        self.assertIn("profile.get('package_manager') != 'apk'", workflow)
+        self.assertIn("profile.get('exclude_asu') is not True or 'asu' in profile", workflow)
+        self.assertIn("profile['sdk']['sha256']", workflow)
         self.assertIn('--user "$(id -u):$(id -g)"', workflow)
         self.assertIn('--network none', workflow); self.assertIn('--memory 10g --memory-swap 10g', workflow)
+        self.assertIn('--cpu-quota 400000 --cpuset-cpus 0-3', workflow)
+        self.assertIn('--pids-limit 2048', workflow)
+        self.assertIn('--cap-drop ALL --security-opt no-new-privileges', workflow)
+        self.assertIn('--read-only', workflow)
         for forbidden in ('secrets.', 'gh release', 'contents: write', 'chmod -R 777'):
             self.assertNotIn(forbidden, workflow)
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "redmi-ax6000-612-latest",
-  "enabled": true,
+  "enabled": false,
   "firmware": {
     "repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git",
     "commit": "a99b0888b88f134f56bcb2a7d93027b5d20638a9",
@@ -153,6 +153,6 @@
     "enabled": true,
     "cohort": "612-latest",
     "server_url": "https://asu.ezon.by/612/latest",
-    "seed": "ccbf8ceb144b0fd7ce365c57831a016e595e43a85643ffaf5fe8520a835480bc"
+    "seed": "91d3c83795643eae1d1f482cb8cb3b5250d94e9ca349a5d88d3110c0411dbed6"
   }
 }

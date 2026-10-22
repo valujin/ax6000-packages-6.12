@@ -62,14 +62,18 @@ class NativeApkPolicy(unittest.TestCase):
         for channel in ('recommended', 'latest'):
             profile = json.loads((ROOT / ('profiles/redmi-ax6000-612-' + channel + '-new.json')).read_text())
             self.assertEqual(profile['package_manager'], 'apk')
-            self.assertEqual(profile['asu']['cohort'], '612-' + channel)
+            if channel == 'recommended':
+                self.assertIs(profile['exclude_asu'], True); self.assertNotIn('asu', profile)
+            else:
+                self.assertIs(profile['enabled'], False)
+                continue
             self.assertEqual(profile['pbr_source'], 'mossdef-stable')
             self.assertIs(profile['vendor_country_db'], True)
             self.assertIn('tailscale', profile['package_only'])
             self.assertNotIn('tailscale', profile['image_packages'])
             firmware.validate(profile, lock)
 
-    def test_actual_source_configures_apk_ib_and_cohort_before_feeds(self):
+    def test_actual_source_configures_apk_without_asu_ib_or_cohort_before_feeds(self):
         profile = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended-new.json').read_text())
         lock = json.loads((ROOT / 'tests/fixtures/pbr-612-native-inputs.json').read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -80,13 +84,14 @@ class NativeApkPolicy(unittest.TestCase):
             (source / 'include/rootfs.mk').write_bytes((ROOT / 'tests/fixtures/apk-rootfs.mk').read_bytes())
             firmware.configure(profile, lock, source)
             config = (source / '.config').read_text()
-            for line in ['CONFIG_IB=y', 'CONFIG_IB_STANDALONE=y', 'CONFIG_SIGNED_PACKAGES=y',
+            for line in ['# CONFIG_IB is not set', '# CONFIG_IB_STANDALONE is not set', 'CONFIG_SIGNED_PACKAGES=y',
                          'CONFIG_SIGNATURE_CHECK=y', 'CONFIG_USE_APK=y', 'CONFIG_PACKAGE_apk-openssl=y',
                          'CONFIG_PACKAGE_openwrt-keyring=y', 'CONFIG_PACKAGE_usign=y',
                          '# CONFIG_PACKAGE_opkg is not set', 'CONFIG_KERNEL_NATIVE=y']:
                 self.assertIn(line + '\n', config)
-            identity = json.loads((source / 'files/etc/asu-cohort.json').read_text())
-            self.assertEqual(identity['cohort'], '612-recommended'); self.assertEqual(identity['package_manager'], 'apk')
+            self.assertFalse((source / 'files/etc/asu-cohort.json').exists())
+            firmware.no_asu.verify_config(config)
+            firmware.no_asu.configure(profile, source, check_only=True)
             firmware.verify_asu(profile, source)
             firmware.sibling_module('apk_world').configure_source(profile, source, check_only=True)
 

@@ -26,6 +26,12 @@ while (($#)); do
     esac
 done
 [[ -n $profile && -n $lock && -n $work && -n $output ]] || { usage >&2; exit 1; }
+python3 - "$profile" "$script_dir" <<'PY'
+import json,sys
+sys.path.insert(0,sys.argv[2])
+import no_asu
+no_asu.build_profile(json.load(open(sys.argv[1])))
+PY
 # These checks happen before downloads or work directory creation.
 python3 "$script_dir/prepare.py" --profile "$profile" --lock "$lock" --phase validate
 profile=$(realpath -- "$profile")

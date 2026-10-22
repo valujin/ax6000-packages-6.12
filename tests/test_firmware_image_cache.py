@@ -135,6 +135,7 @@ class ImageCacheReset(unittest.TestCase):
     def test_actual_resume_shell_checks_verify_then_resets_before_world(self):
         runner=self.root/'runner';runner.mkdir()
         shutil.copyfile(ROOT/'scripts/build-firmware.sh',runner/'build-firmware.sh')
+        shutil.copyfile(ROOT / 'scripts/no_asu.py', runner / 'no_asu.py')
         log=self.root/'order.log'
         # Stub preparation/build operations; delegate cleanup to the actual CLI.
         # This executes production shell ordering without preparing or compiling.
@@ -144,7 +145,9 @@ class ImageCacheReset(unittest.TestCase):
                         'with Path(os.environ["FIXTURE_LOG"]).open("a") as f:f.write(phase+"\\n")\n'
                         'if phase=="reset-cached-images":\n'
                         ' subprocess.run([sys.executable,'+repr(str(ROOT/'scripts/prepare-firmware.py'))+']+sys.argv[1:],check=True)\n')
-        profile=self.root/'profile.json';profile.write_text(json.dumps(self.profile))
+        profile=self.root/'profile.json'
+        self.profile.update(exclude_asu=True,package_manager='apk')
+        profile.write_text(json.dumps(self.profile))
         lock=self.root/'inputs.json';lock.write_text('{}')
         marker={name:hashlib.sha256(path.read_bytes()).hexdigest() for name,path in
                 [('profile_sha256',profile),('lock_sha256',lock)]}

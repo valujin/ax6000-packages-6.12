@@ -133,44 +133,16 @@ class SnapshotActivation(unittest.TestCase):
             with self.subTest(value=value[:30]),self.assertRaises(ValueError):activation.decode_pointer(value,'recommended')
         self.assertEqual(activation.decode_pointer(encode(self.incoming),'recommended'),self.incoming)
 
-    def test_public_pointer_survives_actual_workflow_argv_and_scoped_env_scrubbing(self):
-        from test_apk_workflows import shell_blocks
-        scope_spec=importlib.util.spec_from_file_location('activation_scope',ROOT/'scripts/hosted-publication.py')
-        scope=importlib.util.module_from_spec(scope_spec);scope_spec.loader.exec_module(scope)
-        self.assertNotIn('SNAPSHOT_POINTER_BASE64',scope.PRESERVE)
-        commands=self.root/'commands';commands.mkdir();record=self.root/'argv.json'
-        stub=commands/'python3'
-        stub.write_text('#!'+sys.executable+'\nimport json,sys\nfrom pathlib import Path\nPath('+repr(str(record))+').write_text(json.dumps(sys.argv[1:]))\n')
-        stub.chmod(0o755)
-        encoded=encode(self.incoming)
-        environment=dict(os.environ,PATH=str(commands)+':'+os.environ['PATH'],RUNNER_TEMP=str(self.root),
-            OPKG_SIGNING_KEY='fixture-only',SNAPSHOT_POINTER_BASE64=encoded,CHANNEL='recommended',
-            EXPECTED_PREDECESSOR='a'*64,GITHUB_REPOSITORY=activation.REPOSITORY,GITHUB_REPOSITORY_OWNER='valujin')
-        block=shell_blocks('activate-snapshot.yml')['Authenticate the published snapshot and compose both channels']
-        result=subprocess.run(['bash','-eu','-c',block],env=environment,capture_output=True,text=True)
-        self.assertEqual(result.returncode,0,result.stderr)
-        outer=json.loads(record.read_text());payload=outer[outer.index('--')+1:]
-        self.assertEqual(payload[:2],['python3','scripts/activate-snapshot.py'])
-        bounded=scope.scope_command(2*1024**3,1,1000,payload)
-        self.assertEqual(bounded[-len(payload):],payload)
-        sanitized={key:value for key,value in environment.items() if key in scope.PRESERVE}
-        self.assertNotIn('SNAPSHOT_POINTER_BASE64',sanitized)
-        with patch.dict(os.environ,sanitized,clear=True),patch.object(sys,'argv',payload[1:]),patch.object(activation,'activate') as called:
-            activation.main()
-        self.assertEqual(called.call_args.args[0],encoded)
-        self.assertEqual(activation.decode_pointer(called.call_args.args[0],'recommended'),self.incoming)
-        self.assertFalse((self.root/'opkg-signing.key').exists())
+    def test_retired_snapshot_ASU_workflow_is_absent(self):
+        self.assertFalse((ROOT/'.github/workflows/activate-snapshot.yml').exists())
 
-    def test_workflow_uses_shared_publication_lock_and_existing_deploy_gates(self):
-        text=(ROOT/'.github/workflows/activate-snapshot.yml').read_text()
+    def test_normal_recommended_publisher_keeps_shared_lock_and_deploy_checks(self):
+        text=(ROOT/'.github/workflows/publish-existing.yml').read_text()
         self.assertIn('group: package-publication\n  cancel-in-progress: false',text)
-        for term in ('scripts/hosted-publication.py','scripts/build-apk-host.sh','OPKG_SIGNING_KEY','SNAPSHOT_POINTER_BASE64',
-                     'verify-deployment --check deployment-check/deployment-check.json --phase before',
+        for term in ('verify-deployment --check deployment-check/deployment-check.json --phase before',
                      'verify-deployment --check deployment-check/deployment-check.json --phase after','actions/deploy-pages@v4'):
             self.assertIn(term,text)
-        for term in ('APK_SIGNING_KEY','publish-channel','import-release','build-sdk','--bootstrap','--allow-asu-apk-migration'):
+        for term in ('activate-snapshot.py','--allow-asu-apk-migration'):
             self.assertNotIn(term,text)
-        original=(ROOT/'.github/workflows/publish-existing.yml').read_text()
-        self.assertEqual(text[text.index('  deploy:\n'):],original[original.index('  deploy:\n'):])
 
 if __name__=='__main__':unittest.main()

@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 
 import prepare
+import no_asu
 import firmware_layouts
 from publish import read_control
 
@@ -207,6 +208,9 @@ def configure(profile, lock, source):
         values["TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_" + device] = '"-kmod-mt7915e -kmod-mt7986-firmware"'
     values.update(source_symbols(profile))
     values.update(asu_symbols(profile))
+    if profile.get("exclude_asu"):
+        values.update(no_asu.symbols(config))
+        no_asu.configure(profile, source)
     (source / ".config").write_text(set_symbols(config, values))
     if asu_policy(profile) is not None:
         sibling_module("asu_client").configure(profile, source)
@@ -638,6 +642,9 @@ def select(profile, source):
     values.update(ssl_symbols(profile))
     values.update(asu_symbols(profile))
     values.update({"PACKAGE_" + name: "m" for name in prepare.package_only_packages(profile)})
+    if profile.get("exclude_asu"):
+        values.update(no_asu.symbols(config, available))
+        no_asu.configure(profile, source)
     config_path.write_text(set_symbols(config, values))
     report = {"profile": profile["id"], "requested": sorted(requested), "candidate_kmods": kmods,
               "source_commit": profile["firmware"]["commit"], "device": profile["build_source"]["device"],
@@ -667,6 +674,9 @@ def verify(profile, source):
     verify_ssl(profile, config)
     verify_package_only(profile, source)
     verify_asu(profile, source)
+    if profile.get("exclude_asu"):
+        no_asu.verify_config(config)
+        no_asu.configure(profile, source, check_only=True)
     if profile.get("package_manager") == "apk":
         guard = sibling_module("apk_world")
         guard.configure_source(profile, source, check_only=True)
@@ -1004,6 +1014,8 @@ def export(profile, lock, source, output):
             dependencies = re.findall(r"(?:^|,)\s*kernel\s*\(\s*=\s*([^\s)]+)\s*\)", control.get("Depends", ""))
             prepare.require(dependencies == [abi], f"built module {path.name} has another kernel ABI")
     built = {control.get("Package") for _, control in controls}
+    if profile.get("exclude_asu"):
+        no_asu.assert_absent(built, {})
     prepare.require(set(profile["packages"]) <= built,
                     "build omitted requested packages: " + ", ".join(sorted(set(profile["packages"]) - built)))
     report = json.loads((source / "build-selection.json").read_text())

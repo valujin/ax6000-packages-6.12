@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 
 import asu_client
+import no_asu
 import pbr_sources
 import vendor_country
 
@@ -52,6 +53,7 @@ def minified_js(data, source):
 
 
 def expected(profile, lock, source=None):
+    no_asu.validate(profile)
     files, hashes, versions, suffixes = {}, {}, {}, {}
     asu = asu_client.policy(profile)
     if asu:

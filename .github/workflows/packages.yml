@@ -1,4 +1,4 @@
-name: Monitor and publish 6.12 channels
+name: Monitor and publish recommended 6.12 APK packages
 
 on:
   schedule:
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Monitor both fixed channels and check activation
+      - name: Monitor recommended inputs and check no-ASU activation
         id: profiles
         run: |
           python3 - <<'PY'
@@ -119,26 +119,28 @@ jobs:
           from pathlib import Path
           import subprocess
 
-          enabled = False
-          apk = False
-          apk_signing = False
-          for channel in ('recommended', 'latest'):
-              generated = Path(f'profiles/redmi-ax6000-612-{channel}.json')
-              profile = generated if generated.is_file() else Path(f'profiles/redmi-ax6000-612-{channel}-new.json')
-              if not profile.is_file():
-                  raise SystemExit(f'Missing explicit 6.12 channel profile: {profile}')
-              data = json.loads(profile.read_text())
-              if data.get('channel') != channel or data.get('id') != f'redmi-ax6000-612-{channel}':
-                  raise SystemExit('Channel/profile identity mismatch')
-              active = generated.is_file() and data.get('enabled') is True
-              enabled = enabled or active
-              apk = apk or (generated.is_file() and data.get("package_manager", "opkg") == "apk")
-              apk_signing = apk_signing or (active and data.get("package_manager", "opkg") == "apk")
-              subprocess.run(['python3', 'scripts/monitor.py', '--profile', str(profile),
-                              '--output', f'state/{channel}-monitored.json'], check=True)
-              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-                  summary.write(f'- {channel}: ' + ('daily profile active' if active else
-                      'publication disabled; verify firmware + exact SDK and initial signed snapshot before activation') + '\n')
+          generated = Path('profiles/redmi-ax6000-612-recommended.json')
+          source = Path('profiles/redmi-ax6000-612-recommended-new.json')
+          data = json.loads(generated.read_text()) if generated.is_file() else {}
+          active = (data.get('enabled') is True and data.get('exclude_asu') is True
+                    and 'asu' not in data and data.get('package_manager') == 'apk')
+          profile = generated if active else source
+          if not profile.is_file():
+              raise SystemExit('Missing recommended profile')
+          chosen = json.loads(profile.read_text())
+          if (chosen.get('channel') != 'recommended'
+                  or chosen.get('id') != 'redmi-ax6000-612-recommended'
+                  or chosen.get('package_manager') != 'apk'
+                  or chosen.get('exclude_asu') is not True or 'asu' in chosen):
+              raise SystemExit('Only recommended APK profiles without ASU may be monitored')
+          enabled = active
+          apk = True
+          apk_signing = active
+          subprocess.run(['python3', 'scripts/monitor.py', '--profile', str(profile),
+                          '--output', 'state/recommended-monitored.json'], check=True)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('- recommended: ' + ('daily profile active' if active else
+                  'publication disabled until the fresh no-ASU firmware generation is activated') + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'enabled={str(enabled).lower()}\n')
               output.write(f'apk={str(apk).lower()}\n')
@@ -188,7 +190,7 @@ jobs:
         run: |
           python3 scripts/hosted-publication.py -- bash scripts/build-apk-host.sh --work-dir "$RUNNER_TEMP/apk-host"
           printf 'AX6000_APK=%s\n' "$RUNNER_TEMP/apk-host/build/src/apk" >> "$GITHUB_ENV"
-      - name: Refresh serial channel snapshots and compose the complete site
+      - name: Refresh recommended packages and compose the complete site
         id: refresh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -199,6 +201,7 @@ jobs:
           PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
           FORCE: ${{ inputs.force || false }}
         run: |
+          [[ "$NEEDS_APK" == true && "$NEEDS_APK_SIGNING" == true ]] || { echo 'Only the active recommended APK profile may be published.' >&2; exit 1; }
           [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
           key="$RUNNER_TEMP/opkg-signing.key"
@@ -225,7 +228,7 @@ jobs:
       - name: Prepare Pages
         if: steps.refresh.outputs.deploy == 'true'
         uses: actions/configure-pages@v5
-      - name: Upload the complete two-channel repository
+      - name: Upload the recommended repository
         if: steps.refresh.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
@@ -260,7 +263,7 @@ jobs:
           path: deployment-check
       - name: Require the authenticated live predecessor
         run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase before
-      - name: Deploy both authenticated channels atomically
+      - name: Deploy the authenticated recommended repository
         id: deployment
         uses: actions/deploy-pages@v4
       - name: Verify the intended live signed state

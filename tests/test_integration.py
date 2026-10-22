@@ -59,6 +59,7 @@ class FirmwareExportIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = json.loads((ROOT / 'profiles/redmi-ax6000-new.json').read_text())
+            profile['enabled'] = True  # Historical export fixture only.
             profile['packages'] = ['kmod-wireguard', 'kmod-amneziawg', 'fw-helper-live']
             profile['image_packages'] = []
             profile['build_source']['publication_url'] = 'https://example.com/packages'

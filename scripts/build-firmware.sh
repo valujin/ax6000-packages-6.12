@@ -32,6 +32,12 @@ while (($#)); do
 done
 [[ -n $profile && -n $lock && -n $work && -n $output ]] || { usage >&2; exit 1; }
 [[ $min_free_gib =~ ^[1-9][0-9]*$ ]] || fail '--min-free-gib must be a positive integer'
+python3 - "$profile" "$script_dir" <<'PY'
+import json,sys
+sys.path.insert(0,sys.argv[2])
+import no_asu
+no_asu.build_profile(json.load(open(sys.argv[1])))
+PY
 python3 "$script_dir/prepare-firmware.py" --profile "$profile" --lock "$lock" --phase validate
 profile=$(realpath -- "$profile")
 lock=$(realpath -- "$lock")

@@ -29,6 +29,7 @@ import zlib
 
 from fit_payload import MIB, cell, extract_fit, read_fdt, require, stringlist, text
 import stock_factory
+import no_asu
 import package_format
 import apk_world
 import image_features
@@ -597,6 +598,8 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
                     symlinks[name] = match[2].encode('utf-8')
         require(actual_paths and len(actual_paths) <= 30000, 'Cannot enumerate actual SquashFS file inventory')
         stock_factory.assert_absent(package_only, status, actual_paths, symlinks)
+    if profile.get("exclude_asu"):
+        no_asu.assert_absent(status, actual_paths, symlinks)
     required = VENDOR | UCODE | ({'kernel', 'apk-openssl', 'openwrt-keyring'} if manager == 'apk' else {'kernel', 'opkg'}) | set(profile.get('image_packages', []))
     available = set(status) | {record.get('Base-Package', name) for name, record in status.items()}
     require(required <= available, 'Actual root omits required packages: ' + ', '.join(sorted(required - available)))
@@ -1015,7 +1018,7 @@ def main(args):
     require((firmware.get('target'), firmware.get('subtarget'), firmware.get('architecture')) ==
             ('mediatek', 'filogic', 'aarch64_cortex-a53'), 'Profile target/architecture differs')
     approved = read_json(repo / 'profiles' / ('redmi-ax6000-612-' + channel + '-new.json'))
-    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source', 'asu', 'pbr_source', 'vendor_country_db', 'package_manager', 'apk_key_sha256'):
+    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source', 'asu', 'pbr_source', 'vendor_country_db', 'package_manager', 'apk_key_sha256', 'exclude_asu'):
         require(profile.get(field) == approved.get(field), 'Exported profile differs from reviewed recipe: ' + field)
     manager = package_format.manager(profile)
     apk = trusted_apk_argument(getattr(args, 'apk', None), raw) if manager == 'apk' else None
@@ -1074,6 +1077,10 @@ def main(args):
     require(devices == {('mediatek_filogic_DEVICE_' + d).encode() for d in DEVICES.values()}, 'Actual build selected other/missing devices')
     expected_files, fingerprint = repository_expected(repo, profile)
     feature_expected = image_features.expected(profile, lock, source=source)
+    if profile.get("exclude_asu"):
+        no_asu.validate(profile)
+        no_asu.verify_config(config.decode())
+        no_asu.configure(profile, source, check_only=True)
     for name in ('etc/asu-cohort.json', 'etc/uci-defaults/99-ax6000-asu'):
         if name in feature_expected['files']:
             expected_files[name] = feature_expected['files'][name]
@@ -1124,6 +1131,8 @@ def main(args):
     source_selection = read_json(source / 'build-selection.json')
     for field in ('selected_packages', 'candidate_kmods', 'selected_kmods', 'incompatible_kmods', 'source_patches', 'devices', 'channel', 'apk_world'):
         require(selection.get(field) == source_selection.get(field), 'Actual source/export selection differs: ' + field)
+    if profile.get("exclude_asu"):
+        no_asu.assert_absent({c.get("Base-Package", n): c for n, c in controls.items()}, {})
     canonical_controls, canonical_ipks = controls, ipks
     if manager == 'apk':
         canonical_names = [control.get('Base-Package') for control in controls.values()]
@@ -1254,7 +1263,7 @@ def main(args):
                     package_only=package_only,
                     expected_packages={name: controls[name] for name in records['stock']['root']['installed_packages']},
                     expected_dtb_sha256=records['stock']['device_tree']['sha256'], kernel_inputs=kernel_inputs,
-                    package_manager=manager, expected_files=expected_files, expected_hashes={name: item['sha256'] for name, item in
+                    package_manager=manager, expected_files=expected_files, exclude_asu=profile.get("exclude_asu", False), expected_hashes={name: item['sha256'] for name, item in
                         records['stock']['root']['optional_features']['files'].items()})
                 optional_sizes[path.name]['payload_verified'] = True
     if 'tailscale' in package_only:

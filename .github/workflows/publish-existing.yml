@@ -10,38 +10,12 @@ on:
         type: choice
         options:
           - recommended
-          - latest
       release_tag:
         description: Exact immutable firmware-BUILD_ID release in this repository
         required: true
         type: string
       replace_build_id:
         description: Exact authenticated live build ID to replace within the same source/kernel ABI/layouts
-        required: false
-        default: ''
-        type: string
-      allow_asu_apk_migration:
-        description: Explicitly permit the reviewed ASU/OPKG-to-APK migration; requires exact replace_build_id
-        required: false
-        default: false
-        type: boolean
-      migration_proof_base64:
-        description: Base64 JSON from the actual old/new native kernel-context verifier; required only for reviewed ASU/APK migration
-        required: false
-        default: ''
-        type: string
-      allow_native_apk_replacement:
-        description: Explicitly permit the separately proved REC native APK generation replacement
-        required: false
-        default: false
-        type: boolean
-      native_replacement_proof_base64:
-        description: Portable JSON emitted after actual old/new native SDK IB and source acceptance; native replacement only
-        required: false
-        default: ''
-        type: string
-      native_replacement_proof_sha256:
-        description: Exact operator-reviewed SHA256 of the decoded portable native replacement receipt
         required: false
         default: ''
         type: string
@@ -60,7 +34,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.channel == 'recommended'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -92,6 +66,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           CHANNEL: ${{ inputs.channel }}
         run: |
+          [[ "$CHANNEL" == recommended ]] || { echo 'Only recommended publication is supported.' >&2; exit 1; }
           [[ "$RELEASE_TAG" =~ ^firmware-[A-Za-z0-9._-]+$ ]] || { echo 'Invalid immutable generation tag.' >&2; exit 1; }
           python3 scripts/channel-snapshot.py fetch-generation --release-tag "$RELEASE_TAG" \
             --repository "$GITHUB_REPOSITORY" --output release-download \
@@ -109,155 +84,35 @@ jobs:
           import os
           from pathlib import Path
 
-          incoming = json.loads(Path('raw/profile.json').read_text()).get('package_manager', 'opkg')
-          if incoming not in ('opkg', 'apk'):
-              raise SystemExit('Unsupported imported package manager')
-          needs_apk = incoming == 'apk'
-          for channel in ('recommended', 'latest'):
-              path = Path(f'profiles/redmi-ax6000-612-{channel}.json')
-              if path.is_file():
-                  profile = json.loads(path.read_text())
-                  needs_apk |= profile.get('package_manager', 'opkg') == 'apk'
+          profile = json.loads(Path('raw/profile.json').read_text())
+          if (profile.get('channel') != 'recommended'
+                  or profile.get('id') != 'redmi-ax6000-612-recommended'
+                  or profile.get('package_manager') != 'apk'
+                  or profile.get('exclude_asu') is not True or 'asu' in profile):
+              raise SystemExit('Only a genuine recommended APK generation without ASU may be published')
+          incoming = 'apk'
+          needs_apk = True
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'incoming={incoming}\n')
               output.write(f'apk={str(needs_apk).lower()}\n')
-          PYCODE
-      - name: Prepare the operator-reviewed native APK replacement receipt
-        id: native_replacement
-        env:
-          ALLOW_NATIVE_APK_REPLACEMENT: ${{ inputs.allow_native_apk_replacement }}
-          ALLOW_ASU_APK_MIGRATION: ${{ inputs.allow_asu_apk_migration }}
-          CHANNEL: ${{ inputs.channel }}
-          BOOTSTRAP: ${{ inputs.bootstrap }}
-          REPLACE_BUILD_ID: ${{ inputs.replace_build_id }}
-          NATIVE_REPLACEMENT_PROOF_BASE64: ${{ inputs.native_replacement_proof_base64 }}
-          NATIVE_REPLACEMENT_PROOF_SHA256: ${{ inputs.native_replacement_proof_sha256 }}
-        run: |
-          python3 - <<'PYCODE'
-          import base64
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import re
-
-          # Explicit operator authorization; no native acceptance is synthesized here.
-          allowed = os.environ['ALLOW_NATIVE_APK_REPLACEMENT'] == 'true'
-          encoded = os.environ.get('NATIVE_REPLACEMENT_PROOF_BASE64', '')
-          digest = os.environ.get('NATIVE_REPLACEMENT_PROOF_SHA256', '')
-          if not allowed:
-              if encoded or digest:
-                  raise SystemExit('Native proof and SHA require explicit allow_native_apk_replacement.')
-          else:
-              if (os.environ['CHANNEL'] != 'recommended' or os.environ['BOOTSTRAP'] == 'true'
-                      or os.environ['ALLOW_ASU_APK_MIGRATION'] == 'true'
-                      or not os.environ.get('REPLACE_BUILD_ID') or not encoded
-                      or not re.fullmatch('[0-9a-f]{64}', digest)):
-                  raise SystemExit('Native replacement requires REC, exact predecessor and proof/SHA; bootstrap and OPKG migration are excluded.')
-              try:
-                  if len(encoded) > 4 * ((65536 + 2) // 3):
-                      raise ValueError('encoded native proof exceeds 64 KiB')
-                  decoded = base64.b64decode(encoded, validate=True)
-                  if len(decoded) > 65536 or hashlib.sha256(decoded).hexdigest() != digest:
-                      raise ValueError('native proof size/SHA differs')
-                  def unique_object(pairs):
-                      result = {}
-                      for key, value in pairs:
-                          if key in result:
-                              raise ValueError('duplicate native proof JSON field')
-                          result[key] = value
-                      return result
-                  def finite_constant(value):
-                      raise ValueError('non-finite native proof JSON')
-                  proof = json.loads(decoded.decode('utf-8'), object_pairs_hook=unique_object, parse_constant=finite_constant)
-                  if (not isinstance(proof, dict) or set(proof) != {'schema_version', 'kind', 'summary'}
-                          or type(proof['schema_version']) is not int
-                          or (proof['schema_version'], proof['kind']) not in (
-                              (1, 'rec-native-apk-generation-transition-v1'),
-                              (2, 'rec-native-apk-generation-transition-v2'))
-                          or not isinstance(proof['summary'], dict)):
-                      raise ValueError('unexpected portable native proof kind/schema')
-              except (ValueError, UnicodeError) as error:
-                  raise SystemExit('Invalid reviewed native replacement proof: ' + str(error))
-              path = Path(os.environ['RUNNER_TEMP']) / 'native-replacement-proof.json'
-              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-              with os.fdopen(descriptor, 'wb') as output:
-                  output.write(decoded)
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-                  output.write(f'path={path}\nsha256={digest}\n')
-          PYCODE
-      - name: Prepare the operator-reviewed native migration receipt
-        id: migration
-        env:
-          ALLOW_ASU_APK_MIGRATION: ${{ inputs.allow_asu_apk_migration }}
-          REPLACE_BUILD_ID: ${{ inputs.replace_build_id }}
-          MIGRATION_PROOF_BASE64: ${{ inputs.migration_proof_base64 }}
-        run: |
-          python3 - <<'PYCODE'
-          import base64
-          import json
-          import os
-          from pathlib import Path
-
-          # This is explicit operator authorization, not a remote attestation.
-          # Generate it with the native verifier against the actual old/new
-          # .config, Module.symvers and arch/arm64/boot/Image before dispatch.
-          allowed = os.environ['ALLOW_ASU_APK_MIGRATION'] == 'true'
-          encoded = os.environ.get('MIGRATION_PROOF_BASE64', '')
-          if not allowed:
-              if encoded:
-                  raise SystemExit('Migration proof requires explicit allow_asu_apk_migration.')
-          else:
-              if not os.environ.get('REPLACE_BUILD_ID') or not encoded:
-                  raise SystemExit('Migration requires exact replace_build_id and the reviewed native comparison receipt.')
-              if len(encoded) > 4 * ((65536 + 2) // 3):
-                  raise SystemExit('Migration proof exceeds the 64 KiB decoded limit.')
-              try:
-                  decoded = base64.b64decode(encoded, validate=True)
-                  if len(decoded) > 65536:
-                      raise ValueError('decoded proof exceeds 64 KiB')
-                  def unique_object(pairs):
-                      result = {}
-                      for key, value in pairs:
-                          if key in result:
-                              raise ValueError('duplicate JSON field')
-                          result[key] = value
-                      return result
-                  def finite_constant(value):
-                      raise ValueError('non-finite JSON constant')
-                  proof = json.loads(decoded.decode('utf-8'), object_pairs_hook=unique_object, parse_constant=finite_constant)
-                  if not isinstance(proof, dict):
-                      raise ValueError('proof must be a JSON object')
-              except (ValueError, UnicodeError) as error:
-                  raise SystemExit('Invalid reviewed migration proof: ' + str(error))
-              path = Path(os.environ['RUNNER_TEMP']) / 'migration-proof.json'
-              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-              with os.fdopen(descriptor, 'wb') as output:
-                  output.write(decoded)
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-                  output.write(f'path={path}\n')
           PYCODE
       - name: Build pinned independent host APK
         if: steps.managers.outputs.apk == 'true'
         run: |
           python3 scripts/hosted-publication.py -- bash scripts/build-apk-host.sh --work-dir "$RUNNER_TEMP/apk-host"
           printf 'AX6000_APK=%s\n' "$RUNNER_TEMP/apk-host/build/src/apk" >> "$GITHUB_ENV"
-      - name: Publish a signed durable snapshot and compose both channels
+      - name: Publish a signed durable recommended snapshot
         env:
           GH_TOKEN: ${{ github.token }}
           OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
           APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
           NEEDS_APK: ${{ steps.managers.outputs.apk }}
           INCOMING_MANAGER: ${{ steps.managers.outputs.incoming }}
-          ALLOW_ASU_APK_MIGRATION: ${{ inputs.allow_asu_apk_migration }}
-          MIGRATION_PROOF: ${{ steps.migration.outputs.path }}
-          ALLOW_NATIVE_APK_REPLACEMENT: ${{ inputs.allow_native_apk_replacement }}
-          NATIVE_REPLACEMENT_PROOF: ${{ steps.native_replacement.outputs.path }}
-          NATIVE_REPLACEMENT_PROOF_SHA256: ${{ steps.native_replacement.outputs.sha256 }}
           PACKAGE_REPOSITORY_URL: ${{ vars.PACKAGE_REPOSITORY_URL }}
           BOOTSTRAP: ${{ inputs.bootstrap }}
           REPLACE_BUILD_ID: ${{ inputs.replace_build_id }}
         run: |
+          [[ "$INCOMING_MANAGER" == apk && "$NEEDS_APK" == true ]] || { echo 'Only recommended APK publication is supported.' >&2; exit 1; }
           [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
           umask 077
           key="$RUNNER_TEMP/opkg-signing.key"
@@ -282,17 +137,6 @@ jobs:
             args+=(--apk-key "$apk_key" --apk-public-key keys/repository-apk.pem)
           fi
           unset APK_SIGNING_KEY
-          if [[ "$ALLOW_ASU_APK_MIGRATION" == true ]]; then
-            [[ -n "$REPLACE_BUILD_ID" && -f "$MIGRATION_PROOF" ]] || { echo 'Reviewed native migration receipt and exact predecessor are required.' >&2; exit 1; }
-            args+=(--allow-asu-apk-migration --migration-proof "$MIGRATION_PROOF")
-          fi
-          if [[ "${ALLOW_NATIVE_APK_REPLACEMENT:-false}" == true ]]; then
-            [[ "$ALLOW_ASU_APK_MIGRATION" != true && "$BOOTSTRAP" != true && -n "$REPLACE_BUILD_ID" \
-              && "$INCOMING_MANAGER" == apk && -f "$NATIVE_REPLACEMENT_PROOF" \
-              && "$NATIVE_REPLACEMENT_PROOF_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'Reviewed native APK receipt/SHA and exact predecessor are required.' >&2; exit 1; }
-            args+=(--allow-native-apk-replacement --native-replacement-proof "$NATIVE_REPLACEMENT_PROOF" \
-              --native-replacement-proof-sha256 "$NATIVE_REPLACEMENT_PROOF_SHA256")
-          fi
           if [[ "$BOOTSTRAP" == true ]]; then args+=(--bootstrap); fi
           if [[ -n "$REPLACE_BUILD_ID" ]]; then args+=(--replace-build-id "$REPLACE_BUILD_ID"); fi
           python3 scripts/hosted-publication.py -- python3 scripts/channel-snapshot.py publish-channel "${args[@]}"
@@ -327,7 +171,7 @@ jobs:
           path: deployment-check
       - name: Require the authenticated live predecessor
         run: python3 scripts/channel-snapshot.py verify-deployment --check deployment-check/deployment-check.json --phase before
-      - name: Deploy both signed channels atomically
+      - name: Deploy the signed recommended repository
         id: deployment
         uses: actions/deploy-pages@v4
       - name: Verify the intended live signed state

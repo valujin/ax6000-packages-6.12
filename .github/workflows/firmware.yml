@@ -10,7 +10,6 @@ on:
         type: choice
         options:
           - recommended
-          - latest
 
 concurrency:
   group: native-firmware
@@ -20,11 +19,11 @@ permissions:
   contents: read
 
 env:
-  PROFILE: profiles/redmi-ax6000-612-${{ inputs.channel }}-new.json
+  PROFILE: profiles/redmi-ax6000-612-recommended-new.json
 
 jobs:
   build:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.channel == 'recommended'
     runs-on: ${{ vars.FIRMWARE_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 350
     permissions:
@@ -143,4 +142,4 @@ jobs:
           retention-days: 7
       - name: Record publication prerequisite
         run: |
-          echo 'Artifacts only. Validate the exact exported SDK, then use channel-snapshot.py publish-generation and publish-existing.yml to publish both channels atomically.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Artifacts only. Validate the exact exported SDK, then use channel-snapshot.py publish-generation and publish-existing.yml to publish the recommended channel.' >> "$GITHUB_STEP_SUMMARY"

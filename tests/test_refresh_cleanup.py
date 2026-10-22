@@ -33,7 +33,7 @@ class RefreshCleanup(unittest.TestCase):
   with self.assertRaises(ValueError):snapshot.cleanup_owned_workspace(alias/'work',alias/'work'/'build-recommended')
   self.assertEqual(owned.stat().st_mode&0o777,0o555)
  def test_refresh_reaches_composition_after_successful_publish_with_readonly_sdk_fixture(self):
-  profiles=self.root/'profiles';profiles.mkdir();profile={'channel':'recommended','enabled':True}
+  profiles=self.root/'profiles';profiles.mkdir();profile={'channel':'recommended','enabled':True,'exclude_asu':True}
   (profiles/'redmi-ax6000-612-recommended.json').write_text(json.dumps(profile))
   old=self.root/'old';channel=old/'channel';(channel/'state').mkdir(parents=True)
   for name,value in (('profile.json',profile),('state/lock.json',{'old':True}),('downloads.json',{'release':{'id':1}})):(channel/name).write_text(json.dumps(value))

@@ -389,7 +389,7 @@ def assert_absent(package_names, installed, paths, symlinks=None):
 
 
 def verify_native_factory(ram_fit, factory_ubi, *, package_only=(), expected_packages=None,
-                          expected_dtb_sha256=None, kernel_inputs=None, package_manager='opkg', expected_files=None, expected_hashes=None):
+                          expected_dtb_sha256=None, kernel_inputs=None, package_manager='opkg', expected_files=None, expected_hashes=None, exclude_asu=False):
     """Require factory's one kernel volume to be the exact native full RAM FIT.
 
     kernel_inputs are trusted KDIR/Image-initramfs* snapshots, distinct from
@@ -427,6 +427,11 @@ def verify_native_factory(ram_fit, factory_ubi, *, package_only=(), expected_pac
              'Initramfs optional feature bytes/owner/mode differ: ' + name)
     symlinks = {name: item['data'] for name, item in entries.items() if item['kind'] == stat.S_IFLNK}
     assert_absent(package_only, installed, entries, symlinks)
+    if exclude_asu:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("factory_no_asu", Path(__file__).with_name("no_asu.py"))
+        helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+        helper.assert_absent(installed, entries, symlinks)
     essential = ESSENTIAL + (('usr/bin/apk',) if package_manager == 'apk' else ())
     for name in essential:
         need(name in entries, 'Initramfs essential absent: ' + name)

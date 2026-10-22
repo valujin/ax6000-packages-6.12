@@ -103,10 +103,7 @@
     "luci-i18n-amneziawg-ru",
     "geoip-shell",
     "geoview",
-    "geoipupdate",
-    "attendedsysupgrade-common",
-    "luci-app-attendedsysupgrade",
-    "luci-i18n-attendedsysupgrade-ru"
+    "geoipupdate"
   ],
   "all_kmods": true,
   "build_source": {
@@ -128,10 +125,7 @@
     "luci-i18n-pbr-ru",
     "luci-app-package-manager",
     "luci-i18n-package-manager-ru",
-    "luci-i18n-amneziawg-ru",
-    "attendedsysupgrade-common",
-    "luci-app-attendedsysupgrade",
-    "luci-i18n-attendedsysupgrade-ru"
+    "luci-i18n-amneziawg-ru"
   ],
   "luci_languages": [
     "ru"
@@ -149,10 +143,5 @@
   "apk_key_sha256": "279ea19b627e16d0807e099de8bd6cf8b69830281defa9bdb9e4ae96f5beb751",
   "pbr_source": "mossdef-stable",
   "vendor_country_db": true,
-  "asu": {
-    "enabled": true,
-    "cohort": "612-recommended",
-    "server_url": "https://asu.ezon.by/612/recommended",
-    "seed": "b2e1d84d3684926764643c08997dc11800b18c5d03163ff5d0fea4ffa5918eb3"
-  }
+  "exclude_asu": true
 }

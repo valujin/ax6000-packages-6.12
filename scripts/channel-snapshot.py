@@ -142,6 +142,9 @@ def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_mi
         validate_asu_apk_migration(old,new)
         validate_migration_proof(old,new,migration_proof)
         return
+    if new.get('exclude_asu') is True:
+        validate_no_asu_replacement(old, new)
+        return
     allowed={'build_id','sdk','image_packages','package_only'}
     if {k:v for k,v in old.items() if k not in allowed}!={k:v for k,v in new.items() if k not in allowed}:
         raise ValueError('Replacement changes profile/source/kernel ABI/architecture/layouts or requested packages')
@@ -152,6 +155,27 @@ def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_mi
         raise ValueError('Replacement changes image packages beyond removing Tailscale')
     if 'tailscale' not in new.get('packages',[]):
         raise ValueError('Replacement must retain the downloadable Tailscale package')
+
+
+def validate_no_asu_replacement(old, new):
+    """Explicit manual same-ABI generation replacement removing only ASU."""
+    helper = module('no_asu')
+    helper.validate(new)
+    if (old.get('channel') != 'recommended' or old.get('package_manager') != 'apk'
+            or 'asu' not in old or 'imagebuilder' in new):
+        raise ValueError('ASU removal requires a recommended APK predecessor and no ASU ImageBuilder')
+    allowed = {'build_id', 'sdk', 'asu', 'imagebuilder', 'exclude_asu', 'packages', 'image_packages'}
+    if ({k:v for k,v in old.items() if k not in allowed}
+            != {k:v for k,v in new.items() if k not in allowed}):
+        raise ValueError('ASU removal changes source/kernel ABI/architecture/layouts or unrelated policy')
+    for field in ('packages', 'image_packages'):
+        before, after = old.get(field), new.get(field)
+        if (not isinstance(before, list) or not isinstance(after, list)
+                or after != [name for name in before if not helper.package(name)]):
+            raise ValueError('ASU removal changes packages beyond the ASU clients')
+    if (new.get('package_only') != ['tailscale'] or 'tailscale' in new['image_packages']
+            or 'tailscale' not in new['packages']):
+        raise ValueError('ASU removal must retain the Tailscale package-only policy')
 
 
 def validate_asu_apk_migration(old,new):
@@ -871,7 +895,7 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
     previous=fetch_live(site_url,repository,public_key,usign,work/'live',bootstrap=bootstrap)
     restored=restore_live_channels(previous,profiles,repository,public_key,usign,work,**apk_options(apk))
     changed=False;failures=[]
-    for channel in CHANNELS:
+    for channel in ('recommended',):
         profile_path=Path(profiles)/('redmi-ax6000-612-'+channel+'.json')
         if not profile_path.is_file():
             source=Path(profiles)/('redmi-ax6000-612-'+channel+'-new.json')
@@ -881,6 +905,11 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
             continue
         profile=read_json(profile_path)
         if profile.get('channel')!=channel:raise ValueError('Wrong daily profile channel')
+        if profile.get('exclude_asu') is not True:
+            source=Path(profiles)/'redmi-ax6000-612-recommended-new.json'
+            subprocess.run(['python3',str(ROOT/'scripts/monitor.py'),'--profile',str(source),'--output',str(work/'recommended-monitored.json')],check=True)
+            print('recommended: fresh ASU-free native generation must be published before daily SDK builds')
+            continue
         owned=work/('build-'+channel);owned.mkdir()
         lock=owned/'lock.json';args=['python3',str(ROOT/'scripts/monitor.py'),'--profile',str(profile_path),'--output',str(lock)]
         old=restored.get(channel)
