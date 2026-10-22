@@ -30,7 +30,7 @@ CHANNEL_SOURCES = {
 def optional_package_module(name):
     # prepare.py is also imported by filename from publication tools/tests.
     # Resolve the sibling explicitly instead of relying on global sys.path.
-    if name not in ('pbr_sources', 'vendor_country', 'asu_client', 'package_format', 'host_apk_bundle'):
+    if name not in ('pbr_sources', 'vendor_country', 'asu_client', 'package_format', 'host_apk_bundle', 'tailscale_source'):
         raise ValueError('Unsupported optional package module')
     spec = importlib.util.spec_from_file_location('_ax6000_' + name, Path(__file__).with_name(name + '.py'))
     module = importlib.util.module_from_spec(spec)
@@ -243,11 +243,13 @@ def validate(profile, lock):
         require(isinstance(override.get("sha256"), str) and SHA256.fullmatch(override["sha256"]),
                 f"override {name} needs source SHA256")
         if name == "tailscale":
-            require(override.get("artifact") == "static", "Tailscale override requires artifact: static")
-            require(firmware["architecture"].startswith("aarch64_"),
-                    "official Tailscale static ARM64 archive requires an ARM64 firmware profile")
-            require(override.get("url") == f"https://pkgs.tailscale.com/stable/tailscale_{override['version']}_arm64.tgz",
-                    "Tailscale static URL must name the matching official ARM64 release archive")
+            require(firmware["architecture"].startswith("aarch64_"), "Tailscale requires an ARM64 firmware profile")
+            if override.get("artifact") == "static":
+                # Existing signed locks remain reproducible; new monitor locks use source.
+                require(override.get("url") == f"https://pkgs.tailscale.com/stable/tailscale_{override['version']}_arm64.tgz",
+                        "Tailscale static URL must name the matching official ARM64 release archive")
+            else:
+                optional_package_module('tailscale_source').validate(override)
     return profile
 
 
@@ -357,14 +359,21 @@ def apply_overrides(lock, sdk, profile):
         target = sdk / "package/ax6000-overrides" / name
         require(not target.exists(), f"override directory already exists: {target}")
         if name == "tailscale":
-            require(override.get("artifact") == "static" and profile["firmware"]["architecture"].startswith("aarch64_"),
-                    "Tailscale static override requires the ARM64 profile")
+            require(profile["firmware"]["architecture"].startswith("aarch64_"), "Tailscale override requires the ARM64 profile")
+            if override.get("artifact") != "static":
+                optional_package_module('tailscale_source').validate(override)
             require((source.parent / "files/tailscale.init").is_file() and
                     (source.parent / "files/tailscale.conf").is_file(),
                     "pinned Tailscale service and config wrappers are required")
             target.mkdir(parents=True)
             shutil.copytree(source.parent / "files", target / "files", symlinks=True)
-            (target / "Makefile").write_text(static_tailscale_recipe(override))
+            if override.get("artifact") == "static":
+                (target / "Makefile").write_text(static_tailscale_recipe(override))
+            else:
+                helper = optional_package_module('tailscale_source')
+                (target / "Makefile").write_text(helper.recipe(override))
+                shutil.copyfile(Path(__file__).with_name('tailscale_source.py'), target / 'files/tailscale_source.py')
+                (target / 'files/source-lock.json').write_text(json.dumps(override, indent=2, sort_keys=True) + '\n')
             for link in (sdk / "package/feeds").glob("*/tailscale"):
                 require(link.is_symlink(), f"refusing to replace non-symlink feed package {link}")
                 link.unlink()

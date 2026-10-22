@@ -48,13 +48,13 @@ class MonitorTest(unittest.TestCase):
             path.write_text(json.dumps(profile))
             manifest = json.dumps({'TarballsVersion': '1.104.1',
                                   'Tarballs': {'arm64': 'tailscale_1.104.1_arm64.tgz'}}).encode()
-            with patch.object(self.module, 'fetch', side_effect=[manifest, b'a' * 64]):
+            with patch.object(self.module, 'fetch', return_value=manifest), patch.object(self.module, 'resolve_tailscale_source', return_value={'version':'1.104.1','artifact':'source-multicall-upx'}):
                 lock = self.module.resolve(path)
             self.assertEqual(lock['package_manager'], 'apk')
             self.assertEqual(lock['apk_key_sha256'], 'b' * 64)
             profile['apk_key_sha256'] = 'not-a-key-hash'
             path.write_text(json.dumps(profile))
-            with patch.object(self.module, 'fetch', side_effect=[manifest, b'a' * 64]):
+            with patch.object(self.module, 'fetch', return_value=manifest), patch.object(self.module, 'resolve_tailscale_source', return_value={'version':'1.104.1','artifact':'source-multicall-upx'}):
                 with self.assertRaisesRegex(ValueError, 'APK.*key'):
                     self.module.resolve(path)
 
@@ -86,7 +86,7 @@ class MonitorTest(unittest.TestCase):
             path = Path(directory) / 'profile.json'; path.write_text(json.dumps(profile))
             responses = [json.dumps({'TarballsVersion': '1.104.2', 'Tarballs': {
                 'arm64': 'tailscale_1.104.2_arm64.tgz'}}).encode(), ('a' * 64).encode()]
-            with patch.object(self.module, 'fetch', side_effect=responses), patch.object(
+            with patch.object(self.module, 'fetch', side_effect=responses), patch.object(self.module, 'resolve_tailscale_source', return_value={'version':'1.104.2','artifact':'source-multicall-upx'}), patch.object(
                     self.module.subprocess, 'run', side_effect=AssertionError('native lock must not query moving refs')), patch.object(
                     self.module, 'resolve_author_pbr', side_effect=author) as resolve:
                 lock = self.module.resolve(path, pinned_feeds=True)

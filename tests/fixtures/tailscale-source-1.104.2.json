@@ -1,0 +1,22 @@
+{
+  "artifact": "source-multicall-upx",
+  "commit": "e26db7a5797683ec99ad1516c40b628c7f2dfd71",
+  "go": {
+    "commit": "7ef7b403648ac3a9481a6e88e8b894eff50b0167",
+    "minimum_version": "1.27.3",
+    "sha256": "d7add016a4fa533fbd44e5ec07375c8c50f2a0afcc2ea7cc6fee3421488bd40c",
+    "size": 60236075,
+    "url": "https://github.com/tailscale/go/releases/download/build-7ef7b403648ac3a9481a6e88e8b894eff50b0167/linux-amd64.tar.gz",
+    "version": "1.27.3"
+  },
+  "sha256": "c3f179baa72216fff022ac2d816a8272d9847a29f5e159c4b9433f1b64c6a75a",
+  "upx": {
+    "commit": "b4bdabf638ab6e3715a292182a9c613a4716d7c5",
+    "sha256": "402162aad30af47e60dbd767fb2e64ca394ace9727ba1f40283641f1d1b91657",
+    "size": 664048,
+    "url": "https://github.com/upx/upx/releases/download/v5.2.1/upx-5.2.1-amd64_linux.tar.xz",
+    "version": "5.2.1"
+  },
+  "url": "https://codeload.github.com/tailscale/tailscale/tar.gz/e26db7a5797683ec99ad1516c40b628c7f2dfd71",
+  "version": "1.104.2"
+}

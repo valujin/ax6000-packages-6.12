@@ -37,6 +37,13 @@ def tailscale_artifact(manifest, checksum):
             'url':'https://pkgs.tailscale.com/stable/' + filename, 'sha256':digest.lower()}
 
 
+def resolve_tailscale_source(version):
+    spec = importlib.util.spec_from_file_location('_ax6000_tailscale_source', ROOT / 'scripts/tailscale_source.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.resolve(version)
+
+
 def resolve_feed(feed):
     url = feed['url']
     if not re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?', url):
@@ -88,7 +95,6 @@ def resolve(profile_path, pinned_feeds=False):
     version = manifest.get('TarballsVersion', '')
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('Invalid Tailscale release manifest')
-    checksum = fetch(f'https://pkgs.tailscale.com/stable/tailscale_{version}_arm64.tgz.sha256').decode()
     if pinned_feeds:
         # Native source patches and translation bytes must use the same reviewed
         # pins. Resolve PBR only after these pins are fixed, never reset afterwards.
@@ -100,7 +106,7 @@ def resolve(profile_path, pinned_feeds=False):
             'profile_sha256':hashlib.sha256(profile_path.read_bytes()).hexdigest(),
             'recipe_sha256':recipe_digest(), 'firmware':profile['firmware'],
             'sdk':profile['sdk'], 'feeds':feeds,
-            'tailscale':tailscale_artifact(manifest, checksum)}
+            'tailscale':resolve_tailscale_source(version)}
     manager = profile.get('package_manager', 'opkg')
     if manager not in ('opkg', 'apk'):
         raise ValueError('Unsupported package manager')
@@ -131,7 +137,7 @@ def main():
             out.write(f'changed={str(updated).lower()}\n')
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-            summary.write(f"Resolved Tailscale **{lock['tailscale']['version']}** (official ARM64 archive). "
+            summary.write(f"Resolved Tailscale **{lock['tailscale']['version']}** (full-feature source multicall + pinned Go/UPX). "
                           f'Source inputs changed: **{updated}**.\n\n')
             for name, pin in lock['feeds'].items():
                 summary.write(f'- `{name}`: `{pin}`\n')

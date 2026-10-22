@@ -1,0 +1,91 @@
+name: Verify reviewed compact Tailscale (no publication)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tailscale-compact-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare disposable host tools
+        run: |
+          cat > "$RUNNER_TEMP/Containerfile" <<'EOF'
+          FROM python@sha256:fbecd461fc72d21b2143c6eaba25143738079154a6d0ea3da3aec724f50eed4a
+          RUN apt-get update && apt-get install -y --no-install-recommends qemu-user ca-certificates file make xz-utils \
+              && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -f "$RUNNER_TEMP/Containerfile" -t ax6000-tailscale-probe "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/tailscale-output/artifact"
+          sudo chown -R 1000:1000 "$RUNNER_TEMP/tailscale-output"
+      - name: Compile the same reviewed source override helper
+        run: |
+          output="$RUNNER_TEMP/tailscale-output"
+          cid=$(docker create --name tailscale-compile --cpu-period 100000 --cpu-quota 400000 --cpuset-cpus 0-3 \
+            --memory 10g --memory-swap 10g --pids-limit 512 --user 1000:1000 --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/recipe,readonly" \
+            --mount "type=bind,source=$output,target=/out" --entrypoint python3 ax6000-tailscale-probe \
+            /recipe/scripts/tailscale_source.py verify-build --lock /recipe/tests/fixtures/tailscale-source-1.104.2.json \
+            --work /out/work --output /out/artifact/tailscale.multicall --jobs 4)
+          docker inspect "$cid" > "$output/artifact/compile-container.json"
+          python3 - "$output/artifact/compile-container.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))[0];h=x['HostConfig']
+          assert h['CpuPeriod']==100000 and h['CpuQuota']==400000 and h['CpusetCpus']=='0-3'
+          assert h['Memory']==10*1024**3 and h['MemorySwap']==h['Memory'] and h['PidsLimit']==512
+          assert x['Config']['User']=='1000:1000' and h['ReadonlyRootfs']
+          assert h['CapDrop']==['ALL'] and 'no-new-privileges' in h['SecurityOpt'] and not h['Privileged']
+          PY
+          docker start --attach "$cid"
+          docker inspect "$cid" > "$output/artifact/compile-container.json"
+          python3 - "$output/artifact/compile-container.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))[0]
+          assert x['State']['Status']=='exited' and x['State']['ExitCode']==0 and not x['State']['OOMKilled']
+          PY
+          cp tests/fixtures/tailscale-source-1.104.2.json "$output/artifact/source-lock.json"
+      - name: Run packed ARM64 CLI and private userspace daemon without network
+        run: |
+          output="$RUNNER_TEMP/tailscale-output"
+          cid=$(docker create --name tailscale-runtime --cpu-period 100000 --cpu-quota 100000 --cpuset-cpus 0 \
+            --memory 1g --memory-swap 1g --pids-limit 128 --network none --user 1000:1000 --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/recipe,readonly" \
+            --mount "type=bind,source=$output/artifact,target=/out" --entrypoint python3 ax6000-tailscale-probe \
+            /recipe/scripts/tailscale_probe.py --binary /out/tailscale.multicall --lock /out/source-lock.json --output /out/qemu-proof.json)
+          docker inspect "$cid" > "$output/artifact/runtime-container.json"
+          python3 - "$output/artifact/runtime-container.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))[0];h=x['HostConfig']
+          assert h['NetworkMode']=='none' and h['CpuQuota']==100000 and h['CpuPeriod']==100000
+          assert h['Memory']==1024**3 and h['MemorySwap']==h['Memory'] and h['PidsLimit']==128
+          assert h['CapDrop']==['ALL'] and 'no-new-privileges' in h['SecurityOpt'] and not h['Privileged']
+          assert x['Config']['User']=='1000:1000' and h['ReadonlyRootfs']
+          PY
+          docker start --attach "$cid"
+          docker inspect "$cid" > "$output/artifact/runtime-container.json"
+          python3 - "$output/artifact/runtime-container.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))[0]
+          assert x['State']['Status']=='exited' and x['State']['ExitCode']==0 and not x['State']['OOMKilled']
+          PY
+          # The unpacked comparison binary and private tool/module caches are not uploaded.
+          (cd "$output/artifact" && sha256sum tailscale.multicall *.json > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-full-feature-multicall-upx-verification
+          path: ${{ runner.temp }}/tailscale-output/artifact
+          if-no-files-found: error
+          retention-days: 7

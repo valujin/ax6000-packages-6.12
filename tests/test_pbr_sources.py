@@ -181,7 +181,7 @@ class PbrSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'links'):
             pbr.read_archive('pbr', changed, self.value, data)
 
-    def test_monitor_legacy_output_has_no_pbr_or_new_network_requests(self):
+    def test_monitor_legacy_output_has_no_pbr_network_requests(self):
         import monitor
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'profile.json'
@@ -190,10 +190,11 @@ class PbrSourceTests(unittest.TestCase):
                                   'commit': 'd' * 40}]}
             path.write_text(json.dumps(profile))
             with patch.object(monitor, 'fetch', side_effect=[json.dumps({'TarballsVersion': '1.104.2',
-                    'Tarballs': {'arm64': 'tailscale_1.104.2_arm64.tgz'}}).encode(), ('a' * 64).encode()]) as fetch:
+                    'Tarballs': {'arm64': 'tailscale_1.104.2_arm64.tgz'}}).encode()]) as fetch, patch.object(monitor, 'resolve_tailscale_source', return_value={'version':'1.104.2','artifact':'source-multicall-upx'}) as tailscale:
                 lock = monitor.resolve(path)
             self.assertNotIn('pbr', lock)
-            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(fetch.call_count, 1)
+            tailscale.assert_called_once_with('1.104.2')
 
     def test_prepare_integration_rejects_opt_in_without_complete_lock(self):
         import prepare
