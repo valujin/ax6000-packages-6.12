@@ -821,6 +821,41 @@ def restore_live_channels(state,profiles,repository,public_key,usign,work,*,apk=
     return result
 
 
+def cleanup_owned_workspace(work, owned):
+    """Remove only our fixed channel workspace, including read-only SDK directories."""
+    work, owned = Path(work), Path(owned)
+    if (owned.parent != work or owned.name not in {'build-' + c for c in CHANNELS}
+            or work.is_symlink() or any(p.is_symlink() for p in work.parents)):
+        raise ValueError('Refusing cleanup outside the owned channel workspace')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(work, flags)
+    try:
+        root = os.open(owned.name, flags, dir_fd=parent)
+        try:
+            device = os.fstat(parent).st_dev
+            def writable_directories(descriptor):
+                info = os.fstat(descriptor)
+                if info.st_uid != os.getuid() or info.st_dev != device:
+                    raise ValueError('Foreign owner/mount in owned cleanup workspace')
+                os.fchmod(descriptor, info.st_mode | 0o700)
+                with os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        child = os.open(entry.name, flags, dir_fd=descriptor)
+                        try:
+                            writable_directories(child)
+                        finally:
+                            os.close(child)
+            writable_directories(root)
+        finally:
+            os.close(root)
+        # fd-relative rmtree does not follow directory symlinks. No file chmods.
+        shutil.rmtree(owned.name, dir_fd=parent)
+    finally:
+        os.close(parent)
+
+
 def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,force=False,bootstrap=False,apk=None,apk_key=None,apk_public_key=None):
     work=fresh(work);output=fresh(output);signing_key(key,public_key);work.mkdir(parents=True)
     previous=fetch_live(site_url,repository,public_key,usign,work/'live',bootstrap=bootstrap)
@@ -843,10 +878,10 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
         try:
             subprocess.run(args,check=True)
             if profile.get('enabled') is not True:
-                print(f'{channel}: disabled; source monitoring completed');shutil.rmtree(owned);continue
+                print(f'{channel}: disabled; source monitoring completed');continue
             if old and cohort(read_json(old[0]/'channel/profile.json'))!=cohort(profile):raise ValueError('Daily generation migration refused')
             if old and read_json(lock)==read_json(old[0]/'channel/state/lock.json') and not force:
-                print(f'{channel}: unchanged');shutil.rmtree(owned);continue
+                print(f'{channel}: unchanged');continue
             if old is None:raise ValueError('Publish initial firmware generation and snapshot before enabling daily builds')
             apk_args=apk_publication_args(profile,apk,apk_key,apk_public_key)
             raw=owned/'raw'
@@ -865,12 +900,11 @@ def refresh(site_url,repository,profiles,work,key,public_key,usign,output,*,forc
             new=work/('new-restored-'+channel)
             restore_online(pointer,profile,repository,public_key,usign,new,**apk_options(apk))
             restored[channel]=(new,pointer);changed=True
-            # This fixed, newly created channel root is ours. Never remove source trees.
-            shutil.rmtree(owned)
         except (ValueError,OSError,subprocess.CalledProcessError) as error:
             failures.append(channel);print(f'{channel}: refresh failed: {error}')
-            # Hosted disk is bounded; an owned failed workspace can be discarded too.
-            shutil.rmtree(owned)
+        finally:
+            # Successful, skipped and failed builds have the same owned cleanup.
+            cleanup_owned_workspace(work, owned)
     if failures:
         summary=os.environ.get('GITHUB_STEP_SUMMARY')
         if summary:
