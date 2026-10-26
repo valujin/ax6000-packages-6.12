@@ -1,0 +1,8 @@
+{
+  "admin/network/ax6000-mesh": {
+    "title": "MediaTek Mesh",
+    "order": 25,
+    "action": { "type": "view", "path": "network/ax6000-mesh" },
+    "depends": { "acl": ["luci-app-ax6000-mesh"] }
+  }
+}

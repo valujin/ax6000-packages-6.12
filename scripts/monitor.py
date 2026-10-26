@@ -69,7 +69,8 @@ def recipe_digest():
     digest = hashlib.sha256()
     files = sorted([*ROOT.glob('scripts/*.py'), *ROOT.glob('scripts/*.sh'),
                     *ROOT.glob('.github/workflows/*.yml'),
-                    *(path for path in (ROOT / 'files/asu-client').rglob('*') if path.is_file())])
+                    *(path for path in (ROOT / 'files/asu-client').rglob('*') if path.is_file()),
+                    *(path for path in (ROOT / 'files/mediatek-mesh').rglob('*') if path.is_file())])
     for path in files:
         digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
         digest.update(path.read_bytes() + b'\0')

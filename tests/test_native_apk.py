@@ -75,6 +75,8 @@ class NativeApkPolicy(unittest.TestCase):
 
     def test_actual_source_configures_apk_without_asu_ib_or_cohort_before_feeds(self):
         profile = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended-new.json').read_text())
+        # This minimal source fixture isolates APK/no-ASU policy; mesh has its own pinned-source tests.
+        profile.pop('mediatek_mesh', None)
         lock = json.loads((ROOT / 'tests/fixtures/pbr-612-native-inputs.json').read_text())
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

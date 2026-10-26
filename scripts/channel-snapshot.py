@@ -142,6 +142,9 @@ def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_mi
         validate_asu_apk_migration(old,new)
         validate_migration_proof(old,new,migration_proof)
         return
+    if new.get('mediatek_mesh') is True:
+        validate_mesh_replacement(old, new)
+        return
     if new.get('exclude_asu') is True:
         validate_no_asu_replacement(old, new)
         return
@@ -155,6 +158,35 @@ def validate_generation_replacement(old,new,expected_build_id,*,allow_asu_apk_mi
         raise ValueError('Replacement changes image packages beyond removing Tailscale')
     if 'tailscale' not in new.get('packages',[]):
         raise ValueError('Replacement must retain the downloadable Tailscale package')
+
+
+def validate_mesh_replacement(old, new):
+    """Manual native replacement adding the reviewed vendor Mesh package set.
+
+    The caller still requires the authenticated predecessor build ID, a new SDK
+    and the normal signed native-generation evidence. Linux ABI, source, layout
+    and signing identity remain fixed; the new SDK supplies the matching vendor
+    driver and userspace ABI together.
+    """
+    mesh = module('mediatek_mesh')
+    no_asu = module('no_asu')
+    mesh.validate(new)
+    no_asu.validate(new)
+    if old.get('channel') != 'recommended' or old.get('package_manager') != 'apk' or 'imagebuilder' in new:
+        raise ValueError('MediaTek mesh requires a recommended APK native predecessor')
+    allowed = {'build_id', 'sdk', 'asu', 'imagebuilder', 'exclude_asu', 'mediatek_mesh', 'packages', 'image_packages'}
+    if ({k:v for k,v in old.items() if k not in allowed}
+            != {k:v for k,v in new.items() if k not in allowed}):
+        raise ValueError('MediaTek mesh changes source/kernel ABI/architecture/layouts or unrelated policy')
+    for field in ('packages', 'image_packages'):
+        before, after = old.get(field), new.get(field)
+        if not isinstance(before, list) or not isinstance(after, list) or len(set(after)) != len(after):
+            raise ValueError('Invalid MediaTek mesh package selection')
+        keep = [name for name in before if not no_asu.package(name)]
+        if set(after) != set(keep) | mesh.PACKAGES:
+            raise ValueError('MediaTek mesh changes packages beyond the reviewed mesh stack and ASU removal')
+        if [name for name in after if name not in mesh.PACKAGES] != [name for name in keep if name not in mesh.PACKAGES]:
+            raise ValueError('MediaTek mesh changes unrelated package selection order')
 
 
 def validate_no_asu_replacement(old, new):

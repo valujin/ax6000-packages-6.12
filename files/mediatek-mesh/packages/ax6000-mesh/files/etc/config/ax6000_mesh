@@ -1,0 +1,4 @@
+config mesh 'main'
+	option enabled '0'
+	option role 'controller'
+	option backhaul 'wired'

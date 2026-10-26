@@ -103,7 +103,17 @@
     "luci-i18n-amneziawg-ru",
     "geoip-shell",
     "geoview",
-    "geoipupdate"
+    "geoipupdate",
+    "wapp",
+    "1905daemon",
+    "libmapd",
+    "mapd",
+    "datconf",
+    "libkvcutil",
+    "ax6000-mesh",
+    "luci-app-ax6000-mesh",
+    "luci-i18n-ax6000-mesh-ru",
+    "kmod-mapfilter"
   ],
   "all_kmods": true,
   "build_source": {
@@ -125,7 +135,17 @@
     "luci-i18n-pbr-ru",
     "luci-app-package-manager",
     "luci-i18n-package-manager-ru",
-    "luci-i18n-amneziawg-ru"
+    "luci-i18n-amneziawg-ru",
+    "wapp",
+    "1905daemon",
+    "libmapd",
+    "mapd",
+    "datconf",
+    "libkvcutil",
+    "ax6000-mesh",
+    "luci-app-ax6000-mesh",
+    "luci-i18n-ax6000-mesh-ru",
+    "kmod-mapfilter"
   ],
   "luci_languages": [
     "ru"
@@ -143,5 +163,6 @@
   "apk_key_sha256": "279ea19b627e16d0807e099de8bd6cf8b69830281defa9bdb9e4ae96f5beb751",
   "pbr_source": "mossdef-stable",
   "vendor_country_db": true,
-  "exclude_asu": true
+  "exclude_asu": true,
+  "mediatek_mesh": true
 }

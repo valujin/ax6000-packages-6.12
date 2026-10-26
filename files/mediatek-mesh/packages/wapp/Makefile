@@ -1,0 +1,55 @@
+# Vendor SDK 20250408 components; see SOURCE-NOTICE for licensing evidence.
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=wappd
+PKG_VERSION:=3.0.2.0
+PKG_RELEASE:=1
+PKG_SOURCE_VERSION:=80ca5724
+PKG_SOURCE:=wappd-80ca5724.tar.bz2
+PKG_SOURCE_URL:=https://raw.githubusercontent.com/immortalwrt-mt798x/immortalwrt/a3f94baa4ea053130be796915ad9ff2fa5fcf567/dl
+PKG_HASH:=73fa8995533e701d3d5774faa92d274497f99e1a37c81ce445f25a959b4b7462
+PKG_BUILD_DIR:=$(BUILD_DIR)/wappd
+PKG_BUILD_DEPENDS:=mt_wifi datconf
+PKG_BUILD_PARALLEL:=0
+PKG_LICENSE:=Proprietary
+
+include $(INCLUDE_DIR)/package.mk
+include $(INCLUDE_DIR)/kernel.mk
+
+TARGET_CFLAGS += -DCONFIG_SUPPORT_OPENWRT -D_GNU_SOURCE -fcommon -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types
+MAKE_FLAGS += CONFIG_SUPPORT_OPENWRT=y CONFIG_MAP_R2_SUPPORT=y CONFIG_MAP_R3_SUPPORT=y CONFIG_MTK_MAP_R2_6E_SUPPORT=y CONFIG_MTK_MAP_R3_6E_SUPPORT=y CONFIG_MTK_DFS_SLAVE_SUPPORT=y
+
+define Package/wapp
+  SECTION:=net
+  CATEGORY:=Network
+  TITLE:=MediaTek wapp for the AX6000 vendor driver
+  DEPENDS:=+libgcc +kmod-mt_wifi +libkvcutil +libopenssl +libuci
+endef
+
+# The kernel-exported WAPP header is stale in the pinned firmware tree.
+# Read the actual compiled driver header into this package only.
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	echo "821fa92e0b2f044928af64e420a4f1735635e7567f312add971c9d715da13898  $(KERNEL_BUILD_DIR)/mt_wifi/mt_wifi/embedded/include/wapp/wapp_cmm_type.h" | sha256sum -c -
+	$(INSTALL_DIR) $(PKG_BUILD_DIR)/driver-uapi
+	$(CP) $(KERNEL_BUILD_DIR)/mt_wifi/mt_wifi/embedded/include/wapp/wapp_cmm_type.h $(PKG_BUILD_DIR)/driver-uapi/
+	$(CP) $(LINUX_DIR)/include/uapi/linux/wapp/mt_wlan_cmm_oid.h $(PKG_BUILD_DIR)/driver-uapi/
+endef
+
+TARGET_CFLAGS += -DASSOC_REQ_LEN_MAX=ASSOC_REQ_LEN
+MAKE_FLAGS += UAPD_INCLUDE_PATH=$(PKG_BUILD_DIR)/driver-uapi
+
+define Build/InstallDev
+	$(INSTALL_DIR) $(1)/usr/lib
+	$(CP) $(PKG_BUILD_DIR)/libwapp_usr_intf_client.a $(1)/usr/lib/
+endef
+
+define Package/wapp/install
+	$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/share/ax6000-mesh/vendor
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/wapp $(PKG_BUILD_DIR)/wappctrl $(1)/usr/bin/
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/config_and_icon_files/wapp_ap_ra0.conf $(PKG_BUILD_DIR)/config_and_icon_files/wapp_ap_rax0.conf $(1)/usr/share/ax6000-mesh/vendor/
+	$(INSTALL_DIR) $(1)/usr/share/licenses/wapp
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/LICENSE ./SOURCE-NOTICE $(1)/usr/share/licenses/wapp/
+endef
+
+$(eval $(call BuildPackage,wapp))

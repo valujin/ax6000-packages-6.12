@@ -33,6 +33,7 @@ import no_asu
 import package_format
 import apk_world
 import image_features
+import mediatek_mesh
 import host_apk_bundle
 
 PINS = {'recommended': 'ae65e1de69971b5a2e3cf7e39390ee93f274d488',
@@ -671,7 +672,7 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
         if package in VENDOR:
             require(found_modules > 0, 'Native vendor package has no inspected module: ' + package)
     native_translations = {}
-    for package in sorted(n for n in status if n.startswith('luci-i18n-pbr-') or n == 'luci-i18n-attendedsysupgrade-ru'):
+    for package in sorted(n for n in status if n.startswith('luci-i18n-pbr-') or n in ('luci-i18n-attendedsysupgrade-ru', 'luci-i18n-ax6000-mesh-ru')):
         native_control, payload = package_contents(ipks[package], payload=True, apk=apk)
         require(native_control == controls[package], 'Native translation package changed during image inspection')
         native_translations.update({path: data for path, data in payload.items() if path.endswith('.lmo')})
@@ -679,6 +680,16 @@ def inspect_root(root, layout, binary, profile, controls, ipks, expected_files,
         lambda path, cap: squash_read(binary, root, path, cap),
         lambda path, mode: require_mode(squash_read(binary, root, path, listing=True), path, mode),
         source=feature_source, native_translations=native_translations)
+    if profile.get('mediatek_mesh'):
+        payloads = {}
+        for package in sorted((mediatek_mesh.PACKAGES - {'kmod-mapfilter', 'datconf', 'libkvcutil',
+                              'luci-i18n-ax6000-mesh-ru'}) | {'mtwifi-cfg-ucode'}):
+            native_control, payload = package_contents(ipks[package], payload=True, apk=apk)
+            require(native_control == controls[package], 'Native MediaTek mesh package changed during image inspection')
+            payloads[package] = payload
+        feature_record['files'].update(mediatek_mesh.verify_payloads(profile, payloads,
+            lambda path, cap: squash_read(binary, root, path, cap),
+            lambda path, mode: require_mode(squash_read(binary, root, path, listing=True), path, mode)))
     return {'sha256': sha256(root), 'size': root.stat().st_size, 'squashfs_bytes_used': used,
             'installed_kernel': status['kernel'], 'installed_packages': sorted(status),
             'vendor_packages': sorted(VENDOR), 'ucode_packages': sorted(UCODE),
@@ -845,6 +856,9 @@ def inspect_sdk(archive, kernel, source, work, profile, native_controls=None, na
                 and baseline.get('source_commit') == profile['firmware']['commit']
                 and baseline.get('kernel_version') == profile['firmware']['kernel_version']
                 and baseline.get('architecture') == profile['firmware']['architecture'], 'APK SDK baseline cohort identity differs')
+        if profile.get('mediatek_mesh'):
+            require(baseline.get('mediatek_mesh') == mediatek_mesh.verify(profile, source, native=True),
+                    'APK SDK MediaTek mesh native provenance differs')
         tool = baseline.get('host_apk', {})
         host_apk_bundle.verify_records(tool, bundle_records, captured['staging_dir/host/bin/apk'])
         native_tool = regular(source / 'staging_dir/host/bin/apk', 64 * MIB)
@@ -1018,7 +1032,7 @@ def main(args):
     require((firmware.get('target'), firmware.get('subtarget'), firmware.get('architecture')) ==
             ('mediatek', 'filogic', 'aarch64_cortex-a53'), 'Profile target/architecture differs')
     approved = read_json(repo / 'profiles' / ('redmi-ax6000-612-' + channel + '-new.json'))
-    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source', 'asu', 'pbr_source', 'vendor_country_db', 'package_manager', 'apk_key_sha256', 'exclude_asu'):
+    for field in ('id', 'channel', 'packages', 'image_packages', 'package_only', 'luci_languages', 'publication', 'build_source', 'asu', 'pbr_source', 'vendor_country_db', 'package_manager', 'apk_key_sha256', 'exclude_asu', 'mediatek_mesh'):
         require(profile.get(field) == approved.get(field), 'Exported profile differs from reviewed recipe: ' + field)
     manager = package_format.manager(profile)
     apk = trusted_apk_argument(getattr(args, 'apk', None), raw) if manager == 'apk' else None
@@ -1077,6 +1091,9 @@ def main(args):
     require(devices == {('mediatek_filogic_DEVICE_' + d).encode() for d in DEVICES.values()}, 'Actual build selected other/missing devices')
     expected_files, fingerprint = repository_expected(repo, profile)
     feature_expected = image_features.expected(profile, lock, source=source)
+    if profile.get('mediatek_mesh'):
+        proof = mediatek_mesh.verify(profile, source, native=True)
+        require(manifest.get('mediatek_mesh') == proof, 'Exported MediaTek mesh native provenance differs')
     if profile.get("exclude_asu"):
         no_asu.validate(profile)
         no_asu.verify_config(config.decode())

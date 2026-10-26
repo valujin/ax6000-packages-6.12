@@ -1,0 +1,43 @@
+--- a/Makefile
++++ b/Makefile
+@@ -15,9 +15,9 @@
+ endif
+ 
+ ifndef CFLAGS
+-CFLAGS = -MMD -O2 -Wall -Werror -g
+-endif
+-CFLAGS += -Werror -Wall -g
++CFLAGS = -MMD -O2 -Wall  -g
++endif
++CFLAGS +=  -Wall -g
+ 
+ 
+ ifndef LDO
+--- a/mapd_i.h
++++ b/mapd_i.h
+@@ -1809,4 +1809,12 @@
+ 		struct assoc_mlo_ctrl_req_tlv **cli_assoc_mlo_control_tlv);
+ #endif /* CONFIG_MTK_MLO_API */
+ 
+-#endif
++/* SDK 20250408 AArch64 proprietary object ABI, checked against DWARF. */
++_Static_assert(sizeof(struct own_1905_device) == 342840, "mapd vendor device ABI mismatch");
++_Static_assert(sizeof(struct mapd_global) == 342960, "mapd vendor global ABI mismatch");
++_Static_assert(__builtin_offsetof(struct own_1905_device, dev_radio_info) == 0x508d8,
++               "mapd vendor client database ABI mismatch");
++_Static_assert(__builtin_offsetof(struct own_1905_device, DfsSlaveEn) == 0x53b0a,
++               "mapd vendor DFS ABI mismatch");
++
++#endif
+--- a/interface.h
++++ b/interface.h
+@@ -2123,4 +2123,9 @@
+ 	u8 status;
+ };
+ #endif
++/* Same wire records as the pinned WAPP driver header. */
++_Static_assert(sizeof(struct map_vendor_ie) == 26, "MAP uplink ABI mismatch");
++_Static_assert(sizeof(struct bss_info) == 126, "MAP scan ABI mismatch");
++_Static_assert(sizeof(struct wapp_scan_info) == 6, "MAP scan header ABI mismatch");
++
+ #endif /*INTERFACE_H*/

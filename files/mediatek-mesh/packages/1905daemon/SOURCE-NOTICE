@@ -1,0 +1,7 @@
+Source: https://github.com/immortalwrt-mt798x/immortalwrt/tree/a3f94baa4ea053130be796915ad9ff2fa5fcf567
+Archive: 1905daemon-35234223.tar.bz2
+SHA256: 82f7cc4ad5731e750f87c9a4ad19a39d2456bb8fec0cf79bf4b3f3ccb4f14795
+
+The source archive contains LICENSE with MediaTek proprietary boilerplate followed by an explicit BSD three-clause distribution grant. The complete upstream LICENSE is installed unchanged. Package metadata is deliberately conservative; this recipe does not infer rights for other archives.
+
+Local compatibility patches and packaging do not replace upstream notices.

@@ -1,0 +1,17 @@
+#!/bin/sh
+case "$1" in apply|disable) ;; *) exit 1 ;; esac
+umask 077
+operation=/var/run/ax6000-mesh-operation
+completed=0
+finish() {
+  if [ "$completed" != 1 ]; then
+    printf '%s\n' 'The mesh operation was interrupted.' > /var/run/ax6000-mesh-error
+  fi
+  rm -rf "$operation"
+}
+trap finish EXIT
+trap 'exit 1' HUP INT TERM
+if ! /usr/libexec/ax6000-mesh-control "$1" > "$operation/error" 2>&1; then
+  mv "$operation/error" /var/run/ax6000-mesh-error
+fi
+completed=1

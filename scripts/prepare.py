@@ -30,7 +30,7 @@ CHANNEL_SOURCES = {
 def optional_package_module(name):
     # prepare.py is also imported by filename from publication tools/tests.
     # Resolve the sibling explicitly instead of relying on global sys.path.
-    if name not in ('pbr_sources', 'vendor_country', 'asu_client', 'package_format', 'host_apk_bundle', 'tailscale_source', 'no_asu'):
+    if name not in ('pbr_sources', 'vendor_country', 'asu_client', 'package_format', 'host_apk_bundle', 'tailscale_source', 'no_asu', 'mediatek_mesh'):
         raise ValueError('Unsupported optional package module')
     spec = importlib.util.spec_from_file_location('_ax6000_' + name, Path(__file__).with_name(name + '.py'))
     module = importlib.util.module_from_spec(spec)
@@ -43,6 +43,8 @@ def pbr_source_module():
 
 
 def validate_package_hooks(profile):
+    if 'mediatek_mesh' in profile:
+        optional_package_module('mediatek_mesh').validate(profile)
     if 'exclude_asu' in profile:
         optional_package_module('no_asu').validate(profile)
     if 'vendor_country_db' in profile:
@@ -344,6 +346,8 @@ $(eval $(call BuildPackage,tailscale))
 def apply_overrides(lock, sdk, profile):
     """Copy a pinned recipe, never rewrite the feed or global Go compiler."""
     asu_policy = validate_package_hooks(profile)
+    if profile.get('mediatek_mesh'):
+        optional_package_module('mediatek_mesh').configure(profile, sdk, native=(sdk / '.git').exists())
     if 'pbr_source' in profile or 'pbr' in lock:
         pbr_source_module().apply(profile, lock, sdk)
     if profile.get('vendor_country_db') is True:
@@ -773,6 +777,8 @@ def close_native(profile, sdk):
 def verify_selection(profile, sdk):
     report = json.loads((sdk / "build-selection.json").read_text())
     config = (sdk / ".config").read_text()
+    if profile.get("mediatek_mesh"):
+        optional_package_module("mediatek_mesh").verify(profile, sdk, native=(sdk / ".git").exists())
     if profile.get("exclude_asu"):
         optional_package_module("no_asu").verify_config(config)
     if profile.get("channel") is not None:

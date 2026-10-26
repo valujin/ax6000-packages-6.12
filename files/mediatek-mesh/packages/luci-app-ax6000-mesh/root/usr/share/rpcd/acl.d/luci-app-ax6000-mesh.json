@@ -1,0 +1,7 @@
+{
+  "luci-app-ax6000-mesh": {
+    "description": "Configure and monitor MediaTek EasyMesh on AX6000",
+    "read": { "ubus": { "ax6000.mesh": ["status"] } },
+    "write": { "ubus": { "ax6000.mesh": ["configure", "apply", "pair", "disable"] } }
+  }
+}

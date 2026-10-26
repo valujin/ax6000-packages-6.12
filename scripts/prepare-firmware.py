@@ -19,6 +19,7 @@ import tempfile
 
 import prepare
 import no_asu
+import mediatek_mesh
 import firmware_layouts
 from publish import read_control
 
@@ -212,6 +213,7 @@ def configure(profile, lock, source):
         values.update(no_asu.symbols(config))
         no_asu.configure(profile, source)
     (source / ".config").write_text(set_symbols(config, values))
+    mediatek_mesh.configure(profile, source, native=True)
     if asu_policy(profile) is not None:
         sibling_module("asu_client").configure(profile, source)
 
@@ -230,6 +232,7 @@ def source_symbols(profile):
     disabled = {"iwinfo", "mtwifi-cfg", "apk", "apk-mbedtls"} | ({"opkg"} if apk else {"apk-openssl"})
     values = {"PACKAGE_" + name: "y" for name in installed}
     values.update({"PACKAGE_" + name: "n" for name in disabled})
+    values.update(mediatek_mesh.symbols(profile))
     values.update({"WIFI_SCRIPTS_UCODE": "y", "USE_APK": "y" if apk else "n", "CLEAN_IPKG": "n",
                    "TARGET_ROOTFS_SQUASHFS": "y", "TARGET_ROOTFS_INITRAMFS": "y",
                    "TARGET_ROOTFS_INITRAMFS_SEPARATE": "y", "TARGET_INITRAMFS_COMPRESSION_XZ": "y"})
@@ -946,6 +949,8 @@ def augment_sdk(profile, source, archive, controls, abi):
              if (source / "firmware-source-patches.json").is_file() else [],
              "frozen_kmods": sorted(frozen), "frozen_packages": sorted(frozen_packages),
              "refreshed_kmods": sorted(refreshed & built_modules), "files": files, **tool_manifest}
+        if profile.get("mediatek_mesh"):
+            baseline_manifest["mediatek_mesh"] = mediatek_mesh.verify(profile, source, native=True)
         baseline_bytes = (json.dumps(baseline_manifest, indent=2, sort_keys=True) + "\n").encode()
         (snapshot / "manifest.json").write_bytes(baseline_bytes)
         # Carry immutable images and build metadata into daily SDK exports. The SDK
@@ -1109,6 +1114,8 @@ def export(profile, lock, source, output):
     firmware_manifest = {"build_id": build_id, "kernel_version": abi, "recipe_commit": recipe_commit,
                          "source_commit": profile["firmware"]["commit"], "source_patches": report.get("source_patches", []),
                          "files": manifest}
+    if profile.get("mediatek_mesh"):
+        firmware_manifest["mediatek_mesh"] = mediatek_mesh.verify(profile, source, native=True)
     if profile.get("package_manager") == "apk":
         firmware_manifest.update({"package_manager": "apk", "apk_key_sha256": generated["apk_key_sha256"],
                                   "apk_world": report["apk_world"]})

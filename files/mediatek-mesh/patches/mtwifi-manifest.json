@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "source_commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+  "patch": "mtwifi-mesh.patch",
+  "sha256": "23d80c456ed86701181980be591370e81c3a64a7b3727519f4956c4c67cc0bf1",
+  "files": {
+    "package/mtk/applications/mtwifi-cfg-ucode/Makefile": {
+      "before_sha256": "e2adc9c633d68a8dce73c2392c736dd203b5b10c54dc84538dbc8e082952be98",
+      "after_sha256": "49ce5e0c05d698e2f6030f71f6020f15706f108da027503b7a75675b119a4d23"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.device.json": {
+      "before_sha256": "4aa89a92077ddbcb28d5c25f0fa3a29764f34cb351f8f465e06831e08f498579",
+      "after_sha256": "aab577a0bbf22efecb9021d9ab37366a3bf8a4e4f2d605026ad07171e9ab43c7"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.iface.json": {
+      "before_sha256": "39f744e16a86ddaea5e9c9b368511837008d794372c1d7e6302d7b9c368d1181",
+      "after_sha256": "6f449c8d033d0f49f013c03209ea2b4dbe7e5471268ba4313c622dc9b31c9dc9"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/dat-defs.json": {
+      "before_sha256": "4366a470ef05058471f9533e4d44a0f2b1f81f19e1c5771f35a7e982d896b48e",
+      "after_sha256": "18eecf5ee6170a1e2d4dca1e59ace3f8b2948a9c27d740c74b796b1eafe44d4c"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/converter.uc": {
+      "before_sha256": "ed47141b2769def53471a88109f05d6048fcd018124f9caf8b2a2926b39c2a52",
+      "after_sha256": "d7a7088390c9e6f7e56cf327a9c18b4c9eaa0428feeffa3ae1177cc1dc3c9374"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/config.uc": {
+      "before_sha256": "4cf8c0baea59e1ca9ce30ee9b09b5585dd0b7885deb4ea64d8d0de66a6fafc91",
+      "after_sha256": "b8d6e5240dfdb115005ce0dfe14c7662b0aa6c27426c95da06ac9c8925f9319d"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/driver.uc": {
+      "before_sha256": "50446f788cce69e88d01f567738dc8ace981b8eda6b988abad5e61f0ef4cc478",
+      "after_sha256": "71d06139cc324ee7a0a4468e374f9d9a42a1c11bdd6eabc12ad81aff3d95a33d"
+    },
+    "package/mtk/applications/mtwifi-cfg-ucode/files/lib/netifd/wireless/mtwifi.sh": {
+      "before_sha256": "de73e985df7ad2f28150f80aa85146f1bdc3dd0f3328079140dde6f86540b613",
+      "after_sha256": "5dd5a54d2c70ae769faa13439bdeb62384588217fe90b6db3db1bf73672ca345"
+    },
+    "package/mtk/drivers/mt_wifi/Makefile": {
+      "before_sha256": "d56b9ab58b50bde5bfe3de234c634b8d32f7ca31b7262ad789ec152fb6615253",
+      "after_sha256": "9edfebd4052a24968fb35d00837d4c6197e138087fd85cf56a75a0321b160ac4"
+    }
+  }
+}

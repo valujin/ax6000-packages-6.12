@@ -1,0 +1,77 @@
+#!/bin/sh
+. /usr/share/libubox/jshn.sh
+
+case "$1" in
+list)
+  echo '{"status":{},"configure":{"role":"String","backhaul":"String"},"apply":{},"pair":{},"disable":{}}'
+  ;;
+call)
+  method="$2"
+  case "$method" in
+    status)
+      enabled="$(uci -q get ax6000_mesh.main.enabled || echo 0)"
+      role="$(uci -q get ax6000_mesh.main.role || echo controller)"
+      backhaul="$(uci -q get ax6000_mesh.main.backhaul || echo wired)"
+      running=0
+      if /usr/libexec/ax6000-mesh-health; then running=1; fi
+      json_init
+      available=0
+      case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+        xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod)
+          if command -v wapp >/dev/null && command -v mapd >/dev/null && command -v p1905_managerd >/dev/null && /usr/libexec/ax6000-mesh-control abi; then available=1; fi ;;
+      esac
+      json_add_boolean ok 1
+      json_add_boolean available "$available"
+      json_add_boolean enabled "$enabled"
+      json_add_boolean running "$running"
+      json_add_string role "$role"
+      json_add_string backhaul "$backhaul"
+      if [ -f /var/run/ax6000-mesh-operation/state ]; then
+        state="$(cat /var/run/ax6000-mesh-operation/state)"
+      elif [ "$enabled" != 1 ]; then state=disabled; elif [ "$running" = 1 ]; then state=running; else state=stopped; fi
+      json_add_string state "$state"
+      if [ "$running" = 1 ]; then json_add_string detail 'Mesh service is responding.'; elif [ "$enabled" = 1 ]; then json_add_string detail 'Mesh service is not responding.'; else json_add_string detail 'Mesh is disabled.'; fi
+      if [ -s /var/run/ax6000-mesh-error ]; then
+        json_add_string error "$(head -c 512 /var/run/ax6000-mesh-error)"
+      fi
+      json_dump
+      ;;
+    configure)
+      if [ -d /var/run/ax6000-mesh-operation ]; then
+        json_init; json_add_boolean ok 0; json_add_string error 'Another mesh operation is in progress.'; json_dump; exit 0
+      fi
+      input="$(cat)"
+      json_load "$input" || exit 1
+      json_get_var role role
+      json_get_var backhaul backhaul
+      result="$(/usr/libexec/ax6000-mesh-control configure "$role" "$backhaul" 2>&1)" && ok=1 || ok=0
+      json_init; json_add_boolean ok "$ok"; [ "$ok" = 1 ] || json_add_string error "$result"; json_dump
+      ;;
+    apply|disable)
+      umask 077
+      if ! mkdir /var/run/ax6000-mesh-operation 2>/dev/null; then
+        json_init; json_add_boolean ok 0; json_add_string error 'Another mesh operation is in progress.'; json_dump; exit 0
+      fi
+      case "$method" in apply) state=applying ;; disable) state=disabling ;; esac
+      printf '%s\n' "$state" > /var/run/ax6000-mesh-operation/state
+      rm -f /var/run/ax6000-mesh-error
+      /etc/init.d/ax6000-mesh-operation stop >/dev/null 2>&1 || :
+      if /etc/init.d/ax6000-mesh-operation start >/dev/null 2>&1; then
+        json_init; json_add_boolean ok 1; json_add_string state "$state"; json_dump
+      else
+        rm -rf /var/run/ax6000-mesh-operation
+        json_init; json_add_boolean ok 0; json_add_string error 'Could not start the mesh operation.'; json_dump
+      fi
+      ;;
+    pair)
+      if [ -d /var/run/ax6000-mesh-operation ]; then
+        json_init; json_add_boolean ok 0; json_add_string error 'Another mesh operation is in progress.'; json_dump; exit 0
+      fi
+      result="$(/usr/libexec/ax6000-mesh-control pair 2>&1)" && ok=1 || ok=0
+      json_init; json_add_boolean ok "$ok"; [ "$ok" = 1 ] || json_add_string error "$result"; json_dump
+      ;;
+    *) exit 1 ;;
+  esac
+  ;;
+*) exit 1 ;;
+esac

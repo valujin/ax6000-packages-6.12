@@ -1,0 +1,82 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: ru\n"
+
+msgid "MediaTek Mesh"
+msgstr "MediaTek Mesh"
+
+msgid "The router did not complete the operation."
+msgstr "Роутер не завершил операцию."
+
+msgid "Main router (controller)"
+msgstr "Основной роутер (контроллер)"
+
+msgid "Additional node (agent)"
+msgstr "Дополнительный узел (агент)"
+
+msgid "Ethernet cable"
+msgstr "Кабель Ethernet"
+
+msgid "Wi-Fi"
+msgstr "Wi-Fi"
+
+msgid "Mesh is disabled"
+msgstr "Mesh выключен"
+
+msgid "Mesh services are running"
+msgstr "Службы Mesh запущены"
+
+msgid "Mesh services are not running"
+msgstr "Службы Mesh не запущены"
+
+msgid "Service status does not confirm that another node has joined. Check the additional node and its clients after pairing."
+msgstr "Статус служб не подтверждает подключение другого узла. После сопряжения проверьте дополнительный узел и его клиентов."
+
+msgid "Disable Mesh and restore Wi-Fi"
+msgstr "Выключить Mesh и восстановить Wi-Fi"
+
+msgid "Pair a node"
+msgstr "Добавить узел"
+
+msgid "Enable Mesh"
+msgstr "Включить Mesh"
+
+msgid "Unable to read Mesh status: "
+msgstr "Не удалось получить состояние Mesh: "
+
+msgid "Connect Redmi AX6000 routers running this firmware into one network using MediaTek EasyMesh."
+msgstr "Объедините роутеры Redmi AX6000 с нашей прошивкой в одну сеть с помощью MediaTek EasyMesh."
+
+msgid "Setup"
+msgstr "Настройка"
+
+msgid "Choose one main router. Set every other router to Additional node. Before enabling a node, disable its LAN DHCP server and assign it a unique management address in the main router’s network."
+msgstr "Выберите один основной роутер. На остальных выберите роль «Дополнительный узел». Перед включением узла отключите его DHCP-сервер LAN и задайте уникальный адрес управления в сети основного роутера."
+
+msgid "Role"
+msgstr "Роль"
+
+msgid "Connection between routers"
+msgstr "Соединение между роутерами"
+
+msgid "The main router uses its existing Wi-Fi names and passwords. Mesh controls radio settings while enabled. Enabling or disabling it briefly interrupts Wi-Fi; configure it over Ethernet."
+msgstr "Основной роутер использует текущие имена и пароли Wi-Fi. Пока Mesh включён, он управляет настройками радиомодулей. Включение и выключение кратковременно прерывает Wi-Fi — выполняйте настройку по кабелю."
+
+msgid "For Ethernet, connect LAN to LAN. For Wi-Fi, enable Mesh on both routers, then press Pair a node on both within two minutes. Keep the routers near each other for initial pairing."
+msgstr "Для кабельного соединения подключите LAN к LAN. Для Wi-Fi включите Mesh на обоих роутерах, затем нажмите «Добавить узел» на обоих в течение двух минут. При первом сопряжении расположите роутеры рядом."
+
+msgid "WAN, routing and firewall settings are preserved. Disable Mesh to restore the saved wireless configuration."
+msgstr "Настройки WAN, маршрутизации и межсетевого экрана сохраняются. При выключении Mesh восстанавливается сохранённая конфигурация беспроводной сети."
+
+msgid "Applying settings… Keep this page open."
+msgstr "Применяются настройки… Оставьте эту страницу открытой."
+
+msgid "Use one visible WPA2-PSK access point per band in LAN, with matching names and passwords. Disable separate 802.11r settings. On additional nodes, also disable IPv6 router advertisements and DHCPv6 serving."
+msgstr "В каждом диапазоне должна быть одна видимая точка WPA2-PSK в LAN, с одинаковыми именами и паролями. Отключите отдельную настройку 802.11r. На дополнительных узлах также отключите объявления IPv6 RA и сервер DHCPv6."
+
+msgid "Wi-Fi settings"
+msgstr "Настройки Wi-Fi"
+
+msgid "LAN and DHCP settings"
+msgstr "Настройки LAN и DHCP"

@@ -1,0 +1,7 @@
+Source: https://github.com/immortalwrt-mt798x/immortalwrt/tree/a3f94baa4ea053130be796915ad9ff2fa5fcf567
+Archive: mapd-6eca4331.tar.bz2
+SHA256: 39ab37cb347d372e352ade03181bc9c23429d4d849d32acbdff00973547d7e18
+
+No top-level LICENSE or COPYING is present in this source archive. Individual source files carry their original notices. mapd includes proprietary AArch64 algorithm object archives; public source availability does not establish a blanket redistribution grant. This recipe does not claim such a grant.
+
+Local compatibility patches and packaging do not replace upstream notices.

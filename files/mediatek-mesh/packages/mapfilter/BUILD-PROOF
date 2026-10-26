@@ -1,0 +1,51 @@
+Verified against the prepared recommended ImmortalWrt kernel 6.12.108.
+
+The active firmware source/build directories were read only. The isolated
+/tmp/ax6000-mapfilter-linux612 tree contains copied include/, arch/arm64/include/,
+scripts/, tools/include/, root/arch Makefiles, .config, Module.symvers and
+net/8021q/vlan.h. No existing service or network state was changed.
+
+Pristine source: mapfilter-96f2afed.tar.bz2 (PKG_HASH in Makefile).
+Source tree used for kernel metadata:
+/home/valuxin/dev/owrt/asu-pbr-db-2026-10-21/native612recommended-clean-warm-fork-v2/work/source/build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/linux-6.12.108
+Compiler: aarch64-openwrt-linux-musl-gcc (OpenWrt GCC 14.3.0).
+Build: nice -n 19 prlimit --as=2147483648 -- make -C <copied-kernel>
+       M=<patched-source> ARCH=arm64 CROSS_COMPILE=<toolchain-prefix>
+       CONFIG_SUPPORT_OPENWRT=y CONFIG_MAP_FILTER_SUPPORT=m -j1 modules
+Result: exit 0; all five C objects, composite object, modpost and mapfilter.ko
+completed. No unresolved symbols; all compiler diagnostics remain errors
+except the two explicitly disabled legacy prototype/declaration warnings.
+
+Final build output:
+make: Entering directory '/tmp/ax6000-mapfilter-linux612'
+  CC [M]  /tmp/ax6000-mapfilter-probe/mtkmapfilter.o
+  LD [M]  /tmp/ax6000-mapfilter-probe/mapfilter.o
+  MODPOST /tmp/ax6000-mapfilter-probe/Module.symvers
+  LD [M]  /tmp/ax6000-mapfilter-probe/mapfilter.ko
+make: Leaving directory '/tmp/ax6000-mapfilter-linux612'
+
+filename:       /tmp/ax6000-mapfilter-probe/mapfilter.ko
+license:        Dual BSD/GPL
+depends:
+name:           mapfilter
+vermagic:       6.12.108 SMP mod_unload aarch64
+
+Kernel .config SHA256: f245fc96a9db54159662d86f32e57e86a07106bd029719ad5bdb7af6581e552e
+Kernel Module.symvers SHA256: 405d5e270cb79b7e3acd8d8a0ec8b2c593f86d0a37342e3311a0e0f7ed8dcd41
+
+Module has no additional module dependencies with this recommended config.
+Required kernel symbols: CONFIG_MODULES=y, CONFIG_BRIDGE=y, CONFIG_NETFILTER=y,
+CONFIG_NETFILTER_FAMILY_BRIDGE=y, CONFIG_VLAN_8021Q=y. CONFIG_MAP_FILTER_SUPPORT=m
+is supplied to the external Kbuild rather than introduced into kernel Kconfig.
+
+Reproducible tests (tests/test_mesh_mapfilter.py):
+Set MAPFILTER_SOURCE_ARCHIVE to the pinned tar, MAPFILTER_KERNEL_DIR to an
+isolated prepared writable kernel metadata copy and CROSS_COMPILE to the
+aarch64 toolchain prefix; optionally set STAGING_DIR for the OpenWrt wrapper.
+Run python3 -m unittest discover -s tests -p test_mesh_mapfilter.py.
+Verified all 3 tests pass, including fresh extraction, zero-fuzz patch apply,
+passive load default and real serial cross-compile/link of the final patch.
+The source/kernel-dependent checks skip explicitly when inputs are absent.
+
+Limits: this validates source compatibility and linkage, not module loading
+on router hardware, daemon interoperation or wireless/bridge runtime behavior.

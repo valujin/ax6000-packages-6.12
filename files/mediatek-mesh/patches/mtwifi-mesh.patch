@@ -1,0 +1,1986 @@
+--- a/package/mtk/applications/mtwifi-cfg-ucode/Makefile
++++ b/package/mtk/applications/mtwifi-cfg-ucode/Makefile
+@@ -1,54 +1,54 @@
+ #
+ # This is free software, licensed under the GNU General Public License v2.
+ #
+ 
+ include $(TOPDIR)/rules.mk
+ 
+ PKG_NAME:=mtwifi-cfg-ucode
+ PKG_LICENSE:=GPL-2.0
+ PKG_VERSION:=3
+-PKG_RELEASE:=1
++PKG_RELEASE:=2
+ 
+ include $(INCLUDE_DIR)/package.mk
+ 
+ UCODE_DEPENDS:= \
+   +ucode \
+   +ucode-mod-fs \
+   +ucode-mod-log \
+   +ucode-mod-ubus \
+   +ucode-mod-uci \
+   +ucode-mod-datconf \
+   +ucode-mod-l1parser
+ 
+ define Package/mtwifi-cfg-ucode/Default
+   SECTION:=MTK Properties
+   CATEGORY:=MTK Properties
+   SUBMENU:=Applications
+   TITLE:=mtwifi configure scripts for mt798x (ucode)
+   CONFLICTS:=mtwifi-cfg
+ endef
+ 
+ define Package/mtwifi-cfg-ucode/description
+   New generation mtwifi configuration scripts powered by ucode.
+   Replaces the old Lua implementation.
+ endef
+ 
+ define Package/mtwifi-cfg-ucode
+   $(call Package/mtwifi-cfg-ucode/Default)
+   DEPENDS:=$(UCODE_DEPENDS) +wifi-scripts +iwinfo-ucode
+ endef
+ 
+ define Build/Prepare
+ endef
+ 
+ define Build/Configure
+ endef
+ 
+ define Build/Compile
+ endef
+ 
+ define Package/mtwifi-cfg-ucode/install
+ 	$(CP) ./files/* $(1)/
+ endef
+ 
+ $(eval $(call BuildPackage,mtwifi-cfg-ucode))
+\ No newline at end of file
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.device.json
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.device.json
+@@ -1,59 +1,68 @@
+ {
+     "description": "mtwifi device schema",
+     "type": "object",
+     "properties": {
++        "map_mode": {
++            "type": "number",
++            "enum": [0, 1],
++            "description": "MediaTek MAP disabled (0) or turnkey (1)"
++        },
++        "map_agent": {
++            "type": "boolean",
++            "description": "Let the MAP agent own provisioned AP and backhaul settings"
++        },
+         "band": {
+             "type": "string",
+             "description": "WiFi Band (2g, 5g, 6g)",
+             "enum": [
+                 "2g",
+                 "5g",
+                 "6g"
+             ]
+         },
+         "channel": {
+             "type": "string",
+             "description": "WiFi Channel (can be 'auto')"
+         },
+         "hwmode": {
+             "type": "string",
+             "description": "Hardware mode (e.g., 11a, 11g, 11ax)"
+         },
+         "htmode": {
+             "type": "string",
+             "description": "High Throughput Mode (e.g., HE160, HE80)"
+         },
+         "noscan": {
+             "type": "boolean",
+             "description": "Do not scan for overlapping BSSs in HT40+/- mode"
+         },
+         "txpower": {
+             "type": "number",
+             "description": "Transmission power (0-100)"
+         },
+         "beacon_int": {
+             "type": "number",
+             "description": "Beacon interval"
+         },
+         "mu_beamformer": {
+             "type": "boolean",
+             "description": "Enable MU-MIMO Beamformer"
+         },
+         "dbdc_main": {
+             "type": "boolean",
+             "description": "Is DBDC main card"
+         },
+         "whnat": {
+             "type": "boolean",
+             "description": "Enable WHNAT (Hardware NAT for WiFi)"
+         },
+         "country": {
+             "type": "string",
+             "description": "Country code (e.g., CN, US)"
+         },
+         "twt": {
+             "type": "string",
+             "description": "Target Wake Time support"
+         }
+     }
+ }
+\ No newline at end of file
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.iface.json
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.iface.json
+@@ -1,124 +1,129 @@
+ {
+     "description": "mtwifi interface schema",
+     "type": "object",
+     "properties": {
++        "map_bss_type": {
++            "type": "number",
++            "enum": [0, 32, 64, 96],
++            "description": "MAP AP role: none, fronthaul, backhaul, or both"
++        },
+         "mode": {
+             "type": "string",
+             "description": "Operation mode (ap, sta, etc.)"
+         },
+         "network": {
+             "type": "array",
+             "items": {
+                 "type": "string"
+             },
+             "description": "Network interface to attach to (e.g., lan)"
+         },
+         "encryption": {
+             "type": "string",
+             "description": "Encryption method (e.g., sae, psk2)"
+         },
+         "key": {
+             "type": "string",
+             "description": "Wireless password/key"
+         },
+         "ssid": {
+             "type": "string",
+             "description": "Service Set Identifier"
+         },
+         "bssid": {
+             "type": "string",
+             "description": "MAC address of the access point"
+         },
+         "bridge_isolate": {
+             "type": "boolean",
+             "description": "Enable bridge port isolation"
+         },
+         "tags": {
+             "type": "array",
+             "items": {
+                 "type": "string"
+             },
+             "description": "Interface tags"
+         },
+         "macfilter": {
+             "type": "string",
+             "enum": ["disable", "allow", "deny"],
+             "description": "MAC address filtering mode"
+         },
+         "maclist": {
+             "type": "array",
+             "items": {
+                 "type": "string"
+             },
+             "description": "List of MAC addresses for filtering"
+         },
+         "kicklow": {
+             "type": "string",
+             "description": "RSSI threshold to kick low signal clients"
+         },
+         "assocthres": {
+             "type": "string",
+             "description": "RSSI threshold for association"
+         },
+         "wpa_group_rekey": {
+             "type": "number",
+             "description": "WPA group rekey interval"
+         },
+         "frag": {
+             "type": "number",
+             "description": "Fragmentation threshold"
+         },
+         "rts": {
+             "type": "number",
+             "description": "RTS threshold"
+         },
+         "dtim_period": {
+             "type": "number",
+             "description": "DTIM period"
+         },
+         "wmm": {
+             "type": "boolean",
+             "description": "Enable WMM (Wi-Fi Multimedia)"
+         },
+         "hidden": {
+             "type": "boolean",
+             "description": "Hide SSID"
+         },
+         "isolate": {
+             "type": "boolean",
+             "description": "Isolate clients"
+         },
+         "ieee80211k": {
+             "type": "boolean",
+             "description": "Enable 802.11k support"
+         },
+         "mumimo_dl": {
+             "type": "boolean",
+             "description": "Enable MU-MIMO DL"
+         },
+         "mumimo_ul": {
+             "type": "boolean",
+             "description": "Enable MU-MIMO UL"
+         },
+         "ofdma_dl": {
+             "type": "boolean",
+             "description": "Enable OFDMA DL"
+         },
+         "ofdma_ul": {
+             "type": "boolean",
+             "description": "Enable OFDMA UL"
+         },
+         "amsdu": {
+             "type": "boolean",
+             "description": "Enable A-MSDU"
+         },
+         "autoba": {
+             "type": "boolean",
+             "description": "Enable Auto Block Ack"
+         },
+         "uapsd": {
+             "type": "boolean",
+             "description": "Enable U-APSD (WMM Power Save)"
+         }
+     }
+ }
+\ No newline at end of file
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/dat-defs.json
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/dat-defs.json
+@@ -1,132 +1,133 @@
+ {
+ 	"MAX_MBSSID": 16,
+ 	"MAX_ACL_ENTRY": 129,
+ 	"VIF_CFGS": {
+ 		"AuthMode": "OPEN",
+ 		"EncrypType": "NONE",
+ 		"PMFMFPC": "0",
+ 		"PMFMFPR": "0",
+ 		"PMFSHA256": "0",
+ 		"RekeyInterval": "3600",
+ 		"DefaultKeyID": "1",
+ 		"IEEE8021X": "0",
+ 		"Key1Type": "0",
+ 		"Key2Type": "0",
+ 		"Key3Type": "0",
+ 		"Key4Type": "0",
+ 		"PMKCachePeriod": "10",
+ 		"PreAuth": "0",
+ 		"RADIUS_Port": "1812",
+ 		"RADIUS_Server": "0",
+ 		"RekeyMethod": "DISABLE",
+ 		"session_timeout_interval": "0",
+ 		"Wapiifname": "",
+ 		"HideSSID": "0",
+ 		"WirelessMode": "",
+ 		"NoForwarding": "0",
+ 		"APSDCapable": "1",
+ 		"WmmCapable": "1",
+ 		"FragThreshold": "2346",
+ 		"RTSThreshold": "2347",
+ 		"HT_AMSDU": "1",
+ 		"HT_AutoBA": "1",
+ 		"HT_BAWinSize": "256",
+ 		"HT_GI": "1",
+ 		"HT_LDPC": "1",
+ 		"HT_OpMode": "0",
+ 		"HT_PROTECT": "1",
+ 		"HT_STBC": "1",
+ 		"IgmpSnEnable": "0",
+ 		"RRMEnable": "1",
+ 		"VHT_BW_SIGNAL": "0",
+ 		"VHT_LDPC": "1",
+ 		"VHT_SGI": "1",
+ 		"VHT_STBC": "1",
+ 		"MuMimoDlEnable": "0",
+ 		"MuMimoUlEnable": "0",
+ 		"MuOfdmaDlEnable": "1",
+ 		"MuOfdmaUlEnable": "1",
+ 		"DLSCapable": "0",
+ 		"WdsEnable": "0",
+ 		"WscConfMode": "0",
+ 		"TxRate": "0",
+ 		"DtimPeriod": "1"
+ 	},
+ 	"VIF_CFGS_IDX": {
+ 		"WPAPSK": "12345678",
+ 		"SSID": "",
+ 		"RADIUS_Key": ""
+ 	},
+ 	"VIF_ACL": {
+ 		"AccessPolicy": "0",
+ 		"AccessControlList": ""
+ 	},
+ 	"CHIP_CFGS": {
+ 		"beacon_int": [ "BeaconPeriod", "100" ],
+         "whnat": [ "WHNAT", "1" ]
+ 	},
+ 	"REINSTALL_CFGS": [
++		"MapMode",
+ 		"BssidNum",
+ 		"WHNAT",
+ 		"E2pAccessMode",
+ 		"HT_RxStream",
+ 		"HT_TxStream",
+ 		"WdsEnable"
+ 	],
+ 	"IWPRIV_AP_CFGS": {
+ 		"kicklow": [ "KickStaRssiLow", "0" ],
+         "assocthres": [ "AssocReqRssiThres", "0" ]
+ 	},
+ 	"ENC_2_DAT": {
+         "none": [ "OPEN", "NONE" ],
+         "sae": [ "WPA3PSK", "AES" ],
+         "sae-mixed": [ "WPA2PSKWPA3PSK", "AES" ],
+         "psk2+tkip+ccmp": [ "WPA2PSK", "TKIPAES" ],
+         "psk2+tkip+aes": [ "WPA2PSK", "TKIPAES" ],
+         "psk2+tkip": [ "WPA2PSK", "TKIP" ],
+         "psk2+ccmp": [ "WPA2PSK", "AES" ],
+         "psk2+aes": [ "WPA2PSK", "AES" ],
+         "psk2": [ "WPA2PSK", "AES" ],
+         "psk+tkip+ccmp": [ "WPAPSK", "AES" ],
+         "psk+tkip+aes": [ "WPAPSK", "AES" ],
+         "psk+tkip": [ "WPAPSK", "AES" ],
+         "psk+ccmp": [ "WPAPSK", "AES" ],
+         "psk+aes": [ "WPAPSK", "AES" ],
+         "psk": [ "WPAPSK", "AES" ],
+         "psk-mixed+tkip+ccmp": [ "WPAPSKWPA2PSK", "TKIPAES" ],
+         "psk-mixed+tkip+aes": [ "WPAPSKWPA2PSK", "TKIPAES" ],
+         "psk-mixed+tkip": [ "WPAPSKWPA2PSK", "TKIP" ],
+         "psk-mixed+ccmp": [ "WPAPSKWPA2PSK", "AES" ],
+         "psk-mixed+aes": [ "WPAPSKWPA2PSK", "AES" ],
+         "psk-mixed": [ "WPAPSKWPA2PSK", "AES" ],
+         "owe": [ "OWE", "AES" ]
+     },
+ 	"COUNTRY_REGIONS": {
+         "DB": [ 5, 13 ], "AE": [ 1, 0 ], "AL": [ 1, 0 ], "AR": [ 1, 3 ],
+         "AT": [ 1, 1 ], "AM": [ 1, 2 ], "AU": [ 1, 0 ], "AZ": [ 1, 2 ],
+         "BE": [ 1, 1 ], "BH": [ 1, 0 ], "BY": [ 1, 0 ], "BO": [ 1, 4 ],
+         "BR": [ 1, 1 ], "BN": [ 1, 4 ], "BG": [ 1, 1 ], "BZ": [ 1, 4 ],
+         "CA": [ 0, 0 ], "CH": [ 1, 1 ], "CL": [ 1, 0 ], "CN": [ 1, 0 ],
+         "CO": [ 0, 0 ], "CR": [ 1, 0 ], "CY": [ 1, 1 ], "CZ": [ 1, 2 ],
+         "DE": [ 1, 1 ], "DK": [ 1, 1 ], "DO": [ 0, 0 ], "DZ": [ 1, 0 ],
+         "EC": [ 1, 0 ], "EG": [ 1, 2 ], "EE": [ 1, 1 ], "ES": [ 1, 1 ],
+         "FI": [ 1, 1 ], "FR": [ 1, 1 ], "GE": [ 1, 2 ], "GB": [ 1, 1 ],
+         "GR": [ 1, 1 ], "GT": [ 0, 0 ], "HN": [ 1, 0 ], "HK": [ 1, 0 ],
+         "HU": [ 1, 1 ], "HR": [ 1, 2 ], "IS": [ 1, 1 ], "IN": [ 1, 0 ],
+         "ID": [ 1, 4 ], "IR": [ 1, 4 ], "IE": [ 1, 1 ], "IL": [ 1, 0 ],
+         "IT": [ 1, 1 ], "JP": [ 1, 9 ], "JO": [ 1, 0 ], "KP": [ 1, 5 ],
+         "KR": [ 1, 5 ], "KW": [ 1, 0 ], "KZ": [ 1, 0 ], "LB": [ 1, 0 ],
+         "LI": [ 1, 1 ], "LT": [ 1, 1 ], "LU": [ 1, 1 ], "LV": [ 1, 1 ],
+         "MA": [ 1, 0 ], "MC": [ 1, 2 ], "MO": [ 1, 0 ], "MK": [ 1, 0 ],
+         "MX": [ 0, 0 ], "MY": [ 1, 0 ], "NL": [ 1, 1 ], "NO": [ 0, 0 ],
+         "NZ": [ 1, 0 ], "OM": [ 1, 0 ], "PA": [ 0, 0 ], "PE": [ 1, 4 ],
+         "PH": [ 1, 4 ], "PL": [ 1, 1 ], "PK": [ 1, 0 ], "PT": [ 1, 1 ],
+         "PR": [ 0, 0 ], "QA": [ 1, 0 ], "RO": [ 1, 0 ], "RU": [ 1, 0 ],
+         "SA": [ 1, 0 ], "SG": [ 1, 0 ], "SK": [ 1, 1 ], "SI": [ 1, 1 ],
+         "SV": [ 1, 0 ], "SE": [ 1, 1 ], "SY": [ 1, 0 ], "TH": [ 1, 0 ],
+         "TN": [ 1, 2 ], "TR": [ 1, 2 ], "TT": [ 1, 2 ], "TW": [ 0, 3 ],
+         "UA": [ 1, 0 ], "US": [ 0, 0 ], "UY": [ 1, 5 ], "UZ": [ 0, 1 ],
+         "VE": [ 1, 5 ], "VN": [ 1, 0 ], "YE": [ 1, 0 ], "ZA": [ 1, 1 ],
+         "ZW": [ 1, 0 ]
+     }
+ }
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/converter.uc
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/converter.uc
+@@ -1,380 +1,410 @@
+ /*
+  * Copyright (C) 2025  chasey-dev <ellenyoung0912@gmail.com>
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+  * the Free Software Foundation; either version 2 of the License, or
+  * (at your option) any later version.
+  *
+  * This program is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU General Public License for more details.
+  *
+  * You should have received a copy of the GNU General Public License
+  * along with this program; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+  */
+ 'use strict';
+ 
+ import { defs } from 'mtwifi.defaults';
+ import { set_indexed_value } from 'datconf';
+ 
+ // ==========================================
+ // Helper Functions
+ // ==========================================
+ 
+ // UCI bool => 0 / 1
+ // for null inputs that not set in UCI, return null
+ function strict_bool(val) {
+ 	if (val == null) return null;
+ 	if (val === true || val == "1" || val == 1) return "1";
+ 	return "0";
+ }
+ 
+ // extract idx from vif names
+ // e.g. ra0 -> 0, rax1 -> 1
+ function get_vif_idx(ifname) {
+ 	if (!ifname) return 0;
+ 	let m = match(ifname, /[0-9]+$/);
+ 	return m ? int(m[0]) : 0;
+ }
+ 
+ // calculate WirelessMode in DAT config
+ // Ref: 
+ // 9  = N/AC Mixed, 
+ // 15 = VHT/N Mixed,
+ // 16 = AX_24G,
+ // 17 = AX_5G,
+ // 18 = AX_6G
+ function calc_wireless_mode(band, htmode) {
+ 	// check htmode key
+ 	let is_ax = (index(htmode, "HE") == 0); // HE20, HE40, HE80...
+ 	
+ 	if (band == "2g") {
+ 		return is_ax ? 16 : 9;
+ 	} else if (band == "5g") {
+ 		return is_ax ? 17 : 15;
+ 	} else if (band == "6g") {
+ 		return 18;
+ 	}
+ 	return 9; // Fallback
+ }
+ 
+ // calculate bandwidth (HT_BW, VHT_BW)
+ function calc_bandwidth(htmode, noscan) {
+ 	let bw_match = match(htmode, /\d+/);
+ 	let width = bw_match ? bw_match[0] : "20";
+ 	
+ 	let res = { 
+ 		"HT_BW": "0", 
+ 		"VHT_BW": "0", 
+ 		"HT_BSSCoexistence": "1" 
+ 	};
+ 
+ 	if (width == "40") {
+ 		res.HT_BW = "1";
+ 		res.HT_BSSCoexistence = noscan ? "0" : "1";
+ 	} else if (width == "80") {
+ 		res.HT_BW = "1";
+ 		res.VHT_BW = "1";
+ 	} else if (width == "160") {
+ 		res.HT_BW = "1";
+ 		res.VHT_BW = "2";
+ 	}
+ 	// for 20MHz, keep default 0, 0
+ 	return res;
+ }
+ 
+ // ==========================================
+ // UCI config => DAT config
+ // ==========================================
+ 
++// Only an explicit turnkey agent yields provisioning ownership to wappd.
++export function is_map_agent(conf) {
++    return conf.map_mode == 1 && strict_bool(conf.map_agent) == "1";
++}
++
+ export function convert(uci_cfg) {
+ 	let dat = {};
+ 	let conf = uci_cfg.config || {}; // uci device config
+ 	let ifaces = uci_cfg.interfaces || {};
++
++    if (conf.map_mode != null) {
++        if (conf.map_mode != 0 && conf.map_mode != 1)
++            die("mtwifi: map_mode must be 0 or 1");
++        dat.MapMode = conf.map_mode == 1 ? "1" : "0";
++    }
++    for (let k, iface in ifaces) {
++        let role = iface.config.map_bss_type;
++        if (role != null && role != 0 && role != 32 && role != 64 && role != 96)
++            die("mtwifi: invalid map_bss_type");
++    }
+ 
+ 	// ------------------------------------------
+ 	// count vifs in UCI config
+ 	// ------------------------------------------
+     
+     let max_ap_idx = 0; // max AP index, 0 based for uci cfg
+ 	let ap_count = 0;   // total AP count
+ 	let has_apcli = false; // ApCli flag, ApCli appears in per DEVICE
+ 
+ 	for (let k, iface in ifaces) {
+ 		let c = iface.config;
+ 		if (c.mode == "ap") {
+ 			ap_count++;
+ 			let idx = get_vif_idx(iface.mtwifi_ifname);
+ 			if (idx > max_ap_idx) max_ap_idx = idx;
+ 		} else if (c.mode == "sta") {
+ 			has_apcli = true;
+ 		}
+ 	}
+ 
+ 	// a little tricky here:
+ 	// BssidNum is how many SSIDs enabled, we assume that vifs were initialized by BssidNum
+ 	// so we set BssidNum = max ap index + 1
+ 	let bssid_count = (ap_count > 0) ? (max_ap_idx + 1) : 1;
+ 	dat.BssidNum = bssid_count;
+ 
+     // ------------------------------------------
+ 	// global radio config in current DEVICE 
+ 	// ------------------------------------------
+ 	
+ 	// WirelessMode + BandWidth
+ 	let bw_res = calc_bandwidth(conf.htmode, conf.noscan);
+ 	dat.HT_BW = bw_res.HT_BW;
+ 	dat.VHT_BW = bw_res.VHT_BW;
+ 	dat.HT_BSSCoexistence = bw_res.HT_BSSCoexistence;
+ 	
+ 	// calculate wireless mode
+ 	let wmode_int = calc_wireless_mode(conf.band, conf.htmode);
+ 	dat.WirelessMode = wmode_int;
+ 	let is_ax = (wmode_int >= 16); // for TWT checking, etc.
+ 
+ 	// Channel, check auto or not
+ 	if (conf.channel == "auto") {
+ 		dat.AutoChannelSelect = "3";
+ 		dat.Channel = "0";
+ 	} else {
+ 		dat.AutoChannelSelect = "0";
+ 		dat.Channel = conf.channel;
+ 	}
+ 
+ 	// CountryRegion code
+ 	if (conf.country && length(conf.country) == 2) {
+ 		dat.CountryCode = conf.country;
+ 		let regions = defs.COUNTRY_REGIONS[conf.country] || [1, 0];
+ 		if (conf.band == "2g") {
+ 			dat.CountryRegion = regions[0];
+ 		} else {
+ 			dat.CountryRegionABand = regions[1];
+ 		}
+ 	}
+ 
+ 	// TXPower
+ 	let txp = int(conf.txpower);
+ 	if (txp && txp < 100) {
+ 		dat.PERCENTAGEenable = "1";
+ 		dat.TxPower = txp;
+ 	} else {
+ 		dat.PERCENTAGEenable = "0";
+ 		dat.TxPower = "100";
+ 	}
+ 
+ 	// Beamforming
+ 	if (conf.mu_beamformer) {
+ 		dat.ETxBfEnCond = "1";
+ 		dat.ITxBfEn = "0";
+ 		// MUTxRxEnable set to 3 if has an apcli
+ 		dat.MUTxRxEnable = has_apcli ? "3" : "1";
+ 	} else {
+ 		dat.ETxBfEnCond = "0";
+ 		dat.MUTxRxEnable = "0";
+ 		dat.ITxBfEn = "0";
+ 	}
+ 
+     // TWT, ALWAYS set to 0 for NON AX devices
+ 	dat.TWTSupport = (is_ax && conf.twt) ? conf.twt : "0";
+ 
+ 	// chip-wide cfgs
+ 	// for DBDC cards, only set for main DEVICE
+ 	// TODO: need to handle logic for non-DBDC cards
+ 	if (conf.dbdc_main) {
+ 		for (let k, v in defs.CHIP_CFGS) {
+ 			let uci_key = k;
+ 			let dat_key = v[0];
+ 			let def_val = v[1];
+ 			// priority: uci_key, default value
+ 			dat[dat_key] = conf[uci_key] || def_val;
+ 		}
+ 	}
+ 
+ 	// ------------------------------------------
+ 	// APCLI (Client/STA)
+ 	// ------------------------------------------
+ 	
+ 	// set ApCliEnable to 0 first
+ 	dat.ApCliEnable = "0";
+ 
+ 	// clear old ApCli settings
+ 	let apcli_reset_keys = ["ApCliSsid", "ApCliBssid", "ApCliAuthMode", "ApCliEncrypType", "ApCliWPAPSK"];
+ 	for (let k in apcli_reset_keys) dat[k] = "";
+ 
+ 	if (has_apcli) {
+ 		for (let k, iface in ifaces) {
+ 			let c = ifaces[k].config;
+ 			if (c.mode == "sta") {
+ 				dat.ApCliEnable = c.disabled ? "0" : "1";
+ 				dat.ApCliSsid = c.ssid;
+ 				dat.ApCliBssid = c.bssid;
+ 				dat.ApCliWPAPSK = c.key;
+ 
+ 				// uci encryption mode => DAT cfg 
+ 				let enc_info = defs.ENC_2_DAT[c.encryption];
+ 				if (enc_info) {
+ 					dat.ApCliAuthMode = enc_info[0];
+ 					dat.ApCliEncrypType = enc_info[1];
+ 					
+ 					// APCLI PMF
+ 					if (enc_info[0] == "OWE" || enc_info[0] == "WPA3PSK") {
+ 						dat.ApCliPMFMFPC = "1";
+ 						dat.ApCliPMFMFPR = "1";
+ 						dat.ApCliPMFSHA256 = "0";
+ 					} else {
+ 						dat.ApCliPMFMFPC = "0";
+ 						dat.ApCliPMFMFPR = "0";
+ 					}
+ 				}
+ 				break; // only ONE ApCli supported for each device
+ 			}
+ 		}
+ 	}
+ 
+ 	// ------------------------------------------
+ 	// vif => AP setting, set defaults first
+ 	// ------------------------------------------
+ 
+ 	// in DAT config, driver expect setting patterns like "1;1;0" for cfgs except suffix-key cfgs
+ 	// we set default strings for each Bssid
+ 	
+ 	// set default vif cfgs
+ 	for (let k, v in defs.VIF_CFGS) {
+ 		let default_str = "";
+ 		for (let i = 0; i < bssid_count; i++) {
+ 			default_str = set_indexed_value(default_str, i, v);
+ 		}
+ 		dat[k] = default_str;
+ 	}
+ 
+ 	// set default ACL cfgs
+ 	for (let k, v in defs.VIF_ACL) {
+ 		for (let i = 0; i < defs.MAX_MBSSID; i++) {
+ 			dat[`${k}${i}`] = v;
+ 		}
+ 	}
+ 
+ 	// clear suffix-key cfgs
+ 	// like SSIDx, WPAPSKx
+ 	// refer to schema/mtwifi/dat-defs.json
+ 	for (let k, v in defs.VIF_CFGS_IDX) {
+ 		for (let i = 1; i <= defs.MAX_MBSSID; i++) {
+ 			dat[`${k}${i}`] = "";
+ 		}
+ 	}
+ 
+ 	// ------------------------------------------
+ 	// vif => AP setting, set AP setting for every vif
+ 	// ------------------------------------------
+ 
+ 	for (let k, iface in ifaces) {
+ 		let c = ifaces[k].config;
+ 		if (c.mode != "ap") continue;
+ 
+ 		// get vif index from name
+ 		let vif_idx = get_vif_idx(iface.mtwifi_ifname);
+ 
+ 		// Suffix Key Setting:
+ 		// here SSIDx is 1-based, so SSIDx = vif_idx + 1
+ 		// ra0 (0) -> SSID1
+ 		// ra1 (1) -> SSID2
+ 		let suffix_key_idx = vif_idx + 1;
+ 		
+ 		// Suffix-key cfg setting helper function
+ 		// only set when UCI cfg exists, keep DAT default in other cases
+ 		// like SSIDx, WPAPSKx, they are filled with single values
+ 		let set_suffix = function(key, val) {
+ 			if (val != null) {
+ 				dat[`${key}${suffix_key_idx}`] = val;
+ 			}
+ 		};
+ 
+ 		// common Token cfg setting helper function
+ 		// only set when UCI cfg exists, keep DAT default in other cases
+ 		// sets dat[key] value of current k (also ap_idx)
+ 		// e.g. 12;17;26, sets 17 when k = 1, also now ap_idx = 1
+ 		let set_token = function(key, val) {
+ 			if (val != null) {
+ 				dat[key] = set_indexed_value(dat[key], vif_idx, val);
+ 			}
+ 		};
+ 
+ 		// set suffix-key settings
+ 		set_suffix("SSID", c.ssid);
+ 		set_suffix("WPAPSK", c.key);
+ 
+ 		// base cfgs
+         set_token("WirelessMode", wmode_int); // here WirelessMode is set twice, we keep it for safety
+ 		set_token("NoForwarding", strict_bool(c.isolate));
+ 		set_token("HideSSID", strict_bool(c.hidden));
+ 		set_token("WmmCapable", strict_bool(c.wmm));
+ 		set_token("APSDCapable", strict_bool(c.uapsd));
+ 		set_token("RTSThreshold", c.rts);
+ 		set_token("FragThreshold", c.frag);
+ 		set_token("DtimPeriod", c.dtim_period);
+ 		set_token("RekeyInterval", c.wpa_group_rekey);
+ 
+ 		// 802.11k/v/w
+ 		set_token("RRMEnable", strict_bool(c.ieee80211k));
+ 		
+ 		// HT settings
+ 		set_token("HT_AMSDU", strict_bool(c.amsdu));
+ 		set_token("HT_AutoBA", strict_bool(c.autoba));
+ 		// for BAWinSize: AX Mode: 256, Non-AX Mode: 64
+ 		set_token("HT_BAWinSize", is_ax ? "256" : "64");
+ 		
+ 		// MU-MIMO / OFDMA
+ 		set_token("MuMimoDlEnable", strict_bool(c.mumimo_dl));
+ 		set_token("MuMimoUlEnable", strict_bool(c.mumimo_ul));
+ 		set_token("MuOfdmaDlEnable", strict_bool(c.ofdma_dl));
+ 		set_token("MuOfdmaUlEnable", strict_bool(c.ofdma_ul));
+ 
+ 		// AuthMode + EncrypType
+ 		let enc_def = defs.ENC_2_DAT[c.encryption] || ["OPEN", "NONE"];
+ 		let authmode = enc_def[0];
+ 		set_token("AuthMode", authmode);
+ 		set_token("EncrypType", enc_def[1]);
+ 
+ 		// AP PMF
+ 		if (authmode == "OWE" || authmode == "WPA3PSK") {
+ 			set_token("PMFMFPC", "1");
+ 			set_token("PMFMFPR", "1");
+ 			set_token("PMFSHA256", "0");
+ 		} else if (authmode == "WPA2PSKWPA3PSK") {
+ 			set_token("PMFMFPC", "1");
+ 			set_token("PMFMFPR", "0");
+ 			set_token("PMFSHA256", "0");
+ 		} else {
+ 			// NOTE:
+ 			// in VIF_CFGS defaults, they were set to 0
+ 			// override to 0 if there are special cases
+ 		}
+ 
+         // RekeyMethod
+ 		if (authmode != "OPEN" && authmode != "OWE") {
+ 			set_token("RekeyMethod", "TIME");
+ 		}
+ 
+ 		// ACL (MAC Filter)
+ 		// ap_idx -> AccessPolicyx
+ 		// e.g. AccessPolicy0, AccessPolicy1...
+ 		if (c.macfilter == "allow") {
+ 			dat[`AccessPolicy${vif_idx}`] = "1";
+ 		} else if (c.macfilter == "deny") {
+ 			dat[`AccessPolicy${vif_idx}`] = "2";
+ 		} else {
+ 			dat[`AccessPolicy${vif_idx}`] = "0";
+ 		}
+ 
+ 		if (c.maclist && length(c.maclist) > 0) {
+ 			// MAC addrs should be like "MAC1;MAC2;MAC3"
+ 			// TODO: maybe we should handle distinct logic here?
+ 			dat[`AccessControlList${vif_idx}`] = join(";", c.maclist);
+ 		}
+ 	}
+ 
++    if (is_map_agent(conf)) {
++        // wappd wifi_config_save persists provisioned AP credentials and channel
++        // in DAT.  Omit these writes so config.setup's merge retains that state.
++        // Backhaul enrollment belongs to mapd_user.cfg; wappd reapplies it after
++        // Wi-Fi reload.  Never replace it with stale UCI APCLI credentials.
++        for (let k in keys(dat)) {
++            if (match(k, /^ApCli/) || match(k, /^(SSID|WPAPSK)[0-9]+$/) ||
++                index(["AuthMode", "EncrypType", "HideSSID", "PMFMFPC", "PMFMFPR",
++                       "PMFSHA256", "RekeyMethod", "RekeyInterval", "WscConfMode",
++                       "Channel", "AutoChannelSelect"], k) >= 0)
++                delete dat[k];
++        }
++    }
++
+ 	return dat;
+ };
+\ No newline at end of file
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/config.uc
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/config.uc
+@@ -1,268 +1,270 @@
+ /*
+  * Copyright (C) 2025  chasey-dev <ellenyoung0912@gmail.com>
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+  * the Free Software Foundation; either version 2 of the License, or
+  * (at your option) any later version.
+  *
+  * This program is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU General Public License for more details.
+  *
+  * You should have received a copy of the GNU General Public License
+  * along with this program; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+  */
+ 'use strict';
+ 
+ import * as datconf from 'datconf';
+ import { defs } from 'mtwifi.defaults';
+ import { log } from 'mtwifi.utils';
+ import * as driver from 'mtwifi.driver';
+ import * as converter from 'mtwifi.converter';
+ 
+ function get_sibling_devs(my_devname, all_devnames) {
+     let sib_devnames = [];
+ 
+     // extract prefix
+     // regex logic: extract pattern like: ChipName_MainIdx
+     // e.g. "MT7981_1_1" => "MT7981_1"
+ 	// parts = [raw_str, prefix]
+     let parts = match(my_devname, /^(.*)_\d+$/);
+ 
+     if (!parts) return [];
+     let prefix = parts[1];
+ 
+     // regex expressions to match sibling dev names
+     // starts with prefix e.g. "MT7981_1_", following with number
+     let sib_regex = regexp("^" + prefix + "_\\d+$");
+ 
+     for (let idx, devname in all_devnames) {
+         if (devname == my_devname) continue;
+ 
+         if (match(devname, sib_regex)) {
+             push(sib_devnames, devname);
+         }
+     }
+     return sib_devnames;
+ }
+ 
+ // sync chip config to sibling devs
+ function sync_chip_config(src_dat, sib_devnames, all_devs) {
+ 	for (let idx, devname in sib_devnames) {
+ 		let sib_info = all_devs[devname];
+ 
+ 		if (!sib_info.profile_path) continue;
+ 		let sib_dat = datconf.open(sib_info.profile_path);
+ 		if (sib_dat) {
+ 			let s_updates = {};
+ 			for (let k, v in defs.CHIP_CFGS) {
+ 				// v[0] for DAT key (e.g., WHNAT, BeaconPeriod)
+ 				let dat_key = v[0];
+ 				if (exists(src_dat, dat_key)) {
+ 					s_updates[dat_key] = src_dat[dat_key];
+ 					// log.debug(`[Sync] key to sync: ${dat_key}, src_dat val: ${src_dat[dat_key]}, s_updates val: ${s_updates[dat_key]}`);
+ 				}
+ 			}
+ 			log.debug(`[Sync] s_updates: keys_raw: ${s_updates}, len: ${length(s_updates)}`);
+ 			if (length(s_updates) > 0) {
+ 				log.info(`[Sync] Syncing chip configs to ${devname}`);
+ 				sib_dat.merge(s_updates);
+ 				sib_dat.commit();
+ 			}
+ 			sib_dat.close();
+ 		}
+ 	}
+ }
+ 
+ function check_prerequisite() {
+ 	return !driver.is_kmod();
+ }
+ 
+ function dat_diff(dat_old, dat_new) {
+ 	// prepare hashtable for O(1) lookups
+ 	let res = {
+ 		"is_changed" : false,
+ 		"need_reload": false
+ 	};
+ 
+ 	let reload_lookup = {};
+ 	for (let k in defs.REINSTALL_CFGS) reload_lookup[k] = true;
+ 
+ 	for (let k, v in dat_new) {
+ 		// k: DAT config key
+ 		// v: new DAT config of current key
+ 		if (v != dat_old[k]) {
+ 			res.is_changed = true;
+ 			// log.debug(`[dat_diff] Key changed: ${k} (${dat_old[k]} -> ${v})`);
+ 			if (reload_lookup[k]) {
+ 				res.need_reload = true;
+ 				log.notice(`[Reload Trigger] Key changed: ${k} (${dat_old[k]} -> ${v})`);
+ 				// we have collected all needed flags
+ 				break;
+ 			}
+ 		}
+ 	}
+ 	return res;
+ }
+ 
+ export function setup(uci_cfg, all_devs) {
+ 	// check prerequisites for driver setup
+ 	if (check_prerequisite()) return;
+ 
+ 	// get current dev name
+ 	let cur_devname = uci_cfg.device;
+ 	// get current dev object by dev name
+ 	let cur_dev = all_devs[cur_devname];
+ 
+ 	/*****    UCI CFG => DAT CFG   *******/
+ 	if (!cur_dev.profile_path) {
+ 		log.error(`[Main] Profile not found for ${cur_devname}`);
+ 		return;
+ 	}
+ 
+ 	let ctx = datconf.open(cur_dev.profile_path);
+ 	if (!ctx) {
+ 		log.error(`[Main] Unable to open profile path for ${cur_devname}`);
+ 		return;
+ 	}
+ 	// get old DAT config
+ 	let dat_old = ctx.getall();
+ 
+ 	// UCI config ==> new DAT config
+ 	let dat_new = converter.convert(uci_cfg);
+ 
+ 	/*****       SETTING VIFS     *******/
+ 
+ 	// prepare DAT diff result first
+ 	// netifd may skip UCI cfgs of disabled vif
+ 	// in hanwckf version, they hacked netifd with patches
+ 	// in our version, we read UCI cfg and compare with netifd parameter
+ 	let diff_res = dat_diff(dat_old, dat_new);
+ 	log.debug(`[Main] dat_diff: ${diff_res}`);
+ 
+ 	// collect down devs list
+ 	let down_devnames = [ cur_devname ];
+ 	
+ 	let is_dbdc = (index(cur_dev.profile_path, "dbdc") >= 0);
+ 	// only add sibling devs when DAT has changed
+ 	if (is_dbdc && diff_res.is_changed) {
+ 		// find sibling devs for current dev
+ 		let all_devnames = keys(all_devs);
+ 		let sib_devnames = get_sibling_devs(cur_devname, all_devnames);
+ 		log.debug(`[Main] Sibling devs of ${cur_devname} : ${sib_devnames}`);
+ 
+ 		// sync current chip config to other sibling devs
+ 		if (uci_cfg.config.dbdc_main) {
+ 			sync_chip_config(dat_new, sib_devnames, all_devs);
+ 		}
+ 		for (let devname in sib_devnames) push(down_devnames, devname);
+ 	}
+ 
+ 	// collect vifs needed to be restored
+ 	// if DAT is changed! => UP vifs of ALL sibling devs,
+ 	let restore_vifs = [];
+ 	for (let idx, devname in down_devnames) {
+ 		// skip current device in netifd context, vifs of which will be handled seperately
+ 		let need_restore = !(devname == cur_devname);
+ 		// scan UP vifs related to dev
+ 		let vifs = driver.scan_related_vifs(all_devs[devname]);
+ 		log.debug(`[Main] UP vifs related to ${devname}: ${vifs}, need restore: ${need_restore}`);
+ 		for (let vif in vifs) {
+ 			driver.ifdown(vif);
+ 			if (need_restore) push(restore_vifs, vif);
+ 		}
+ 	}
+ 
+ 	// commit converted DAT config
+ 	ctx.merge(dat_new);
+ 	ctx.commit();
+ 	ctx.close();
+ 	system("sync");
+ 
+ 	// reload driver if needed
+ 	if (diff_res.need_reload) {
+ 		driver.reload();
+ 	}
+ 	
+ 	// no matter if it is DBDC card, we assume ifup main_vif is time-costy
+ 	let main_vif = "";
+ 	if (is_dbdc) {
+ 		// concat main dev name: ChipName_ChipIndex_1
+ 		let main_devname = `${cur_dev.INDEX}_${cur_dev.mainidx}_1`;
+ 		main_vif = all_devs[main_devname].main_ifname;
+ 	} else {
+ 		main_vif = cur_dev.main_ifname;
+ 	}
+ 	let is_inited = driver.is_vif_inited(main_vif);
+ 
+ 	// post setup may need ~20s
+ 	// for DBDC cards, you need to init main dev first
+ 	if (is_dbdc && !is_inited) {
+ 		// just init main vif !
+ 		driver.init_dbdc_card(main_vif);
+ 	}
+ 
+ 	// set vifs in current cfg UP first
+ 	// implict trace in raw netifd parameter:
+ 	// DISABLED vifs are not contained in uci_cfg.interfaces
+ 	// uci_cfg.interfaces will be EMPTY when uci_cfg.disabled = true, that current dev is disabled
+ 	// current trace:
+ 	// we read UCI cfg and added disabled ifaces from caller script
+ 	for (let idx, iface in uci_cfg.interfaces) {
+ 		let vif = iface.mtwifi_ifname;
+ 		let vif_cfg = iface.config;
++        vif_cfg.map_mode = uci_cfg.config.map_mode;
++        vif_cfg.map_agent = converter.is_map_agent(uci_cfg.config);
+ 		log.debug(`[UCI] idx:${idx}, vif: ${vif}, disabled: ${vif_cfg.disabled ? true : false}, iface: ${iface}, iface cfg:${vif_cfg}`);
+ 
+ 		if (vif && !vif_cfg.disabled) {
+ 			driver.ifup(vif);
+ 			driver.apply_runtime_hooks(vif_cfg, vif);
+ 		}
+ 	}
+ 	
+ 	// for non DBDC cards, all set and return!
+ 	if (!is_dbdc) return;
+ 
+ 	// for DBDC cards, restore sibling devs
+ 	if (diff_res.need_reload) {
+ 		// in driver reload situation, 
+ 		// let another process to handle sib devs setup
+ 		for (let idx, devname in down_devnames) {
+ 			if (!(devname == cur_devname)) {
+ 				// use `&` symbol to run in the background,
+ 				// netifd may handle duplicated `wifi up [dev]` calls
+ 				// current lock context will not pass to it
+ 				system(`/sbin/wifi up ${devname} &`);
+ 			}
+ 		}
+ 	} else {
+ 		// in normal situation,
+ 		// for DBDC cards, restore vifs of sibling devs (if they were added before)
+ 		// just restore them in no need for reload situation
+ 		for (let vif in restore_vifs) {
+ 			log.notice(`[Main] Restoring sibling vif: ${vif}`);
+ 			driver.ifup(vif);
+ 
+ 			// for apcli vifs, do apcli triggers
+-			if (index(vif, "apcli") >= 0) {
++			if (index(vif, "apcli") >= 0 && !converter.is_map_agent(uci_cfg.config)) {
+ 				driver.trigger_apcli(vif);
+ 			}
+ 		}
+ 	}
+ };
+ 
+ export function down(cur_devname, all_devs) {
+ 	if(cur_devname) {
+ 		let cur_dev = all_devs[cur_devname];
+ 		let vifs = driver.scan_related_vifs(cur_dev);
+ 		for (let vif in vifs) driver.ifdown(vif);
+ 	} else {
+ 		// loop to DOWN all
+ 		for (let devname, dev in all_devs){
+ 			let vifs = driver.scan_related_vifs(dev);
+ 			for (let vif in vifs) driver.ifdown(vif);
+ 		}
+ 	}
+ };
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/driver.uc
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/driver.uc
+@@ -1,194 +1,200 @@
+ /*
+  * Copyright (C) 2025  chasey-dev <ellenyoung0912@gmail.com>
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+  * the Free Software Foundation; either version 2 of the License, or
+  * (at your option) any later version.
+  *
+  * This program is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU General Public License for more details.
+  *
+  * You should have received a copy of the GNU General Public License
+  * along with this program; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+  */
+ 'use strict';
+ 
+ import { log } from 'mtwifi.utils';
+ import { defs } from 'mtwifi.defaults';
+ import * as fs from 'fs';
+ 
+ // ==========================================
+ // iface Operations
+ // ==========================================
+ 
+ // timeout waiting for iface
+ export function wait_for_iface(ifname) {
+ 	if (!ifname) return false;
+ 	let max_retries = 20;
+ 
+ 	let sys_path = `/sys/class/net/${ifname}`;
+ 
+ 	for (let i = 0; i < max_retries; i++) {
+ 		if (fs.access(sys_path)) {
+ 			return true;
+ 		}
+ 		sleep(100);
+ 	}
+     log.error(`[Driver] Timeout waiting for ${ifname}`);
+ 	return false;
+ };
+ 
+ // set vif up
+ export function ifup(ifname) {
+ 	if (wait_for_iface(ifname)) {
+ 		system(`ifconfig ${ifname} up`);
+ 		log.notice(`[Driver] ifconfig up ${ifname}`);
+ 	}
+ };
+ 
+ // set vif down
+ export function ifdown(ifname) {
+ 	if (wait_for_iface(ifname)) {
+ 		system(`ifconfig ${ifname} down`);
+ 		log.notice(`[Driver] ifconfig down ${ifname}`);
+ 	}
+ };
+ 
+ // get port status
+ export function get_vif_status(ifname) {
+ 	let flags = fs.readfile(`/sys/class/net/${ifname}/flags`);
+ 	// return 1:UP, 0:DOWN / not exist
+ 	return (flags & 0x1);
+ };
+ 
+ // check if vif is inited
+ export function is_vif_inited(ifname){
+ 	let vif_path = `/sys/class/net/${ifname}/address`;
+ 	if (!fs.access(vif_path)) {
+ 		// stay true if not exist, to prevent later operations
+ 		log.error(`[Driver] is_vif_inited: ${ifname} not found!!!`);
+ 		return true;
+ 	}
+ 
+ 	let mac = trim(fs.readfile(vif_path));
+ 	let is_inited = mac && mac != "00:00:00:00:00:00";
+ 
+ 	log.debug(`[Driver] is_vif_inited: ${ifname}, mac: ${mac}, is_inited: ${is_inited}`);
+ 	return is_inited;
+ };
+ 
+ // scan all active vifs belongs to current device
+ // use to find vifs needed to be DOWN
+ export function scan_related_vifs(dev) {
+ 	let sys_ifs = fs.lsdir("/sys/class/net");
+ 	let targets = [];
+ 
+ 	// regex expressions:
+ 	// main_ifname (ra0) -> ^ra0$
+ 	// ext_ifname (ra)   -> ^ra[0-9]+$
+ 	// apcli_ifname (apcli) -> ^apcli[0-9]+$
+ 
+ 	let patterns = [];
+ 
+ 	if (dev.main_ifname)
+ 		push(patterns, regexp(`^${dev.main_ifname}$`));
+ 
+ 	if (dev.ext_ifname)
+ 		push(patterns, regexp(`^${dev.ext_ifname}[0-9]+$`));
+ 
+ 	if (dev.apcli_ifname) 
+ 		push(patterns, regexp(`^${dev.apcli_ifname}[0-9]+$`));
+ 
+ 	for (let ifname in sys_ifs) {
+ 		if (get_vif_status(ifname)) {
+ 			for (let pat in patterns) {
+ 				if (match(ifname, pat)) {
+ 					push(targets, ifname);
+ 					break;
+ 				}
+ 			}
+ 		}
+ 	}
+ 	return targets;
+ };
+ 
+ // ==========================================
+ // Driver Operations (modules / iwpriv)
+ // ==========================================
+ 
+ // ! this is DOWN sequence !
+ const DRIVERS = ["mtk_warp_proxy", "mtk_warp", "mt_wifi"];
+ 
+ // check if drivers were installed as modules
+ export function is_kmod() {
+ 	if (!fs.access(`/sys/module/mt_wifi`)) {
+ 		log.error(`[Driver] mt_wifi is buit-in. Install as kmod(s)!!`);
+ 		return false;
+ 	}
+ 
+ 	return true;
+ };
+ 
+ // hard reset driver modules
+ export function reload() {	
+ 	// uninstall
+ 	for (let drv in DRIVERS) system(`rmmod ${drv}`);
+ 	log.notice("[Driver] Removing Kernel Modules...");
+ 
+ 	sleep(2000);
+ 
+ 	// install
+ 	for (let drv in reverse(DRIVERS)) system(`modprobe ${drv}`);
+ 	log.notice("[Driver] Installing Kernel Modules...");
+ 
+ 	sleep(1000);
+ };
+ 
+ // iwpriv exec wrapper
+ export function exec_iwpriv(ifname, key, val) {
+ 	let cmd = `iwpriv ${ifname} set ${key}=${val}`;
+ 	log.debug(`[iwpriv] ${cmd}`);
+ 	system(cmd);
+ };
+ 
+ // trigger ApCli reconnect
+ export function trigger_apcli(ifname) {
+ 	exec_iwpriv(ifname, "ApCliEnable", "1");
+ 	exec_iwpriv(ifname, "ApCliAutoConnect", "3");
+ };
+ 
+ // ==========================================
+ // Special HW Logics
+ // ==========================================
+ 
+ // init DBDC main card
+ // in DBDC cards, init main card first,
+ // set main iface DOWN and UP
+ export function init_dbdc_card(ifname) {
+ 	log.notice(`[Driver] Init main vif of DBDC main card: ${ifname}...`);
+ 	ifup(ifname);
+ 	sleep(1000);
+ 	ifdown(ifname);
+ 	log.notice(`[Driver] Init main vif of DBDC main card done!!!`);
+ };
+ 
+ // apply runtime Hooks
+ // set iwpriv settings
+ export function apply_runtime_hooks(iface_cfg, mtwifi_ifname) {
+ 	switch(iface_cfg.mode) {
+ 		case "ap":
++            if (iface_cfg.map_mode == 1 && !iface_cfg.map_agent &&
++                iface_cfg.map_bss_type != null) {
++                let role = int(iface_cfg.map_bss_type);
++                exec_iwpriv(mtwifi_ifname, "fhbss", (role & 32) ? "1" : "0");
++                exec_iwpriv(mtwifi_ifname, "bhbss", (role & 64) ? "1" : "0");
++            }
+ 			for (let uci_k, v in defs.IWPRIV_AP_CFGS) {
+ 				// v[0]=cmd, v[1]=default
+ 				let val = iface_cfg[uci_k] || v[1];
+ 				exec_iwpriv(mtwifi_ifname, v[0], val);
+ 			}
+ 			break;
+ 		case "sta":
+-			trigger_apcli(mtwifi_ifname);
++			if (!iface_cfg.map_agent) trigger_apcli(mtwifi_ifname);
+ 			break;
+ 	}
+ };
+\ No newline at end of file
+--- a/package/mtk/applications/mtwifi-cfg-ucode/files/lib/netifd/wireless/mtwifi.sh
++++ b/package/mtk/applications/mtwifi-cfg-ucode/files/lib/netifd/wireless/mtwifi.sh
+@@ -1,290 +1,294 @@
+ #!/usr/bin/ucode
+ 
+ /*
+  * Copyright (C) 2025  chasey-dev <ellenyoung0912@gmail.com>
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+  * the Free Software Foundation; either version 2 of the License, or
+  * (at your option) any later version.
+  *
+  * This program is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU General Public License for more details.
+  *
+  * You should have received a copy of the GNU General Public License
+  * along with this program; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+  */
+ 
+ 'use strict';
+ 
+ import * as fs from 'fs';
+ import * as uci from 'uci';
+ import * as l1parser from 'l1parser';
+ 
+ import { schemas } from 'mtwifi.defaults';
+ import * as netifd from 'mtwifi.netifd';
+ import * as cfg from 'mtwifi.config';
+ import { log, with_lock } from 'mtwifi.utils';
+ 
+ const LOCK_FILE = "/var/lock/mtwifi.lock";
+ 
+ log.debug(`[Setup] received cmd ${ARGV}`);
+ 
+ let driver_name = ARGV[0];
+ let command = ARGV[1];
+ let cur_devname = ARGV[2];
+ let config_json_str = ARGV[3];
+ 
+ // for netifd script parsing
+ global.radio = cur_devname;
+ 
+ const types = {
+ 	"array": 1,
+ 	"string": 3,
+ 	"number": 5,
+ 	"boolean": 7,
+ };
+ 
+ // ==========================================
+ //              DUMP
+ // ==========================================
+ 
+ function dump_option(schema, key) {
+ 	// handle alias types
+ 	let _key = (schema[key].type == 'alias') ? schema[key].default : key;
+ 
+     // safety check: in case schema types were defined but not found in types const enum
+     let type_code = types[schema[_key].type];
+     if (!type_code) {
+         // fallback to 3
+         // TODO: maybe log with warnings?
+         type_code = 3; 
+     }
+ 
+ 	return [
+ 		key,
+ 		type_code
+ 	];
+ }
+ 
+ function dump_options() {
+ 	let dump = {
+ 		"name": "mtwifi", // driver name
+ 	};
+ 
+ 	for (let k, v in schemas) {
+ 		dump[k] = [];
+ 		for (let option in v){
+ 			push(dump[k], dump_option(v, option));
+         }
+ 	};
+ 
+ 	printf('%J\n', dump);
+ 
+     exit(0);
+ }
+ 
+ // ==========================================
+ //              SETUP
+ // ==========================================
+ function handle_setup(data) {
+     // we dont need to setup when device is disabled
+     if (data.config.disabled) {
+         // disable netifd retry 
+         netifd.set_retry(false);
+         return;
+     }
+ 
+     let l1 = l1parser.open();
+     
+     // get all devices from L1 Profile
+     let all_devs = l1.getall();
+     let cur_dev = all_devs[cur_devname];
+ 
+     if (!cur_dev) {
+         netifd.setup_failed("DEVICE_NOT_FOUND");
+         l1.close();
+         return;
+     }
+     // inject cur_devname into UCI cfg data
+     // UCI doesnt contain this key
+     data.device = cur_devname;
+     
+     /*****        ADD DISABLED VIFS CONFIG       *******/
+ 
+     // read UCI cfg
+     let cursor = uci.cursor();
+     cursor.load("wireless");
+ 
+     // build netifd ifaces projection
+     // ifname -> object
+     let netifd_ifaces = {};
+     for (let k, v in data.interfaces) {
+         if (v.name) netifd_ifaces[v.name] = v;
+     }
+ 
+     // rebuild ifaces object from read UCI cfg
+     let complete_ifaces = {};
+     let sort_idx = 1;
+ 
+     cursor.foreach("wireless", "wifi-iface", function(sec) {
+         // skip iface that doesnt belong to cur dev
+         if (sec.device != cur_devname) return;
+ 
+         // generate ordered keys (01, 02, 03...)
+         let key = sprintf("%02d", sort_idx++);
+ 
+         if (exists(netifd_ifaces, sec['.name'])) {
+             // use netifd config if exists
+             complete_ifaces[key] = netifd_ifaces[sec['.name']];
+         } else {
+             // construct iface data with same format
+             complete_ifaces[key] = {
+                 "name": sec['.name'],
+                 "config": {
+                     "network":      split(sec.network, " "),
+                     "device":       sec.device,
+                     "mode":         sec.mode,
+                     "encryption":   sec.encryption,
+                     "key":          sec.key,
+                     "ssid":         sec.ssid,
+                     "radios":       []
+                 }
+             };
+ 
+             // if current UCI section is disabled, inject config.disabled also
+             // here if sec.disabled is null means that it is enabled in config
+             complete_ifaces[key].config.disabled = sec.disabled;
+ 
+             log.debug(`[Setup] Restored disabled interface from UCI: ${sec['.name']}`);
+         }
+     });
+ 
+     // replace the data.interfaces
+     data.interfaces = complete_ifaces;
+ 
+     /*****      PREPARE PREFIXES AND COUNTINGS     *******/
+ 
+     // MTWIFI_AP_IF_PREFIX <= ext_ifname
+     // MTWIFI_APCLI_IF_PREFIX <= apcli_ifname
+     let ap_prefix = cur_dev.ext_ifname || "ra";         // default to ra
+     let apcli_prefix = cur_dev.apcli_ifname || "apcli"; // default to apcli
+ 
+     // MTWIFI_MAX_AP_IDX=15
+     // MTWIFI_MAX_APCLI_IDX=0
+     const MAX_AP_IDX = 15;
+     const MAX_APCLI_IDX = 0; // e.g. apcli0 ONLY
+ 
+     let ap_idx = 0;
+     let apcli_idx = 0;
+ 
+ 
+     /*****          SET VIFS IN NETIFD        *******/
+     
+     // netifd idx may mismatch with UCI idx, should maintain it seperately
+     let netifd_idx = (() => {
+         let i = 1;
+         return {
+             increase: () => { return ++i; },
+             get: () => { return sprintf("%02d", i); }
+         }
+     })();
+ 
+     // keep iterating sequence for config.interfaces
+     // we assume that UCI arrays are ordered
+     // for_each_interface ap mtwifi_vif_ap_set_data
+     for (let idx, iface_data in data.interfaces) {
+         let config = iface_data.config;
+         let mode = config.mode;
+         let calc_ifname = null;
+ 
+         // AP mode handling
+         // mtwifi_vif_ap_set_data
+         if (mode == "ap") {
+             if (ap_idx <= MAX_AP_IDX) {
+                 calc_ifname = ap_prefix + ap_idx;
+                 ap_idx++;
+             } else {
+                 log.warn(`[Setup] Ignored AP interface ${idx}: Max index reached.`);
+             }
+         } 
+         // STA(Client) mode handling
+         // mtwifi_vif_sta_set_data
+         else if (mode == "sta") {
+             if (apcli_idx <= MAX_APCLI_IDX) {
+                 calc_ifname = apcli_prefix + apcli_idx;
+                 apcli_idx++;
+             } else {
+                 log.warn(`[Setup] Ignored STA interface ${idx}: Max index reached.`);
+             }
+         }
+ 
+         // inject calculated ifname into mtwifi_ifname
+         // this is CRITICAL for cfg.setup(), since vif names are not contained in raw UCI cfgs
+         // json_add_string "$MTWIFI_CFG_IFNAME_KEY" "$ifname"
+         if (calc_ifname) {
+             iface_data.mtwifi_ifname = calc_ifname;
+ 
+             // notify netifd to bind interfaces
+             // hooked in netifd-wireless
+             // mtwifi_vif_ap_config -> wireless_add_vif
+             // NOTE: shell script checked config.disabled before wireless_add_vif
+             if (!config.disabled) {
+                 // if previous ifaces were disabled, netifd idx may mismatch with UCI index
+                 log.info(`[Setup] Add interface: ${idx} -> ${calc_ifname} (mode: ${mode}, netifd idx: ${netifd_idx.get()})`);
+                 // here set vif with real netifd idx
+                 netifd.set_vif(netifd_idx.get(), calc_ifname);
+                 // increase the netifd idx
+                 netifd_idx.increase();
+             } else {
+                 log.info(`[Setup] Skipped disabled interface: ${calc_ifname}`);
+             }
+         }
+     }
+ 
+     /*****          SETUP VIFS        *******/
+     // UCI => DAT, ifup, reload driver...
+     cfg.setup(data, all_devs);
+     // notify netifd to setup
+ 	netifd.set_up();
+ 
+ 	l1.close();
+ }
+ 
+ // ==========================================
+ //              TEARDOWN
+ // ==========================================
+ function handle_teardown() {
+     let l1 = l1parser.open();
+     let all_devs = l1.getall();
+     // we dont have to unset vifs in netifd
+     // since it is triggered by netifd, vif destroy issues may handled by netifd
+     // TODO: teardown logic may still buggy when main device in DBDC were shutdown
+ 	cfg.down(cur_devname, all_devs);
+     l1.close();
+ }
+ 
+ switch (command) {
+ 	case "dump":
+ 		dump_options();
+ 		break;
+ 	case "setup":
+ 		let data = json(config_json_str);
+ 		if(cur_devname && data) {
+             with_lock(() => {
+                 handle_setup(data);
+             }, LOCK_FILE, `${command} ${cur_devname}`);
++            // Start after with_lock returns, so the child inherits no radio lock.
++            if (!data.config.disabled && data.config.map_mode == 1 &&
++                fs.access("/usr/libexec/ax6000-mesh-radio-ready"))
++                system("/usr/libexec/ax6000-mesh-radio-ready >/dev/null 2>&1 &");
+ 		} else {
+             log.error(`[Setup] UCI cfg data not valid!!! raw: ${config_json_str}, json parse: ${data}`);
+ 			exit(1);
+ 		}
+ 		break;
+ 	case "teardown":
+         with_lock(() => {
+             handle_teardown();
+         }, LOCK_FILE, `${command} ${cur_devname}`);
+ 		break;
+ }
+\ No newline at end of file
+--- a/package/mtk/drivers/mt_wifi/Makefile
++++ b/package/mtk/drivers/mt_wifi/Makefile
+@@ -1,391 +1,392 @@
+ # All rights reserved.
+ #
+ # This is free software, licensed under the GNU General Public License v2.
+ # See /LICENSE for more information.
+ 
+ include $(TOPDIR)/rules.mk
+ include $(INCLUDE_DIR)/kernel.mk
+ 
+ PKG_NAME:=mt_wifi
++PKG_RELEASE:=2
+ REPO_URL:=https://raw.githubusercontent.com/hanwckf/immortalwrt-mt798x/refs/heads/openwrt-21.02/dl
+ 
+ ifeq ($(CONFIG_MTK_CHIP_MT7981),y)
+ PKG_SUFFIX:=mt7981
+ else
+ ifeq ($(CONFIG_MTK_CHIP_MT7986),y)
+ PKG_SUFFIX:=mt7986
+ endif
+ endif
+ 
+ # driver version
+ 
+ ifeq ($(CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7661),y)
+ PKG_SOURCE:=mt79xx_20220907-8b55f5.tar.xz
+ PKG_SOURCE_URL:=$(REPO_URL)
+ PKG_HASH:=6d338f3dcb6844bdc420619388b6de7575065eece55b2e00d3bd43d6ba92cb4b
+ PKG_VERSION:=7.6.6.1
+ PATCH_DIR:=patches-7661
+ endif
+ 
+ ifeq ($(CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7672),y)
+ PKG_SOURCE:=mt79xx_20231229-4012a0.tar.xz
+ PKG_SOURCE_URL:=$(REPO_URL)
+ PKG_HASH:=763bfc104337ef5ff45602db0371141ecf59e5cfde6ef8614a8f16a3f2f274c6
+ PKG_VERSION:=7.6.7.2
+ PATCH_DIR:=patches-7672
+ endif
+ 
+ ifeq ($(CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7673),y)
+ PKG_SOURCE:=mt79xx_20250408-705eb4.tar.xz
+ PKG_SOURCE_URL:=$(REPO_URL)
+ PKG_HASH:=b029d7b43c498193092dc6a3c857361c8835ce34bb306561c550ac0539784a78
+ PKG_VERSION:=7.6.7.3
+ PATCH_DIR:=patches-7673
+ endif
+ 
+ PKG_BUILD_DEPENDS:=warp
+ PKG_BUILD_PARALLEL:=1
+ PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)
+ PKG_KCONFIG:= \
+ 	AP_SUPPORT \
+ 	RT_FIRST_CARD \
+ 	RT_SECOND_CARD \
+ 	RT_FIRST_IF_RF_OFFSET \
+ 	RT_SECOND_IF_RF_OFFSET \
+ 	MT_WIFI \
+ 	WIFI_BASIC_FUNC \
+ 	MT_WIFI_PATH \
+ 	FIRST_IF_NONE \
+ 	FIRST_IF_EEPROM_FLASH \
+ 	FIRST_IF_EEPROM_EFUSE \
+ 	RT_FIRST_CARD_EEPROM \
+ 	SECOND_IF_NONE \
+ 	SECOND_IF_EEPROM_FLASH \
+ 	SECOND_IF_EEPROM_PROM \
+ 	SECOND_IF_EEPROM_EFUSE \
+ 	RT_SECOND_CARD_EEPROM \
+ 	MULTI_INF_SUPPORT \
+ 	WIFI_BASIC_FUNC \
+ 	WIRELESS_EXT \
+ 	WEXT_SPY \
+ 	WEXT_PRIV \
+ 	DOT11_N_SUPPORT \
+ 	DOT11_VHT_AC \
+ 	DOT11_HE_AX \
+ 	CFG_SUPPORT_FALCON_MURU \
+ 	CFG_SUPPORT_FALCON_TXCMD_DBG \
+ 	CFG_SUPPORT_FALCON_SR \
+ 	CFG_SUPPORT_FALCON_PP \
+ 	WIFI_DRIVER \
+ 	G_BAND_256QAM_SUPPORT \
+ 	BRCM_256QAM_SUPPORT \
+ 	ICAP_SUPPORT \
+ 	MT_AP_SUPPORT \
+ 	BACKGROUND_SCAN_SUPPORT \
+ 	SMART_CARRIER_SENSE_SUPPORT \
+ 	SCS_FW_OFFLOAD \
+ 	THERMAL_PROTECT_SUPPORT \
+ 	MT_DFS_SUPPORT \
+ 	HDR_TRANS_TX_SUPPORT \
+ 	CHIP_MT7615E \
+ 	HDR_TRANS_RX_SUPPORT \
+ 	DBDC_MODE \
+ 	MULTI_PROFILE_SUPPORT \
+ 	DEFAULT_5G_PROFILE \
+ 	SUPPORT_DYNAMIC_TXOP \
+ 	WSC_INCLUDED \
+ 	MT_STA_SUPPORT \
+ 	WSC_V2_SUPPORT \
+ 	DOT11W_PMF_SUPPORT \
+ 	PASSPOINT_R2 \
+ 	TXBF_SUPPORT \
+ 	IGMP_SNOOP_SUPPORT \
+ 	RATE_ADAPTION \
+ 	RATE_ADAPT_AGBS_SUPPORT \
+ 	RTMP_FLASH_SUPPORT \
+ 	ATE_SUPPORT \
+ 	WLAN_SERVICE \
+ 	UAPSD \
+ 	RLT_MAC \
+ 	RLT_BBP \
+ 	RLT_RF \
+ 	RTMP_MAC \
+ 	RTMP_BBP \
+ 	RTMP_RF \
+ 	RTMP_PCI_SUPPORT \
+ 	RTMP_USB_SUPPORT \
+ 	RTMP_RBUS_SUPPORT \
+ 	WIFI_MODE_AP \
+ 	WIFI_MODE_STA \
+ 	WIRELESS_EXT \
+ 	WEXT_SPY \
+ 	WEXT_PRIV \
+ 	WDS_SUPPORT \
+ 	MBSS_SUPPORT \
+ 	APCLI_SUPPORT \
+ 	APCLI_CERT_SUPPORT \
+ 	APCLI_CONNECTION_TRIAL \
+ 	MAC_REPEATER_SUPPORT \
+ 	RALINK_RT6352 \
+ 	RALINK_MT7620 \
+ 	RALINK_MT7603E \
+ 	CON_WPS_SUPPORT \
+ 	VOW_SUPPORT \
+ 	BAND_STEERING \
+ 	TXOP_ARBITER \
+ 	CFG_SUPPORT_DYNAMIC_TXOP \
+ 	WIFI_MODE_BOTH \
+ 	WIFI_RLT_MAC \
+ 	RLT_MAC \
+ 	WIFI_RTMP_MAC \
+ 	RTMP_MAC \
+ 	WIFI_MT_MAC \
+ 	CHIP_MT7603E \
+ 	CHIP_MT7615E \
+ 	MT_MAC \
+ 	RATE_ADAPTION \
+ 	SUPPORT_OPENWRT \
+ 	SDK_USER_LIGHTY \
+ 	MUMIMO_SUPPORT \
+ 	MU_RA_SUPPORT \
+ 	LED_CONTROL_SUPPORT \
+ 	RA_HW_NAT \
+ 	RA_HW_NAT_WIFI_NEW_ARCH \
+ 	CFG80211_SUPPORT \
+ 	SER_SUPPORT \
+ 	GREENAP_SUPPORT \
+ 	RADIUS_ACCOUNTING_SUPPORT \
+ 	TPC_SUPPORT \
+ 	RLM_CAL_CACHE_SUPPORT \
+ 	CAL_BIN_FILE_SUPPORT \
+ 	RF_LOCKDOWN_SUPPORT \
+ 	PASSPOINT_R2 \
+ 	RED_SUPPORT \
+ 	FIRST_IF_EPAELNA \
+ 	FIRST_IF_IPAILNA \
+ 	FIRST_IF_IPAELNA \
+ 	FIRST_IF_EPAILNA \
+ 	SECOND_IF_EPAELNA \
+ 	SECOND_IF_IPAILNA \
+ 	SECOND_IF_IPAELNA \
+ 	SECOND_IF_EPAILNA \
+ 	THIRD_IF_EPAELNA \
+ 	THIRD_IF_IPAILNA \
+ 	THIRD_IF_IPAELNA \
+ 	THIRD_IF_EPAILNA \
+ 	WIFI_PKT_FWD \
+ 	DOT11K_RRM_SUPPORT \
+ 	DOT11R_FT_SUPPORT \
+ 	ENTERPRISE_AP_SUPPORT \
+ 	WIFI_EAP_FEATURE \
+ 	TXRX_STAT_SUPPORT \
+ 	ANTENNA_CONTROL_SUPPORT \
+ 	MGMT_TXPWR_CTRL \
+ 	TXD_MGMT_TXPWR_CTRL \
+ 	CHUTIL_SUPPORT \
+ 	NF_SUPPORT \
+ 	RA_PHY_RATE_SUPPORT \
+ 	MBSS_DTIM_SUPPORT \
+ 	AMPDU_CONF_SUPPORT \
+ 	ACK_CTS_TIMEOUT_SUPPORT \
+ 	HIGHPRI_RATE_SPECIFIC \
+ 	RADIUS_MAC_AUTH_SUPPORT \
+ 	ZERO_LOSS_CSA_SUPPORT \
+ 	VLAN_SUPPORT \
+ 	DYNAMIC_VLAN_SUPPORT \
+ 	IAP_VENDOR1_FEATURE_SUPPORT \
+ 	CUSTOMISED_HOSTAPD_SUPPORT \
+ 	HOSTAPD_MAP_SUPPORT \
+ 	HOSTAPD_WAPP_SUPPORT \
+ 	HOSTAPD_WPA3_SUPPORT \
+ 	HOSTAPD_WPA3R3_SUPPORT \
+ 	DBDC_ONE_BAND_SUPPORT \
+ 	APCLI_STA_SUPPORT \
+ 	WDS_STA_SUPPORT \
+ 	MBSS_AS_WDS_AP_SUPPORT \
+ 	MBO_SUPPORT \
+ 	MAP_SUPPORT \
+ 	MAP_R2_VER_SUPPORT \
+ 	MAP_R3_VER_SUPPORT \
+ 	QOS_R1_SUPPORT \
+ 	WPA3_SUPPORT \
+ 	OWE_SUPPORT \
+ 	WIFI_PKT_FWD_V1 \
+ 	FIRST_IF_MT7615E \
+ 	FIRST_IF_MT7622 \
+ 	FIRST_IF_MT7626 \
+ 	FIRST_IF_AXE \
+ 	FIRST_IF_MT7915 \
+ 	FIRST_IF_MT7916 \
+ 	FIRST_IF_MT7986 \
+ 	FIRST_IF_MT7981 \
+ 	SECOND_IF_MT7915 \
+ 	SECOND_IF_MT7916 \
+ 	SECOND_IF_MT7615E \
+ 	SECOND_IF_AXE \
+ 	THIRD_IF_NONE \
+ 	THIRD_IF_MT7615E \
+ 	THIRD_IF_MT7916 \
+ 	CHIP_AXE \
+ 	CHIP_MT7915 \
+ 	CHIP_MT7916 \
+ 	CHIP_MT7986 \
+ 	CHIP_MT7981 \
+ 	RT_THIRD_CARD \
+ 	RT_THIRD_IF_RF_OFFSET \
+ 	THIRD_IF_EEPROM_FLASH \
+ 	THIRD_IF_EEPROM_PROM \
+ 	THIRD_IF_EEPROM_EFUSE \
+ 	RT_THIRD_CARD_EEPROM \
+ 	SPECTRUM_SUPPORT \
+ 	PHY_ICS_SUPPORT \
+ 	MULTI_PROFILE_SUPPORT \
+ 	PRE_CAL_TRX_SET1_SUPPORT \
+ 	MWDS \
+ 	MCAST_RATE_SPECIFIC \
+ 	WLAN_HOOK \
+ 	COEX_SUPPORT \
+ 	EASY_SETUP_SUPPORT \
+ 	EVENT_NOTIFIER_SUPPORT \
+ 	AIR_MONITOR \
+ 	OFFCHANNEL_SCAN_FEATURE \
+ 	WNM_SUPPORT \
+ 	INTERWORKING \
+ 	LINUX_NET_TXQ_SUPPORT \
+ 	CHIP_MT7622 \
+ 	CHIP_MT7626 \
+ 	MEMORY_SHRINK \
+ 	MEMORY_SHRINK_AGGRESS \
+ 	RPS_EFFICIENCY \
+ 	WHNAT_SUPPORT \
+ 	FAST_NAT_SUPPORT \
+ 	PRE_CAL_TRX_SET2_SUPPORT \
+ 	LINK_TEST_SUPPORT \
+ 	TCP_RACK_SUPPORT \
+ 	FQ_SCH_SUPPORT \
+ 	BRCM_256QAM_SUPPORT \
+ 	VHT_TXBF_2G_EPIGRAM_IE_SUPPORT \
+ 	DSCP_QOS_MAP_SUPPORT \
+ 	DSCP_PRI_SUPPORT \
+ 	PCIE_ASPM_DYM_CTRL_SUPPORT \
+ 	MIN_PHY_RATE_SUPPORT \
+ 	FAST_UP_RATE_SUPPORT \
+ 	TXRX_STAT_SUPPORT \
+ 	VENDOR_FEATURE11_SUPPORT \
+ 	WIFI_TWT_SUPPORT \
+ 	CTXD_MEM_CPY_SUPPORT \
+ 	CTXD_SCATTER_AND_GATHER_SUPPORT \
+ 	SINGLE_SKU \
+ 	SNIFFER_SUPPORT \
+ 	SNIFFER_RADIOTAP_SUPPORT \
+ 	WF_RESET_SUPPORT \
+ 	WIFI_SYSDVT \
+ 	WARP_V2 \
+ 	OCE_SUPPORT \
+ 	WTBL_TDD_SUPPORT \
+ 	SW_CONNECT_SUPPORT \
+ 	6G_SUPPORT \
+ 	BSSMGR_CROSS_MODULE_SUPPORT \
+ 	WIFI_FW_BIN_LOAD \
+ 	CONNINFRA_APSOC \
+ 	MLME_MULTI_QUEUE_SUPPORT \
+ 	WIFI_SKU_TYPE \
+ 	MAP_R2_6E_SUPPORT \
+ 	MAP_R3_6E_SUPPORT \
+ 	WIFI_SKB_USES_SLAB \
+ 	WIFI_CSI_CN_INFO_SUPPORT \
+ 	6G_AFC_SUPPORT \
+ 	DFS_SLAVE_SUPPORT \
+ 
+ PKG_CONFIG_DEPENDS:=$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_MTK_$c),CONFIG_$(c)))
+ PKG_PREPARED_DEPENDS:=CONFIG_MTK_FW_NEW_API_PATCH \
+             CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7661 \
+ 			CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7672 \
+ 			CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7673
+ 
+ include $(INCLUDE_DIR)/package.mk
+ 
+ TAR_CMD=$(HOST_TAR) -C $(1)/ $(TAR_OPTIONS)
+ 
+ define KernelPackage/mt_wifi
+   CATEGORY:=MTK Properties
+   TITLE:=MTK wifi AP driver
+   DEPENDS:=+wifi-dats +kmod-conninfra +kmod-mediatek_hnat +kmod-warp
+   FILES:=$(PKG_BUILD_DIR)/mt_wifi_ap/mt_wifi.ko \
+ 	$(PKG_BUILD_DIR)/mt_wifi/embedded/plug_in/warp_proxy/mtk_warp_proxy.ko
+   AUTOLOAD:=$(call AutoProbe,mt_wifi mtk_warp_proxy)
+   SUBMENU:=Drivers
+   MENU:=1
+ endef
+ 
+ define KernelPackage/mt_wifi/config
+ 	source "$(SOURCE)/config.in"
+ endef
+ 
+ define MT_WIFI_SRC_PATCH
+ 	@if [ "$$(CONFIG_MTK_FW_NEW_API_PATCH)" = "y" ]; then \
+ 		echo "Fixup new mcu fw API"; \
+ 		patch -p1 -d $(PKG_BUILD_DIR) < ./files/fix-new-mcu-fw-api.patch; \
+ 	fi
+ endef
+ 
+ Hooks/Prepare/Post := MT_WIFI_SRC_PATCH
+ 
+ define Build/Compile
+ 	+$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" \
+ 		$(KERNEL_MAKE_FLAGS) \
+ 		M="$(PKG_BUILD_DIR)/mt_wifi_ap" \
+ 		LINUX_DIR="$(KERNEL_BUILD_DIR)" \
+ 		$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_MTK_$c),CONFIG_$(c)=$(CONFIG_MTK_$(c)))) \
+ 		modules
+ endef
+ 
+ define KernelPackage/mt_wifi/install
+ rm -rf $(1)/lib/firmware/; \
+ $(INSTALL_DIR) $(1)/lib/firmware/; \
+ if [ "$$(CONFIG_MTK_CHIP_MT7986)" = "y" ] ; then \
+ 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/mt7986/rebb/MT7986_* $(1)/lib/firmware/; \
+ fi ; \
+ if [ "$$(CONFIG_MTK_CHIP_MT7916)" = "y" ] ; then \
+ 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/mt7916/rebb/MT7916_* $(1)/lib/firmware/; \
+ fi ; \
+ if [ "$$(CONFIG_MTK_CHIP_MT7981)" = "y" ] ; then \
+ 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/mt7981/rebb/MT7981_* $(1)/lib/firmware/; \
+ fi ; \
+ if [ "$$(CONFIG_MTK_WIFI_FW_BIN_LOAD)" = "y" ]; then \
+ 	if [ "$$(CONFIG_MTK_CHIP_MT7986)" = "y" ] ; then \
+ 		if [ "$$(CONFIG_MTK_MT_WIFI_FIRMWARE_PATH_MT7986)" != "" ]; then \
+ 			$(INSTALL_BIN) ./files/$$(CONFIG_MTK_MT_WIFI_FIRMWARE_PATH_MT7986)/* $(1)/lib/firmware/; \
+ 		else \
+ 			$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/mt7986/rebb/WIFI_RAM_CODE_MT7986.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7986/rebb/WIFI_RAM_CODE_MT7986_MT7975.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7986/rebb/mt7986_patch_e1_hdr.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7986/rebb/mt7986_patch_e1_hdr_mt7975.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7986/rebb/7986_WACPU_RAM_CODE_release.bin \
+ 			$(1)/lib/firmware/; \
+ 		fi ; \
+ 	fi ; \
+ 	if [ "$$(CONFIG_MTK_CHIP_MT7916)" = "y" ] ; then \
+ 		if [ "$$(CONFIG_MTK_MT_WIFI_FIRMWARE_PATH_MT7916)" != "" ]; then \
+ 			$(INSTALL_BIN) ./files/$$(CONFIG_MTK_MT_WIFI_FIRMWARE_PATH_MT7916)/* $(1)/lib/firmware/; \
+ 		else \
+ 			$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/mt7916/rebb/7916_WACPU_RAM_CODE_release.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7916/rebb/mt7916_patch_e1_hdr.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7916/rebb/WIFI_RAM_CODE_MT7916.bin \
+ 			$(1)/lib/firmware/; \
+ 		fi ; \
+ 	fi ; \
+ 	if [ "$$(CONFIG_MTK_CHIP_MT7981)" = "y" ] ; then \
+ 		if [ "$$(CONFIG_MTK_MT_WIFI_FIRMWARE_PATH_MT7981)" != "" ]; then \
+ 			$(INSTALL_BIN) ./files/$$(CONFIG_MTK_MT_WIFI_FIRMWARE_PATH_MT7981)/* $(1)/lib/firmware/; \
+ 		else \
+ 			$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/mt7981/rebb/WIFI_RAM_CODE_MT7981.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7981/rebb/7981_WACPU_RAM_CODE_release.bin \
+ 			$(PKG_BUILD_DIR)/bin/mt7981/rebb/mt7981_patch_e1_hdr.bin \
+ 			$(1)/lib/firmware/; \
+ 		fi ; \
+ 	fi ; \
+ fi
+ endef
+ 
+ $(eval $(call KernelPackage,mt_wifi))

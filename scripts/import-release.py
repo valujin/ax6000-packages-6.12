@@ -126,7 +126,7 @@ def validate_metadata(raw, expected_profile, *, expected_producer_commit=None):
     if profile.get('channel') != expected.get('channel'):
         raise ValueError('Imported channel differs from source profile')
     if profile.get('channel'):
-        for field in ('publication', 'build_source', 'exclude_asu'):
+        for field in ('publication', 'build_source', 'exclude_asu', 'mediatek_mesh'):
             if profile.get(field) != expected.get(field):
                 raise ValueError(f'Imported {field} differs from source profile')
         if profile['firmware'].get('devices') != expected['firmware'].get('devices'):

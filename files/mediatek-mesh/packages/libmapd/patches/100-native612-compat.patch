@@ -1,0 +1,138 @@
+--- a/Makefile
++++ b/Makefile
+@@ -1,7 +1,7 @@
+ ifndef CFLAGS
+ CFLAGS = -MMD -O2 -Wall -g
+ endif
+-CFLAGS = -Werror -g
++CFLAGS += -g
+ 
+ shared: all
+ 	$(INSTALL) -d ../lib
+@@ -15,7 +15,7 @@
+ 	$(CC) -I ./include -c -fPIC $^ -o $@ $(CFLAGS)
+ 	
+ include/os_unix_lib.o : include/os_unix.c
+-	$(CC) -I ./include -c -fPIC $^ -o $@
++	$(CC) $(CFLAGS) -I ./include -c -fPIC $^ -o $@
+ 	
+ libmapd_interface_client.so: mapd_interface_ctrl.o include/os_unix_lib.o
+ 	$(CC) -shared -o $@ $^
+--- a/include/os.h
++++ b/include/os.h
+@@ -82,7 +82,7 @@
+ 				  struct os_reltime *age)
+ {
+ 	struct os_reltime now;
+-	(void)os_memset(&now, 0, sizeof(now));
++	(void)memset(&now, 0, sizeof(now));
+ 
+ 	os_get_reltime(&now);
+ 	os_reltime_sub(&now, start, age);
+--- a/mapd_interface_ctrl.c
++++ b/mapd_interface_ctrl.c
+@@ -1502,7 +1502,8 @@
+ int mapd_interface_sp_add_rule(struct mapd_interface_ctrl *ctrl, char *str_rule, int len)
+ {
+ 	char *cmd = NULL;
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 
+ 	cmd = os_malloc(len + 13);
+@@ -1538,7 +1539,8 @@
+ int mapd_interface_sp_set_rule(struct mapd_interface_ctrl *ctrl, char *str_rule, int len)
+ {
+ 	char *cmd = NULL;
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 
+ 	cmd = os_malloc(len + 13);
+@@ -1573,7 +1575,8 @@
+ 
+ int mapd_interface_sp_rm_rule(struct mapd_interface_ctrl *ctrl, unsigned char idx)
+ {
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 	char cmd[32] = {0x00};
+ 
+@@ -1593,7 +1596,8 @@
+ int mapd_interface_sp_reorder_rule(struct mapd_interface_ctrl *ctrl,
+ 	unsigned char org_idx, unsigned char new_idx)
+ {
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 	char cmd[32] = {0x00};
+ 
+@@ -1613,7 +1617,8 @@
+ int mapd_interface_sp_move_rule_forward(struct mapd_interface_ctrl *ctrl,
+ 	unsigned char idx)
+ {
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 	char cmd[32] = {0x00};
+ 
+@@ -1633,7 +1638,8 @@
+ int mapd_interface_sp_move_rule_backward(struct mapd_interface_ctrl *ctrl,
+ 	unsigned char idx)
+ {
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 	char cmd[32] = {0x00};
+ 
+@@ -1660,8 +1666,12 @@
+ 	if (ret < 0)
+ 		return -1;
+ 
+-	if (mapd_interface_ctrl_request(ctrl, cmd, os_strlen(cmd), rule_buf, rule_buf_len, NULL) < 0)
+-		return -1;
++	if (!rule_buf_len || *rule_buf_len < 0)
++		return -1;
++	size_t reply_len = (size_t)*rule_buf_len;
++	if (mapd_interface_ctrl_request(ctrl, cmd, os_strlen(cmd), rule_buf, &reply_len, NULL) < 0)
++		return -1;
++	*rule_buf_len = (int)reply_len;
+ 
+ 	return ret;
+ }
+@@ -1669,7 +1679,8 @@
+ int mapd_interface_sp_enable_dynamic_rule(struct mapd_interface_ctrl *ctrl,
+ 	unsigned char enable, unsigned char prior)
+ {
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 	char cmd[32] = {0x00};
+ 
+@@ -1690,7 +1701,8 @@
+ 	char *dscp_tbl)
+ {
+ 	char *cmd = NULL;
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 
+ 	cmd = os_malloc(os_strlen(dscp_tbl) + 17);
+@@ -1725,7 +1737,8 @@
+ 
+ int mapd_interface_sp_config_done(struct mapd_interface_ctrl *ctrl)
+ {
+-	int ret = 0, reply_len = 8;
++	int ret = 0;
++	size_t reply_len = 8;
+ 	char reply[8] = {0x00};
+ 	char cmd[32] = {0x00};
+ 

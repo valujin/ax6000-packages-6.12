@@ -15,6 +15,7 @@ import tempfile
 
 import asu_client
 import no_asu
+import mediatek_mesh
 import pbr_sources
 import vendor_country
 
@@ -120,6 +121,16 @@ def expected(profile, lock, source=None):
                 files[path[5:]] = (data, 0o644)
             elif path.startswith('htdocs/'):
                 files['www/' + path[7:]] = (minified_js(data, source) if path.endswith('.js') else data, 0o644)
+    mesh = mediatek_mesh.expected(profile)
+    for target, additions in ((files, mesh['files']), (hashes, mesh['hashes']),
+                              (versions, mesh['versions']), (suffixes, mesh['version_suffixes'])):
+        need(not set(target).intersection(additions), 'Optional feature output collision')
+        target.update(additions)
+    if source is not None:
+        for path in list(mesh['files']):
+            if path.endswith('.js'):
+                data, mode = files[path]
+                files[path] = (minified_js(data, source), mode)
     return {'files': files, 'hashes': hashes, 'versions': versions, 'version_suffixes': suffixes}
 
 
@@ -141,9 +152,10 @@ def verify(profile, lock, installed, read_file, check_mode, source=None, native_
             verified[path]['mode'] = f'{mode:04o}'
     for path, digest in policy['hashes'].items():
         actual = read_file(path, 2 * 1024**2)
-        need(sha(actual) == digest, 'Actual image vendor DB country JavaScript differs: ' + path)
-        check_mode(path, 0o644)
-        verified[path] = {'sha256': digest, 'size': len(actual), 'mode': '0644'}
+        need(sha(actual) == digest, 'Actual image vendor feature hash differs: ' + path)
+        mode = 0o755 if path == 'lib/netifd/wireless/mtwifi.sh' else 0o644
+        check_mode(path, mode)
+        verified[path] = {'sha256': digest, 'size': len(actual), 'mode': f'{mode:04o}'}
     translations = []
     if profile.get('asu'):
         translations.append('usr/lib/lua/luci/i18n/attendedsysupgrade.ru.lmo')
@@ -151,6 +163,8 @@ def verify(profile, lock, installed, read_file, check_mode, source=None, native_
     if pair:
         translations += ['usr/lib/lua/luci/i18n/pbr.' + language.replace('_', '-') + '.lmo'
                          for language in pair.get('translations', {})]
+    if profile.get('mediatek_mesh'):
+        translations.append('usr/lib/lua/luci/i18n/ax6000-mesh.ru.lmo')
     for path in translations:
         data = read_file(path, 2 * 1024**2)
         need(data and len(data) >= 16, 'Actual image Russian translation absent or empty: ' + path)

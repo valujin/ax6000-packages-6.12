@@ -1,0 +1,31 @@
+--- a/Makefile
++++ b/Makefile
+@@ -10,7 +10,7 @@
+ UT_DIR = src/ut
+ 
+ 
+-CFLAGS += -fPIC -lpthread $(INCLUDES) -Isrc/chips -Iethernet -g -Ilib_export -Ilib -Wall -Werror -MMD -O2 -DVERSION=\"$(VERSION)\"
++CFLAGS += -fPIC -lpthread $(INCLUDES) -Isrc/chips -Iethernet -g -Ilib_export -Ilib -Wall  -MMD -O2 -DVERSION=\"$(VERSION)\"
+ 
+ CFLAGS += -I$(ROOTDIR)/$(LINUXDIR)
+ 
+@@ -18,7 +18,7 @@
+ CFLAGS += -I$(ROOTDIR)/$(LINUXDIR)/drivers/net/ethernet/raeth
+ CFLAGS += -I$(ROOTDIR)/kernel_headers/include
+ else
+-CFLAGS += -I$(ROOTDIR)/$(LINUXDIR)/drivers/net/raeth -Werror
++CFLAGS += -I$(ROOTDIR)/$(LINUXDIR)/drivers/net/raeth 
+ CFLAGS += -I$(ROOTDIR)/kernel_headers/include
+ endif
+ 
+--- a/src/ut/Makefile
++++ b/src/ut/Makefile
+@@ -2,7 +2,7 @@
+ ETH_OPS_LIB_OBJS += ../service_prioritization.o ../common.o ../os_internal.o ../mapfilter_if.o sp_ut.o 
+ 
+ 
+-CFLAGS += -fPIC -lpthread $(INCLUDES) -Isrc/chips -Iethernet -g -Ilib_export -Ilib_wapp -Ilib -Wall -Werror -MMD -O2 -DVERSION=\"$(VERSION)\"
++CFLAGS += -fPIC -lpthread $(INCLUDES) -Isrc/chips -Iethernet -g -Ilib_export -Ilib_wapp -Ilib -Wall  -MMD -O2 -DVERSION=\"$(VERSION)\"
+ CFLAGS += -I$(ROOTDIR)/$(LINUXDIR)
+ EXTRA_CFLAGS += -DSUPPORT_COREDUMP
+ CFLAGS += -D_GNU_SOURCE -I$(STAGING_DIR)/usr/include/libnl-tiny

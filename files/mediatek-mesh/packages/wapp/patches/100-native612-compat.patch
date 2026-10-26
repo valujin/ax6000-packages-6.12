@@ -1,0 +1,170 @@
+--- a/common/wdev.c
++++ b/common/wdev.c
+@@ -3672,18 +3672,7 @@
+ 		return WAPP_INVALID_ARG;
+ 	}
+ 
+-	DBGPRINT(RT_DEBUG_ERROR,
+-		   "set sec_info:\n"
+-		   "\t ifname = %s\n"
+-		   "\t ssid = %s\n"
+-		   "\t auth = %s\n"
+-		   "\t encryp = %s\n"
+-		   "\t passphrases = %s\n",
+-		   wdev->ifname,
+-		   ssid,
+-		   sec->auth,
+-		   sec->encryp,
+-		   sec->psphr);
++	/* Credentials are intentionally never logged. */
+ 
+ 
+ 	ap = (struct ap_dev *)wdev->p_dev;
+--- a/common/main.c
++++ b/common/main.c
+@@ -85,6 +85,7 @@
+ 	DBGPRINT(RT_DEBUG_OFF, "-m <hotspot mode> (OPMODE_STA, OPMODE_AP)\n");
+ 	DBGPRINT(RT_DEBUG_OFF, "-i <hotspot ipc type> (RA_WEXT, RA_NETLINK)\n");
+ 	DBGPRINT(RT_DEBUG_OFF, "-d <hotspot debug level>\n");
++	DBGPRINT(RT_DEBUG_OFF, "-n foreground WAPP (no IAPP child)\n");
+ 	DBGPRINT(RT_DEBUG_OFF, "-h help\n");
+ 	return 0;
+ }
+@@ -94,6 +95,8 @@
+ MBO
+ ========================================================================
+ */
++static int foreground;
++
+ #ifdef MAP_SUPPORT
+ int process_options(int argc, char *argv[], char *filename,
+ 					int *opmode, int *drv_mode, int *debug_level, int *version, char *iface
+@@ -121,8 +124,11 @@
+ 
+ 	opterr = 0;
+ 
+-	while ((c = getopt(argc, argv, "m:f:i:d:v:e:w:k:c:F:u:")) != -1) {
++	while ((c = getopt(argc, argv, "nm:f:i:d:v:e:w:k:c:F:u:")) != -1) {
+ 		switch (c) {
++		case 'n':
++			foreground = 1;
++			break;
+ 		case 'd':
+ 			cvalue = optarg;
+ 			if (os_strcmp(cvalue, "0") == 0)
+@@ -1299,8 +1305,9 @@
+ 		dl_list_init(&wapp->sta_mntr_list);
+ 		dl_list_init(&wapp->bh_assoc_ctrl_list);
+ #endif
+-	setsid();
+-	child_pid_hs = fork();
++	if (!foreground)
++		setsid();
++	child_pid_hs = foreground ? 0 : fork();
+ 	if (child_pid_hs == 0) {
+ 		DBGPRINT(RT_DEBUG_ERROR, "Initialize socket\n");
+ 		ret = wapp_socket_and_ctrl_inf_init(wapp,drv_mode,opmode);
+--- a/common/wapp_cmm.c
++++ b/common/wapp_cmm.c
+@@ -1451,9 +1451,11 @@
+ 		case WAPP_CLI_PROBE_EVENT:
+ 			wdev_cli_probe_handle(wapp, event->ifindex, &event->data);
+ 			break;
++		#ifdef DFS_VENDOR10_CUSTOM_FEATURE
+ 		case WAPP_CHN_LIST_RSP:
+ 			wdev_chn_list_query_rsp_handle(wapp, event->ifindex, &event->data.chn_list);
+ 			break;
++#endif
+ 		case WAPP_OP_CLASS_RSP:
+ #ifndef MAP_6E_SUPPORT
+ 			wdev_op_class_query_rsp_handle(wapp, event->ifindex, &event->data.op_class);
+--- a/Makefile
++++ b/Makefile
+@@ -18,9 +18,9 @@
+ include $(TOPDIR)/.config
+ 
+ ifndef CFLAGS
+-CFLAGS = -MMD -O2 -Wall -Werror -g
+-endif
+-CFLAGS += -Werror -Wall -g
++CFLAGS = -MMD -O2 -Wall  -g
++endif
++CFLAGS +=  -Wall -g
+ 
+ CFLAGS += -I./include -fgnu89-inline
+ 
+@@ -182,10 +182,10 @@
+ all: $(HS_EXEC) $(HSCTRL_EXEC) $(WAPP_USR_INTF_LIB)
+ 
+ wapp_usr_intf/wapp_usr_intf_ctrl.o : wapp_usr_intf/wapp_usr_intf_ctrl.c wapp_usr_intf/wapp_usr_intf.h
+-	$(CC) -I./include -I./wapp_usr_intf -Werror -fPIC -c wapp_usr_intf/wapp_usr_intf_ctrl.c -o wapp_usr_intf/wapp_usr_intf_ctrl.o
++	$(CC) -I./include -I./wapp_usr_intf  -fPIC -c wapp_usr_intf/wapp_usr_intf_ctrl.c -o wapp_usr_intf/wapp_usr_intf_ctrl.o
+ 
+ common/os_internal_lib.o: common/os_internal.c include/os.h
+-	$(CC) -I./include -Werror -fPIC -c common/os_internal.c -o common/os_internal_lib.o
++	$(CC) -I./include  -fPIC -c common/os_internal.c -o common/os_internal_lib.o
+ 
+ $(WAPP_USR_INTF_LIB) : wapp_usr_intf/wapp_usr_intf_ctrl.o common/os_internal_lib.o include/os.h
+ 	ar r $(WAPP_USR_INTF_LIB) $(WAPP_USR_INTF_OBJS)
+--- a/dpp/dpp.h
++++ b/dpp/dpp.h
+@@ -1261,7 +1261,7 @@
+ 				       const u8 *buf, size_t len);
+ void dpp_auth_fail(struct dpp_authentication *auth, const char *txt);
+ void dpp_debug_print_key(const char *title, EVP_PKEY *key);
+-EC_KEY * EVP_PKEY_get0_EC_KEY(EVP_PKEY *pkey);
++/* EVP_PKEY_get0_EC_KEY is declared by OpenSSL. */
+ 
+ char * wapp_dpp_get_scan_channel_list(struct wifi_app *wapp);
+ 
+--- a/dpp/dpp.c
++++ b/dpp/dpp.c
+@@ -11608,7 +11608,7 @@
+ 
+ #ifdef DPP_R2_SUPPORT
+ #ifdef DPP_R2_RECONFIG
+-#ifndef OPENSSL_NO_EC
++#if !defined(OPENSSL_NO_EC) && OPENSSL_VERSION_NUMBER < 0x10100000L
+ EC_KEY * EVP_PKEY_get0_EC_KEY(EVP_PKEY *pkey)
+ {
+ 	if (EVP_PKEY_base_id(pkey) != EVP_PKEY_EC) {
+--- a/include/rtmpiapp.h
++++ b/include/rtmpiapp.h
+@@ -676,7 +676,7 @@
+ 			__pBufMsg = __pRspBuf;								\
+ 	}
+ 
+-static __inline__ __uint32_t inet_make_mask(int logmask)
++static __inline__ uint32_t inet_make_mask(int logmask)
+ {
+ 	if (logmask)
+ 		return htonl(~((1<<(32-logmask))-1));
+--- a/include/wdev.h
++++ b/include/wdev.h
+@@ -60,9 +60,9 @@
+ 
+ #ifdef MAP_6E_SUPPORT
+ #define WMODE_CAP_6G(_x)        (((_x) & (WMODE_AX_6G)) != 0)
++#endif
+ #define WMODE_CAP_5G(_x)        (((_x) & (WMODE_A | WMODE_AN | WMODE_AC | WMODE_AX_5G)) != 0)
+ #define WMODE_CAP_2G(_x)        (((_x) & (WMODE_B | WMODE_G | WMODE_GN | WMODE_AX_24G)) != 0)
+-#endif
+ 
+ struct wifi_app;
+ #ifdef MAP_R3
+--- a/include/interface.h
++++ b/include/interface.h
+@@ -44,6 +44,13 @@
+ #include <sys/socket.h>
+ #include "linux/if.h"
+ #include "wapp_cmm_type.h"
++
++/* SDK 20250408 ABI; paired with the freshly rebuilt vendor driver. */
++_Static_assert(sizeof(struct map_vendor_ie) == 26, "MAP uplink ABI mismatch");
++_Static_assert(sizeof(struct scan_bss_info) == 126, "MAP scan ABI mismatch");
++_Static_assert(sizeof(struct wapp_scan_info) == 6, "MAP scan header ABI mismatch");
++_Static_assert(sizeof(struct wapp_event) == 248, "WAPP event ABI mismatch");
++_Static_assert(sizeof(wapp_client_info) == 95, "WAPP client ABI mismatch");
+ #ifdef DPP_SUPPORT
+ #include "crypto/sha256.h"
+ #endif

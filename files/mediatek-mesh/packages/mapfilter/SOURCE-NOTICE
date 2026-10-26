@@ -1,0 +1,18 @@
+Source: MediaTek SDK 20250408 mapfilter, source revision 96f2afed.
+Immutable mirror:
+https://raw.githubusercontent.com/immortalwrt-mt798x/immortalwrt/a3f94baa4ea053130be796915ad9ff2fa5fcf567/dl/mapfilter-96f2afed.tar.bz2
+SHA256: 3928c6614b84e74f1f1762cee61de8e422299e792f5f363dc369dfc0ed0f1714
+
+The source declares MODULE_LICENSE("Dual BSD/GPL") in mtkmapfilter.c.
+The archive does not contain a separate LICENSE file. This declaration is
+the available licensing evidence; no proprietary userspace license applies
+to this independently packaged kernel module.
+
+Local patch 100-native612-compat.patch adapts the setsockopt callback to
+sockptr_t/copy_from_sockptr, drops obsolete netlink cfg fields, propagates
+const MAC pointers, and suppresses only legacy missing-declaration/prototype
+warnings while preserving -Werror for the remaining diagnostics. It also
+starts the optional temporary IP filter disabled: loading the module alone
+must not block existing bridge traffic. Daemon commands can still enable it.
+
+No boot autoload entry is installed; ax6000-mesh loads the module when enabled.

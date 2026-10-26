@@ -1,0 +1,86 @@
+--- a/Makefile
++++ b/Makefile
+@@ -3,7 +3,7 @@
+ obj-$(CONFIG_MAP_FILTER_SUPPORT) := mapfilter.o
+ mapfilter-objs = mtkmapfilter.o load_balance.o traffic_separation.o service_prioritization.o dual_bh.o
+ 
+-ccflags-y = -Wall -Wstrict-prototypes -Wno-trigraphs -Wframe-larger-than=4096 -Werror
++ccflags-y = -Wall -Wstrict-prototypes -Wno-trigraphs -Wframe-larger-than=4096 -Werror -Wno-missing-prototypes -Wno-missing-declarations
+ 
+ else
+ 
+--- a/mtkmapfilter.c
++++ b/mtkmapfilter.c
+@@ -95,7 +95,7 @@
+ 	}
+ }
+ 
+-bool eth_addr_equal(unsigned char *addr1, unsigned char *addr2)
++bool eth_addr_equal(const unsigned char *addr1, const unsigned char *addr2)
+ {
+ 	unsigned char ret = 0;
+ 	ret =	((addr1[0] ^ addr2[0]) | (addr1[1] ^ addr2[1]) | (addr1[2] ^ addr2[2]) |
+@@ -186,7 +186,7 @@
+ 		return 0;
+ }
+ 
+-int add_discovery_inf_vstlv(struct sk_buff *skb, unsigned char *rmac)
++int add_discovery_inf_vstlv(struct sk_buff *skb, const unsigned char *rmac)
+ {
+ 	unsigned char *temp_buf = skb->data;
+ 	int length =0, left_len = 0;
+@@ -495,7 +495,7 @@
+ 	return dev;
+ }
+ 
+-struct map_net_device *get_map_net_dev_by_mac(unsigned char *mac)
++struct map_net_device *get_map_net_dev_by_mac(const unsigned char *mac)
+ {
+ 	struct map_net_device *dev = NULL;
+ 	struct hlist_head *head = &dev_hash[MAC_ADDR_HASH_INDEX(mac)];
+@@ -906,7 +906,6 @@
+ 	.groups = 0,
+ 	.flags = 0,
+ 	.input = recv_nlmsg,
+-	.cb_mutex = NULL,
+ 	.bind = NULL,
+ };
+ #endif
+@@ -941,14 +940,14 @@
+ #define MAP_SO_MAX (MAP_SO_BASE + 1)
+ 
+ static int do_map_set_ctl(struct sock *sk, int cmd,
+-		void __user *user, unsigned int len)
++		sockptr_t user, unsigned int len)
+ {
+ 	int ret = 0;
+ 
+ 	pr_info("do_map_set_ctl==>cmd(%d)\n", cmd);
+ 	switch (cmd) {
+ 	case MAP_SET_ALMAC:
+-		if (copy_from_user(almac, user, ETH_ALEN) != 0) {
++		if (copy_from_sockptr(almac, user, ETH_ALEN) != 0) {
+ 			ret = -EFAULT;
+ 			pr_info("do_map_set_ctl==>copy_from_user fail\n");
+ 			break;
+@@ -1159,7 +1158,8 @@
+ 		INIT_HLIST_HEAD(&dev_hash[i]);
+ 	}
+ 
+-	drop_ip_status.drop_flag = 1;
++	/* Loading the module must not block existing bridge traffic. */
++	drop_ip_status.drop_flag = 0;
+ 	drop_ip_addr.addr1 = SPECIFIC_IP_ADDR1;
+ 	drop_ip_addr.addr2 = SPECIFIC_IP_ADDR2;
+ 
+--- a/mtkmapfilter.h
++++ b/mtkmapfilter.h
+@@ -119,7 +119,7 @@
+ 	unsigned int addr2;
+ };
+ void send_broadcast_nlmsg(unsigned char *msg, int msg_len);
+-struct map_net_device *get_map_net_dev_by_mac(unsigned char *mac);
++struct map_net_device *get_map_net_dev_by_mac(const unsigned char *mac);
+ struct map_net_device *create_map_net_device(struct local_interface *inf,
+ 	struct net_device *dev, struct net_device *dest_dev, unsigned char primary);
+ void free_map_net_device(struct rcu_head *head);

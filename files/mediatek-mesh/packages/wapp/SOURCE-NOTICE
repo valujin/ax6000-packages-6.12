@@ -1,0 +1,7 @@
+Source: https://github.com/immortalwrt-mt798x/immortalwrt/tree/a3f94baa4ea053130be796915ad9ff2fa5fcf567
+Archive: wappd-80ca5724.tar.bz2
+SHA256: 73fa8995533e701d3d5774faa92d274497f99e1a37c81ce445f25a959b4b7462
+
+The source archive contains LICENSE with MediaTek proprietary boilerplate followed by an explicit BSD three-clause distribution grant. The complete upstream LICENSE is installed unchanged. Package metadata is deliberately conservative; this recipe does not infer rights for other archives.
+
+Local compatibility patches and packaging do not replace upstream notices.

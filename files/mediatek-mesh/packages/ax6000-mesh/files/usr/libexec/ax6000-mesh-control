@@ -1,0 +1,287 @@
+#!/bin/sh
+# The RPC entry point accepts only fixed operations and enumerated values.
+set -eu
+LC_ALL=C
+export LC_ALL
+umask 077
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+get() { uci -q get "$1" 2>/dev/null || :; }
+state=/etc/ax6000-mesh
+config=/etc/config/wireless
+
+abi_ok() {
+  [ -f /etc/ax6000-mesh-abi.json ] || return 1
+  digest=$(sha256sum /etc/ax6000-mesh-abi.json) || return 1
+  [ "${digest%% *}" = c261054529069b50e94411dc52725eb7a8d1aa2815b4fb647dcba85f50e5757e ]
+}
+
+preflight() {
+  board=$(cat /tmp/sysinfo/board_name 2>/dev/null || :)
+  case "$board" in xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod) ;; *) fail 'This device is not a supported Redmi AX6000.' ;; esac
+  abi_ok || fail 'This firmware does not contain the matching MediaTek mesh driver ABI.'
+  for binary in wapp wappctrl mapd p1905_managerd mapd_cli; do command -v "$binary" >/dev/null || fail "Required daemon $binary is missing."; done
+  [ -d /sys/class/net/br-lan ] || fail 'The br-lan bridge is required.'
+  [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null || :)" = 0 ] || fail 'Disable VLAN filtering on br-lan before enabling mesh.'
+  [ -d /sys/class/net/ra0 ] && [ -d /sys/class/net/rax0 ] || fail 'Both MediaTek AP radios must be active.'
+  role=$(get ax6000_mesh.main.role); backhaul=$(get ax6000_mesh.main.backhaul)
+  case "$role" in controller|agent) ;; *) fail 'Invalid mesh role.' ;; esac
+  case "$backhaul" in wired|wireless) ;; *) fail 'Invalid backhaul.' ;; esac
+  if [ "$role" = agent ] && [ "$(get dhcp.lan.ignore)" != 1 ]; then
+    fail 'Disable DHCP serving on LAN and assign this agent a distinct management address before enabling mesh.'
+  fi
+  if [ "$role" = agent ]; then
+    for option in ra dhcpv6 ndp; do
+      case "$(get dhcp.lan.$option)" in ''|0|disabled) ;; *) fail 'Disable LAN IPv6 router advertisements, DHCPv6 and NDP relay before enabling mesh on an agent.' ;; esac
+    done
+    sections=$(uci -q -X show dhcp | sed -n "s/^dhcp\.\([A-Za-z0-9_]*\)=dhcp$/\1/p")
+    for section in $sections; do
+      [ "$(get dhcp.$section.interface)" = lan ] || [ "$section" = lan ] || continue
+      [ "$(get dhcp.$section.ignore)" = 1 ] || fail 'Disable every DHCP server configured on LAN before enabling mesh on an agent.'
+      for option in ra dhcpv6 ndp; do
+        case "$(get dhcp.$section.$option)" in ''|0|disabled) ;; *) fail 'Disable LAN IPv6 router advertisements, DHCPv6 and NDP relay before enabling mesh on an agent.' ;; esac
+      done
+    done
+  fi
+  # Restrict configuration to one active AP on each of two radios, both in LAN.
+  [ -z "$(uci -q changes wireless)" ] || fail 'Apply or discard pending wireless changes first.'
+  aps=$(uci -q -X show wireless | sed -n "s/^wireless\.\([A-Za-z0-9_]*\)=wifi-iface$/\1/p")
+  ap1= ap2= dev1= dev2= ssid= key=
+  for ap in $aps; do
+    mode=$(get wireless.$ap.mode)
+    if [ "$mode" = sta ]; then
+      case "$ap:$(get ax6000_mesh.main.enabled):$role:$backhaul" in
+        ax6000_mesh_bh1:1:agent:wireless|ax6000_mesh_bh2:1:agent:wireless) continue ;;
+        *) fail 'Remove existing wireless station interfaces before enabling mesh.' ;;
+      esac
+    fi
+    [ "$mode" = ap ] || continue
+    [ "$(get wireless.$ap.disabled)" != 1 ] || continue
+    [ "$(get wireless.$ap.network)" = lan ] || fail 'Each active AP must belong only to LAN.'
+    dev=$(get wireless.$ap.device)
+    case "$dev" in ''|*[!A-Za-z0-9_]*) fail 'Invalid wireless device name.' ;; esac
+    [ "$(get wireless.$dev.type)" = mtwifi ] || fail 'Only MediaTek radios are supported.'
+    [ "$(get wireless.$ap.hidden)" != 1 ] || fail 'Show the SSID on both mesh APs before enabling mesh.'
+    [ "$(get wireless.$ap.ieee80211r)" != 1 ] || fail 'Disable 802.11r on the mesh APs.'
+    [ "$(get wireless.$ap.encryption)" = psk2 ] || fail 'Both APs must use WPA2-PSK (psk2).'
+    ap_ssid=$(get wireless.$ap.ssid); ap_key=$(get wireless.$ap.key)
+    # The WTS parser accepts printable ASCII, with spaces and backslashes escaped.
+    case "$ap_ssid" in ''|*[![:print:]]*) fail 'SSID must contain printable ASCII characters.' ;; esac
+    case "$ap_key" in ''|*[![:print:]]*) fail 'WPA key must contain printable ASCII characters.' ;; esac
+    [ "${#ap_ssid}" -le 32 ] && [ "${#ap_key}" -ge 8 ] && [ "${#ap_key}" -le 63 ] || fail 'SSID or WPA key length is invalid.'
+    if [ -z "$ap1" ]; then ap1=$ap; dev1=$dev; ssid=$ap_ssid; key=$ap_key
+    elif [ -z "$ap2" ]; then ap2=$ap; dev2=$dev; [ "$dev1" != "$dev2" ] || fail 'Use one AP per radio.'; [ "$ssid" = "$ap_ssid" ] && [ "$key" = "$ap_key" ] || fail 'Both APs must have the same SSID and WPA key.'
+    else fail 'Exactly one active AP per radio is supported.'; fi
+  done
+  [ -n "$ap1" ] && [ -n "$ap2" ] || fail 'Exactly two active MediaTek APs are required.'
+  for port in lan2 lan3 lan4; do [ -e "/sys/class/net/br-lan/brif/$port" ] || fail 'Expected LAN ports lan2 through lan4 in br-lan.'; done
+}
+
+prepare() {
+  if [ ! -d /sys/module/mapfilter ]; then : > "$state/owns-mapfilter"; fi
+  modprobe mapfilter >/dev/null 2>&1 || fail 'The MediaTek mapfilter kernel module is unavailable.'
+  # The vendor driver keeps MAP R2/R3 and traffic separation as chip-wide flags.
+  iwpriv ra0 set mapR3Enable=0 >/dev/null 2>&1 || fail 'Cannot disable MAP R3 in the driver.'
+  iwpriv ra0 set mapR2Enable=1 >/dev/null 2>&1 || fail 'Cannot enable MAP R2 in the driver.'
+  iwpriv ra0 set mapTSEnable=0 >/dev/null 2>&1 || fail 'Cannot disable traffic separation in the driver.'
+  template=/usr/share/ax6000-mesh/vendor
+  [ -f "$template/mapd_default.cfg" ] && [ -f "$template/1905d.cfg" ] || fail 'Mesh configuration templates are missing.'
+  mkdir -p /etc/map
+  chmod 700 /etc/map
+  [ -f /etc/map/mapd_user.cfg ] || cp "$template/mapd_user.cfg" /etc/map/mapd_user.cfg
+  chmod 600 /etc/map/mapd_user.cfg
+  cp "$template/mapd_default.cfg" /etc/map/mapd_cfg
+  # User profile persists the daemon's enrolled backhaul credentials.
+  while IFS='=' read -r name value; do
+    case "$name" in BhProfile[0-9]Valid|BhProfile[0-9]Ssid|BhProfile[0-9]AuthMode|BhProfile[0-9]EncrypType|BhProfile[0-9]WpaPsk|BhProfile[0-9]RaID) datconf -f /etc/map/mapd_cfg set "$name" "$value" >/dev/null 2>&1 || fail 'Cannot restore mesh backhaul profile.' ;; esac
+  done < /etc/map/mapd_user.cfg
+  if [ "$role" = controller ]; then device_role=1; agent=0; root=1; else device_role=2; agent=1; root=0; fi
+  for entry in "DeviceRole=$device_role" 'lan_interface=lan2 lan3 lan4' 'wan_interface=' 'DhcpCtl=0' 'ChPlanningEnable=0' 'ChPlanningEnableR2=0' 'NetworkOptimizationEnabled=0' 'AutoBHSwitching=0'; do
+    datconf -f /etc/map/mapd_cfg set "${entry%%=*}" "${entry#*=}" >/dev/null 2>&1 || fail 'Cannot prepare mesh settings.'
+  done
+  bh_type=eth
+  if [ "$role" = agent ] && [ "$backhaul" = wireless ]; then bh_type=wifi; fi
+  mac=$(cat /sys/class/net/br-lan/address)
+  case "$mac" in ??\:??\:??\:??\:??\:??) ;; *) fail 'Invalid LAN bridge address.' ;; esac
+  cat > /etc/map/1905d.cfg <<END
+map_controller_alid=$mac
+map_agent_alid=$mac
+map_agent=$agent
+map_root=$root
+bh_type=$bh_type
+radio_band=24G;5G;
+br_inf=br-lan
+lan=lan2
+lan=lan3
+lan=lan4
+map_ver=R2
+bss_config_priority=ra0;rax0;apcli0;apclix0
+END
+  # Identical 2.4/5 GHz AP credentials, with both FH and BH enabled.
+  : >> /etc/map/wts_bss_info_config
+  chmod 600 /etc/map/wts_bss_info_config
+  escaped_ssid=$(printf '%s' "$ssid" | sed 's/\\/\\\\/g; s/ /\\ /g')
+  escaped_key=$(printf '%s' "$key" | sed 's/\\/\\\\/g; s/ /\\ /g')
+  printf '#ucc_bss_info\n1,ff:ff:ff:ff:ff:ff 8x %s 0x0020 0x0008 %s 1 1 hidden-N 4095 N/A N/A\n2,ff:ff:ff:ff:ff:ff 11x %s 0x0020 0x0008 %s 1 1 hidden-N 4095 N/A N/A\n3,ff:ff:ff:ff:ff:ff 12x %s 0x0020 0x0008 %s 1 1 hidden-N 4095 N/A N/A\n' "$escaped_ssid" "$escaped_key" "$escaped_ssid" "$escaped_key" "$escaped_ssid" "$escaped_key" > /etc/map/wts_bss_info_config
+  cp "$template/ethernet_cfg.txt" /etc/ethernet_cfg.txt
+  cp "$template/wapp_ap_ra0.conf" /etc/wapp_ap_ra0.conf
+  cp "$template/wapp_ap_rax0.conf" /etc/wapp_ap_rax0.conf
+  printf 'conf_list=/etc/wapp_ap_ra0.conf;/etc/wapp_ap_rax0.conf;\n' > /etc/wapp_ap.conf
+  printf 'all_main_inf=ra0;rax0;\n' > /etc/wapp_main_inf.conf
+  chmod 600 /etc/map/1905d.cfg /etc/map/mapd_cfg /etc/map/wts_bss_info_config
+  if [ ! -f /etc/mapd_strng.conf ]; then
+    cat > /etc/mapd_strng.conf <<'END'
+LowRSSIAPSteerEdge_RE=40
+CUOverloadTh_2G=70
+CUOverloadTh_5G_L=80
+CUOverloadTh_5G_H=80
+MetricPolicyChUtilThres_24G=70
+MetricPolicyChUtilThres_5GL=80
+MetricPolicyChUtilThres_5GH=80
+ChPlanningChUtilThresh_24G=70
+ChPlanningChUtilThresh_5GL=80
+ChPlanningEDCCAThresh_24G=200
+ChPlanningEDCCAThresh_5GL=200
+ChPlanningOBSSThresh_24G=200
+ChPlanningOBSSThresh_5GL=200
+ChPlanningR2MonitorTimeoutSecs=300
+ChPlanningR2MonitorProhibitSecs=900
+ChPlanningR2MetricReportingInterval=10
+ChPlanningR2MinScoreMargin=20
+MetricRepIntv=10
+MetricPolicyRcpi_24G=100
+MetricPolicyRcpi_5GL=100
+MetricPolicyRcpi_5GH=100
+END
+  fi
+}
+
+wait_radios() {
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    ready=1
+    for radio in ra0 rax0; do
+      flags=$(cat "/sys/class/net/$radio/flags" 2>/dev/null || :)
+      case "$flags" in 0x[0-9a-fA-F]*) [ "$((flags & 1))" -eq 1 ] || ready=0 ;; *) ready=0 ;; esac
+    done
+    if [ "$ready" = 1 ] && wifi isup >/dev/null 2>&1; then return 0; fi
+    attempt=$((attempt + 1)); sleep 1
+  done
+  return 1
+}
+
+restore() {
+  /etc/init.d/ax6000-mesh stop >/dev/null 2>&1 || :
+  if [ -f "$state/owns-mapfilter" ]; then
+    [ ! -d /sys/module/mapfilter ] || rmmod mapfilter >/dev/null 2>&1 || return 1
+  fi
+  uci -q revert wireless || return 1
+  if [ -f "$state/original-wireless" ]; then cp "$state/original-wireless" "$config" || return 1; fi
+  for band in b0 b1; do
+    profile="/etc/wireless/mediatek/mt7986-ax6000.dbdc.$band.dat"
+    [ ! -f "$state/original-$band" ] || cp "$state/original-$band" "$profile" || return 1
+  done
+  uci -q set ax6000_mesh.main.enabled=0 || return 1
+  uci -q commit ax6000_mesh || return 1
+  wifi reload >/dev/null 2>&1 || return 1
+  wait_radios || return 1
+  iwpriv ra0 set mapR2Enable=0 >/dev/null 2>&1 || return 1
+  iwpriv ra0 set mapTSEnable=0 >/dev/null 2>&1 || return 1
+}
+
+apply_mesh() {
+  [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Mesh is already enabled; disable it before reapplying.'
+  if [ -d /sys/module/mapfilter ]; then owns_mapfilter=0; else owns_mapfilter=1; fi
+  preflight
+  [ ! -d "$state" ] || fail 'A previous wireless snapshot exists; disable mesh to restore it first.'
+  for binary in wapp mapd p1905_managerd; do ! pidof "$binary" >/dev/null || fail "A $binary process is already running."; done
+  mkdir -m 700 "$state"
+  trap 'rm -rf "$state"' EXIT
+  trap 'exit 1' HUP INT TERM
+  cp "$config" "$state/original-wireless"
+  for band in b0 b1; do
+    profile="/etc/wireless/mediatek/mt7986-ax6000.dbdc.$band.dat"
+    [ -f "$profile" ] || fail 'Expected AX6000 radio profile is missing.'
+    cp "$profile" "$state/original-$band"
+  done
+  chmod 600 "$state"/*
+  success=0
+  if [ "$owns_mapfilter" = 1 ]; then : > "$state/owns-mapfilter"; fi
+  trap '[ "$success" = 1 ] || { if restore; then rm -rf "$state"; else printf "%s\n" "Restore failed; snapshot retained in $state." >&2; fi; }' EXIT
+  trap 'exit 1' HUP INT TERM
+  modprobe mapfilter >/dev/null 2>&1 || fail 'The MediaTek mapfilter kernel module is unavailable.'
+  for device in "$dev1" "$dev2"; do
+    uci -q set "wireless.$device.map_mode=1"
+    if [ "$role" = agent ]; then agent=1; else agent=0; fi
+    uci -q set "wireless.$device.map_agent=$agent"
+  done
+  for ap in "$ap1" "$ap2"; do uci -q set "wireless.$ap.map_bss_type=96"; done
+  if [ "$role" = agent ] && [ "$backhaul" = wireless ]; then
+    for index in 1 2; do
+      section="ax6000_mesh_bh$index"
+      [ -z "$(get wireless.$section)" ] || fail 'A mesh backhaul section already exists.'
+      if [ "$index" = 1 ]; then device=$dev1; else device=$dev2; fi
+      uci -q set "wireless.$section=wifi-iface"
+      uci -q set "wireless.$section.device=$device"
+      uci -q set "wireless.$section.mode=sta"
+      uci -q set "wireless.$section.network=lan"
+      uci -q set "wireless.$section.ssid=mesh-backhaul"
+    done
+  fi
+  uci -q commit wireless
+  cp "$config" "$state/active-wireless"
+  uci -q set ax6000_mesh.main.enabled=1
+  uci -q commit ax6000_mesh
+  wifi reload >/dev/null 2>&1 || fail 'Wireless reload failed; settings restored.'
+  wait_radios || fail 'Wireless radios did not become ready; settings restored.'
+  if ! start_error=$(/etc/init.d/ax6000-mesh start 2>&1); then
+    fail "Mesh service failed to start; settings restored. $(printf '%.256s' "$start_error")"
+  fi
+  n=0
+  while [ "$n" -lt 45 ]; do
+    if /usr/libexec/ax6000-mesh-health; then success=1; break; fi
+    n=$((n + 1)); sleep 1
+  done
+  [ "$success" = 1 ] || fail 'Mesh daemons did not start; wireless settings restored.'
+  trap - EXIT HUP INT TERM
+}
+
+disable_mesh() {
+  [ -z "$(uci -q changes wireless)" ] || fail 'Apply or discard pending wireless changes first.'
+  if [ -f "$state/active-wireless" ] && ! cmp -s "$config" "$state/active-wireless"; then
+    fail 'Wireless configuration changed since mesh was enabled. Restore it manually before disabling mesh.'
+  fi
+  [ -f "$state/original-wireless" ] || fail 'No wireless snapshot is available for restoration.'
+  restore || fail "Restore failed; snapshot retained in $state."
+  rm -rf "$state"
+}
+
+case "${1:-}" in
+  configure|apply|disable|pair)
+    exec 9>/var/lock/ax6000-mesh.lock
+    flock -n 9 || fail 'Another mesh operation is in progress.'
+    ;;
+esac
+case "${1:-}" in
+ configure)
+  [ "$#" -eq 3 ] || fail 'Expected a role and backhaul.'
+  case "$2" in controller|agent) ;; *) fail 'Invalid mesh role.' ;; esac
+  case "$3" in wired|wireless) ;; *) fail 'Invalid backhaul.' ;; esac
+  [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Disable mesh before changing its role or backhaul.'
+  uci -q set ax6000_mesh.main=mesh
+  uci -q set "ax6000_mesh.main.role=$2"
+  uci -q set "ax6000_mesh.main.backhaul=$3"
+  uci -q commit ax6000_mesh
+  ;;
+ apply) apply_mesh ;;
+ disable) disable_mesh ;;
+ pair)
+  [ "$(get ax6000_mesh.main.enabled)" = 1 ] || fail 'Mesh is not enabled.'
+  [ "$(get ax6000_mesh.main.backhaul)" = wireless ] || fail 'Pairing is only needed for wireless backhaul.'
+  pidof wapp >/dev/null || fail 'The wireless daemon is not running.'
+  timeout 8 wappctrl ra0 wps_pbc >/dev/null || fail 'Wireless pairing could not be started.'
+  ;;
+ abi) abi_ok ;;
+ preflight) preflight ;;
+ prepare) preflight; prepare ;;
+ *) fail 'Unknown mesh command.' ;;
+esac

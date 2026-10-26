@@ -87,6 +87,7 @@ class NativeAsuTests(unittest.TestCase):
                      '# CONFIG_PACKAGE_opkg is not set', '# CONFIG_PACKAGE_apk-mbedtls is not set']:
             self.assertIn(line + '\n', config)
         legacy = copy.deepcopy(profile); legacy.pop('package_manager')
+        legacy.pop('mediatek_mesh', None)  # Historical opkg behavior has no mesh opt-in.
         self.assertEqual(firmware.source_symbols(legacy)['USE_APK'], 'n')
         self.assertEqual(firmware.source_symbols(legacy)['PACKAGE_opkg'], 'y')
 

@@ -32,6 +32,8 @@ class FreshNativeApkSelectionTests(unittest.TestCase):
                 source = Path(directory)
                 profile = json.loads((repository / 'profiles' /
                     f'redmi-ax6000-612-{channel}-new.json').read_text())
+                # Isolate fresh APK selection from the independently tested mesh source installer.
+                profile.pop('mediatek_mesh', None)
                 self.assertEqual(profile['package_manager'], 'apk')
                 self.assertIsNone(profile['sdk']['url'])
                 self.assertIsNone(profile['firmware']['kernel_version'])

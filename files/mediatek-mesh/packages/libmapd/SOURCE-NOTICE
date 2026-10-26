@@ -1,0 +1,7 @@
+Source: https://github.com/immortalwrt-mt798x/immortalwrt/tree/a3f94baa4ea053130be796915ad9ff2fa5fcf567
+Archive: libmapd-0132d199.tar.bz2
+SHA256: d325b4a8dc2bf44bd3bd639a0c300380c0a6240f407807f8f2eea80d006c8dba
+
+No top-level LICENSE or COPYING is present in this source archive. Individual source files carry their original notices. This archive contains source for the mapd control interface library; public source availability does not establish a blanket redistribution grant. This recipe does not claim such a grant.
+
+Local compatibility patches and packaging do not replace upstream notices.
