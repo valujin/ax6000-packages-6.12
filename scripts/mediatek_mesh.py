@@ -21,7 +21,15 @@ FLAGS = ('MTK_MAP_SUPPORT', 'MTK_MAP_R2_VER_SUPPORT', 'MTK_MAP_R3_VER_SUPPORT',
 RECEIPT = 'ax6000-mesh-source.json'
 ABI_PATH = 'etc/ax6000-mesh-abi.json'
 ABI_MARKER = {'schema_version': 1, 'abi': 'mtk-20250408-map6e', 'source_commit': SOURCE_COMMIT,
-              'driver': '7.6.7.3', 'release': 2, 'flags': {flag: 'y' for flag in FLAGS}}
+              'driver': '7.6.7.3', 'release': 2, 'flags': {flag: 'y' for flag in FLAGS},
+              'defines': {'MAP_MLO_UPLINK': 1}}
+
+
+SDK_UAPI = 'ax6000-baseline/mesh-uapi'
+UAPI_HEADERS = {
+    'wapp_cmm_type.h': '821fa92e0b2f044928af64e420a4f1735635e7567f312add971c9d715da13898',
+    'mt_wlan_cmm_oid.h': 'a11e84592439326bb7d6cc6cc8e4dd1eec4f570b6c31e0bce041039c5ddae5b9',
+}
 
 
 def abi_bytes():
@@ -93,24 +101,35 @@ def provenance(profile):
     need(digest(patch) == manifest['sha256'], 'MediaTek mtwifi patch hash differs')
     return {'schema_version': 1, 'source_commit': SOURCE_COMMIT,
             'mtwifi_patch_sha256': manifest['sha256'], 'firmware_abi': ABI_MARKER,
+            'wapp_uapi': UAPI_HEADERS,
             'vendor_driver': {'package': 'kmod-mt_wifi', 'version': '7.6.7.3', 'release': 2,
-                              'flags': {flag: 'y' for flag in FLAGS}},
+                              'flags': {flag: 'y' for flag in FLAGS}, 'defines': {'MAP_MLO_UPLINK': 1}},
             'packages': {name: tree(ASSETS / 'packages' / name) for name in LOCAL_PACKAGES}}
 
 
 def patch_targets(source, manifest):
     result = {}
-    for relative, hashes in manifest['files'].items():
+    # Existing targets identify the native/SDK vendor root for reviewed additions.
+    entries = sorted(manifest['files'].items(), key=lambda item: item[1]['before_sha256'] is None)
+    for relative, hashes in entries:
         candidates = [source / relative, source / 'feeds/base_root' / relative,
                       source / 'feeds/base' / relative.removeprefix('package/')]
         found = {path.resolve() for path in candidates if path.is_file()}
-        need(len(found) == 1, 'MediaTek mtwifi patch requires one native/SDK source: ' + relative)
-        target = found.pop()
-        need(target.is_relative_to(source.resolve()) and target.is_file(), 'MediaTek mtwifi patch escapes source')
-        need(digest(target.read_bytes()) in (hashes['before_sha256'], hashes['after_sha256']),
+        if hashes['before_sha256'] is None and not found:
+            driver = 'package/mtk/drivers/mt_wifi/'
+            need(relative.startswith(driver), 'Unsupported MediaTek source patch addition')
+            target = result[driver + 'Makefile'].parent / relative.removeprefix(driver)
+        else:
+            need(len(found) == 1, 'MediaTek mtwifi patch requires one native/SDK source: ' + relative)
+            target = found.pop()
+        need(target.resolve().is_relative_to(source.resolve()) and not target.is_symlink(),
+             'MediaTek mtwifi patch escapes source')
+        actual = digest(target.read_bytes()) if target.is_file() else None
+        need(actual in (hashes['before_sha256'], hashes['after_sha256']),
              'MediaTek mtwifi patch preimage hash differs: ' + relative)
         result[relative] = target
-    states = {digest(path.read_bytes()) == manifest['files'][relative]['after_sha256'] for relative, path in result.items()}
+    states = {path.is_file() and digest(path.read_bytes()) == manifest['files'][relative]['after_sha256']
+              for relative, path in result.items()}
     need(len(states) == 1, 'MediaTek mtwifi patch has mixed before/after state')
     return result, states == {True}
 
@@ -127,6 +146,7 @@ def configure(profile, source, *, native=False, check_only=False):
         baseline = json.loads(baseline_path.read_bytes())
         need(baseline.get('source_commit') == SOURCE_COMMIT and baseline.get('mediatek_mesh'),
              'Older native SDK cannot retrofit MediaTek mesh')
+        verify_sdk_uapi(source)
     manifest = json.loads(regular(ASSETS / 'patches/mtwifi-manifest.json', ASSETS))
     targets, patched = patch_targets(source, manifest)
     proof = provenance(profile)
@@ -165,7 +185,8 @@ def configure(profile, source, *, native=False, check_only=False):
             for relative, path in targets.items():
                 staged = temporary / relative
                 staged.parent.mkdir(parents=True, exist_ok=True)
-                staged.write_bytes(path.read_bytes())
+                if path.is_file():
+                    staged.write_bytes(path.read_bytes())
             patch = ASSETS / 'patches' / manifest['patch']
             subprocess.run(['git', 'apply', '--check', str(patch)], cwd=temporary, check=True, capture_output=True)
             subprocess.run(['git', 'apply', str(patch)], cwd=temporary, check=True, capture_output=True)
@@ -177,6 +198,7 @@ def configure(profile, source, *, native=False, check_only=False):
         if not (destination / name).exists():
             shutil.copytree(ASSETS / 'packages' / name, destination / name)
     for relative, data in updates.items():
+        targets[relative].parent.mkdir(parents=True, exist_ok=True)
         targets[relative].write_bytes(data)
     if native and not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -261,3 +283,35 @@ def verify_payloads(profile, payloads, read_file, check_mode=None):
          and any(path.startswith('usr/lib/libeth_1905ops.so') for path in files),
          'Actual image MediaTek mesh native libraries are incomplete')
     return files
+
+
+def verify_sdk_uapi(sdk):
+    sdk = Path(sdk)
+    for name, expected_hash in UAPI_HEADERS.items():
+        path = sdk / SDK_UAPI / name
+        need(path.is_file() and path.stat().st_size <= 1024 * 1024,
+             'Native SDK WAPP UAPI header absent: ' + name)
+        need(digest(regular(path, sdk)) == expected_hash, 'Native SDK WAPP UAPI header hash differs: ' + name)
+    return dict(UAPI_HEADERS)
+
+
+def export_sdk_uapi(profile, source, kernel, sdk):
+    if not validate(profile):
+        return None
+    source, kernel, sdk = Path(source), Path(kernel), Path(sdk)
+    native = {'wapp_cmm_type.h': kernel.parent / 'mt_wifi/mt_wifi/embedded/include/wapp/wapp_cmm_type.h',
+              'mt_wlan_cmm_oid.h': kernel / 'include/uapi/linux/wapp/mt_wlan_cmm_oid.h'}
+    contents = {}
+    for name, path in native.items():
+        data = regular(path, source)
+        need(digest(data) == UAPI_HEADERS[name], 'Native WAPP UAPI header hash differs: ' + name)
+        contents[name] = data
+    destination = sdk / SDK_UAPI
+    need(not destination.exists() and not any(path.is_symlink() for path in (destination, *destination.parents)),
+         'Native SDK WAPP UAPI header destination already exists or is linked')
+    destination.mkdir(parents=True)
+    for name, data in contents.items():
+        path = destination / name
+        path.write_bytes(data)
+        path.chmod(0o644)
+    return verify_sdk_uapi(sdk)

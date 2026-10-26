@@ -17,6 +17,46 @@ ROOT = Path(__file__).resolve().parents[1]
 PATCHES = ROOT / 'files/mediatek-mesh/patches'
 
 
+class MeshNativeDriverPatch(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('AX6000_METADATA_SOURCE') and os.environ.get('AX6000_DRIVER_ARCHIVE'),
+                         'Set AX6000_METADATA_SOURCE and AX6000_DRIVER_ARCHIVE for the complete vendor patch sequence')
+    def test_mesh_patch_after_complete_vendor_patch_sequence(self):
+        source = Path(os.environ['AX6000_METADATA_SOURCE'])
+        archive = Path(os.environ['AX6000_DRIVER_ARCHIVE'])
+        self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(),
+                         'b029d7b43c498193092dc6a3c857361c8835ce34bb306561c550ac0539784a78')
+        with tempfile.TemporaryDirectory(prefix='mesh-driver-patches-') as temporary:
+            target = Path(temporary)
+            subprocess.run(['tar', '-xJf', str(archive), '-C', str(target)], check=True, timeout=60)
+            standard = source / 'package/mtk/drivers/mt_wifi/patches-7673'
+            patches = sorted(standard.glob('*.patch'))
+            self.assertTrue(patches)
+            for patch in patches:
+                result = subprocess.run(['patch', '--batch', '-p1', '-i', str(patch)], cwd=target,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, str(patch) + '\n' + result.stdout + result.stderr)
+            # Recover the installed nested patch from the authenticated outer
+            # patch, then require every hunk to match without offset or fuzz.
+            outer = (PATCHES / 'mtwifi-mesh.patch').read_text()
+            marker = '+++ b/package/mtk/drivers/mt_wifi/patches-7673/050-ax6000-mesh-native-abi.patch\n'
+            nested = outer.split(marker, 1)[1].splitlines()[1:]
+            mesh_patch = target / 'mesh.patch'
+            mesh_patch.write_text('\n'.join(line[1:] for line in nested if line.startswith('+')) + '\n')
+            before_make = (target / 'mt_wifi_ap/Makefile').read_text()
+            before_bcn = (target / 'mt_wifi/embedded/common/bcn.c').read_text()
+            result = subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', str(mesh_patch)],
+                                    cwd=target, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('offset', result.stdout)
+            self.assertNotIn('fuzz', result.stdout)
+            self.assertEqual((target / 'mt_wifi_ap/Makefile').read_text(), before_make.replace(
+                'ifeq ($(CONFIG_MAP_SUPPORT),y)\n',
+                'ifeq ($(CONFIG_MAP_SUPPORT),y)\n    EXTRA_CFLAGS += -DMAP_MLO_UPLINK\n'))
+            self.assertEqual((target / 'mt_wifi/embedded/common/bcn.c').read_text(), before_bcn.replace(
+                '"[DFS-SLAVE] %s(): beaconing off Update reason: %d\\n", __func__, reason);\n\t\treturn NDIS_STATUS_SUCCESS;',
+                '"[DFS-SLAVE] %s(): beaconing off Update reason: %d\\n", __func__, reason);\n\t\treturn;'))
+
+
 class MeshMtwifiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -39,7 +79,10 @@ class MeshMtwifiTests(unittest.TestCase):
                     raise AssertionError('mtwifi preimage checksum differs: ' + current)
                 target.write_bytes(raw)
         for line in patch.read_text().splitlines(keepends=True):
-            if line.startswith('--- a/'):
+            if line.startswith('--- /dev/null'):
+                save()
+                current, content = None, []
+            elif line.startswith('--- a/'):
                 save()
                 current, content = line[6:].strip(), []
             elif line.startswith('\\ No newline'):

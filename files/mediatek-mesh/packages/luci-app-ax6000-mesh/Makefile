@@ -8,3 +8,5 @@ LUCI_DEPENDS:=+luci-base +ax6000-mesh
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
+
+# call BuildPackage - OpenWrt buildroot signature

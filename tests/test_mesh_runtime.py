@@ -64,7 +64,7 @@ class RuntimeLifecycle(unittest.TestCase):
         (self.root / 'etc/config/wireless').write_text('original wireless\n')
         for band in ('b0', 'b1'):
             (self.root / f'etc/wireless/mediatek/mt7986-ax6000.dbdc.{band}.dat').write_text('original DAT\n')
-        marker = {'schema_version': 1, 'abi': 'mtk-20250408-map6e', 'source_commit': 'ae65e1de69971b5a2e3cf7e39390ee93f274d488', 'driver': '7.6.7.3', 'release': 2, 'flags': dict.fromkeys(['MTK_MAP_SUPPORT', 'MTK_MAP_R2_VER_SUPPORT', 'MTK_MAP_R3_VER_SUPPORT', 'MTK_MAP_R2_6E_SUPPORT', 'MTK_MAP_R3_6E_SUPPORT', 'MTK_DFS_SLAVE_SUPPORT'], 'y')}
+        marker = {'schema_version': 1, 'abi': 'mtk-20250408-map6e', 'source_commit': 'ae65e1de69971b5a2e3cf7e39390ee93f274d488', 'driver': '7.6.7.3', 'release': 2, 'defines': {'MAP_MLO_UPLINK': 1}, 'flags': dict.fromkeys(['MTK_MAP_SUPPORT', 'MTK_MAP_R2_VER_SUPPORT', 'MTK_MAP_R3_VER_SUPPORT', 'MTK_MAP_R2_6E_SUPPORT', 'MTK_MAP_R3_6E_SUPPORT', 'MTK_DFS_SLAVE_SUPPORT'], 'y')}
         (self.root / 'etc/ax6000-mesh-abi.json').write_text(json.dumps(marker, sort_keys=True, separators=(',', ':')) + '\n')
         self.db = self.root / 'uci.json'
         self.db.write_text(json.dumps({'wireless.a': 'wifi-iface', 'wireless.b': 'wifi-iface', 'wireless.a.mode': 'ap', 'wireless.b.mode': 'ap', 'wireless.a.device': 'd1', 'wireless.b.device': 'd2', 'wireless.d1.type': 'mtwifi', 'wireless.d2.type': 'mtwifi', 'wireless.a.network': 'lan', 'wireless.b.network': 'lan', 'wireless.a.encryption': 'psk2', 'wireless.b.encryption': 'psk2', 'wireless.a.ssid': 'Example', 'wireless.b.ssid': 'Example', 'wireless.a.key': 'password123', 'wireless.b.key': 'password123', 'ax6000_mesh.main.role': 'controller', 'ax6000_mesh.main.backhaul': 'wired', 'ax6000_mesh.main.enabled': '0'}))

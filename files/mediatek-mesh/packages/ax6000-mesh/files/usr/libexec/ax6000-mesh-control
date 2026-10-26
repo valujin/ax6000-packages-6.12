@@ -12,7 +12,7 @@ config=/etc/config/wireless
 abi_ok() {
   [ -f /etc/ax6000-mesh-abi.json ] || return 1
   digest=$(sha256sum /etc/ax6000-mesh-abi.json) || return 1
-  [ "${digest%% *}" = c261054529069b50e94411dc52725eb7a8d1aa2815b4fb647dcba85f50e5757e ]
+  [ "${digest%% *}" = 7fd55be3915c7c9ee84bcaf4698ba1c49efded4131164c01761ac1be7a8fd623 ]
 }
 
 preflight() {

@@ -917,6 +917,7 @@ def augment_sdk(profile, source, archive, controls, abi):
             shutil.rmtree(snapshot)
         bank = "apks" if apk else "ipks"
         (snapshot / bank).mkdir(parents=True)
+        mediatek_mesh.export_sdk_uapi(profile, source, kernel, sdk)
         tool_manifest = {}
         if apk:
             host_apk = sdk / "staging_dir/host/bin/apk"

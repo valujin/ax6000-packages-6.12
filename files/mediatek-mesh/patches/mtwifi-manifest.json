@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source_commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
   "patch": "mtwifi-mesh.patch",
-  "sha256": "23d80c456ed86701181980be591370e81c3a64a7b3727519f4956c4c67cc0bf1",
+  "sha256": "968ef7a9944aacd5ab0655f3405471876b882b4811e0b32286a2d20efe786a92",
   "files": {
     "package/mtk/applications/mtwifi-cfg-ucode/Makefile": {
       "before_sha256": "e2adc9c633d68a8dce73c2392c736dd203b5b10c54dc84538dbc8e082952be98",
@@ -39,6 +39,10 @@
     "package/mtk/drivers/mt_wifi/Makefile": {
       "before_sha256": "d56b9ab58b50bde5bfe3de234c634b8d32f7ca31b7262ad789ec152fb6615253",
       "after_sha256": "9edfebd4052a24968fb35d00837d4c6197e138087fd85cf56a75a0321b160ac4"
+    },
+    "package/mtk/drivers/mt_wifi/patches-7673/050-ax6000-mesh-native-abi.patch": {
+      "before_sha256": null,
+      "after_sha256": "29367970faedd61d48092271a8f0f4bf539ba1cbef847a10788e24257a7b42d9"
     }
   }
 }

@@ -757,6 +757,8 @@ def inspect_sdk(archive, kernel, source, work, profile, native_controls=None, na
     apk_sdk = package_format.manager(profile) == 'apk'
     if apk_sdk:
         wanted |= {'ax6000-baseline/manifest.json', 'staging_dir/host/bin/apk'}
+    if profile.get('mediatek_mesh'):
+        wanted |= {mediatek_mesh.SDK_UAPI + '/' + name for name in mediatek_mesh.UAPI_HEADERS}
     baseline_packages, bundle_records = {}, {}
     captured, names, declared, members, top = {}, set(), 0, 0, None
     process, raw = None, None
@@ -857,6 +859,9 @@ def inspect_sdk(archive, kernel, source, work, profile, native_controls=None, na
                 and baseline.get('kernel_version') == profile['firmware']['kernel_version']
                 and baseline.get('architecture') == profile['firmware']['architecture'], 'APK SDK baseline cohort identity differs')
         if profile.get('mediatek_mesh'):
+            for name, expected in mediatek_mesh.UAPI_HEADERS.items():
+                require(hashlib.sha256(captured[mediatek_mesh.SDK_UAPI + '/' + name]).hexdigest() == expected,
+                        'APK SDK WAPP UAPI header hash differs: ' + name)
             require(baseline.get('mediatek_mesh') == mediatek_mesh.verify(profile, source, native=True),
                     'APK SDK MediaTek mesh native provenance differs')
         tool = baseline.get('host_apk', {})

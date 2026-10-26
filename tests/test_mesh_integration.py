@@ -127,6 +127,8 @@ class MeshIntegration(unittest.TestCase):
         baseline = self.source / 'ax6000-baseline/manifest.json'
         baseline.parent.mkdir()
         baseline.write_text(json.dumps({'source_commit': MESH.SOURCE_COMMIT, 'mediatek_mesh': proof}))
+        from test_mesh_sdk import seed_sdk_headers
+        seed_sdk_headers(self.source)
         (self.source / '.config').write_text(''.join('CONFIG_' + name + '=y\n' for name in MESH.FLAGS))
         self.assertEqual(MESH.configure(selected, self.source), proof)
         self.assertEqual(MESH.verify(selected, self.source), proof)

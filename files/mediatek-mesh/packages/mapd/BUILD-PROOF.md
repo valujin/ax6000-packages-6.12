@@ -61,3 +61,38 @@ libkvcutil for WAPP, the packaged ethernet library for p1905_managerd, and
 libmapd_interface_client for mapd_cli. Recipes include those dependencies.
 Native OpenWrt package/image assembly and on-device validation remain separate
 integration checks; this evidence does not claim they have completed.
+
+## Native driver compile and wire ABI follow-up
+
+A private copy of the prepared Linux 6.12.108 kernel and already-patched
+mt_wifi 7.6.7.3 source was built with the recommended GCC 14.3.0 cross
+compiler. The pinned driver recipe's complete `PKG_KCONFIG` mapping was
+reproduced from the recommended configuration, with `CONFIG_MAP_SUPPORT`,
+`CONFIG_MAP_R2_VER_SUPPORT`, `CONFIG_MAP_R3_VER_SUPPORT`,
+`CONFIG_MAP_R2_6E_SUPPORT`, `CONFIG_MAP_R3_6E_SUPPORT`, and
+`CONFIG_DFS_SLAVE_SUPPORT` set to `y`. The build used `make -j1`, a 2 GiB process address-space
+limit, and the recommended dependency symbol tables read-only. All driver
+objects were rebuilt in scratch. `MODPOST` and linking passed for both
+`mt_wifi.ko` and `mtk_warp_proxy.ko`; both are AArch64 modules with vermagic
+`6.12.108 SMP mod_unload aarch64`.
+
+This actual compilation corrected an earlier assumption: the native
+`mt_wifi_ap/Makefile` does not consume the `MAP_MLO_UPLINK` flag from
+`os/linux/config_ap.mk`. The persistent source patch therefore adds
+`EXTRA_CFLAGS += -DMAP_MLO_UPLINK` inside the native Makefile's
+`CONFIG_MAP_SUPPORT` block. The newly enabled DFS code also needed its
+`UpdateBeaconHandler` early return changed from `return NDIS_STATUS_SUCCESS;`
+to `return;`, because that function returns `VOID`. These exact two source
+changes were present in the successful private build.
+
+A small driver translation unit used the actual saved native compiler
+arguments, changing only source/output paths and debug-information emission.
+Its DWARF was compared with the final WAPP object: all 73 shared named
+WAPP-header record sizes/member offsets/bitfields and all 123 shared protocol
+enum values matched. This checks the actual driver definitions, including
+MAP R2/R3, MAP 6E/R3 6E, DFS and the explicit MLO uplink wire-format flag;
+header identity alone was not treated as sufficient ABI evidence.
+
+These checks compile and inspect modules; they do not load them or establish
+wireless, roaming, or hardware interoperability results. Native OpenWrt
+package/image assembly remains a separate integration check.
