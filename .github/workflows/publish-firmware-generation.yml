@@ -1,0 +1,394 @@
+name: Verify and publish an immutable recommended firmware generation
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_run_id:
+        description: Exact successful main firmware.yml run whose artifacts will be verified and published
+        required: true
+        type: string
+
+concurrency:
+  group: package-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      acceptance_id: ${{ steps.acceptance_artifact.outputs.artifact-id }}
+      acceptance_sha256: ${{ steps.sdk_check.outputs.sha256 }}
+    steps:
+      - &bind_producer
+        name: Bind the exact successful firmware run and artifacts
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIRMWARE_RUN_ID: ${{ inputs.firmware_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$FIRMWARE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo 'Invalid firmware run ID.' >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FIRMWARE_RUN_ID" > run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FIRMWARE_RUN_ID/artifacts?per_page=100" > artifacts.json
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          run = json.loads(Path('run.json').read_text())
+          repository = os.environ['GITHUB_REPOSITORY']
+          run_id = int(os.environ['FIRMWARE_RUN_ID'])
+          if (run.get('id') != run_id or run.get('status') != 'completed'
+                  or run.get('conclusion') != 'success' or run.get('event') != 'workflow_dispatch'
+                  or run.get('head_branch') != os.environ['DEFAULT_BRANCH']
+                  or run.get('path') != '.github/workflows/firmware.yml'
+                  or run.get('repository', {}).get('full_name') != repository
+                  or run.get('head_repository', {}).get('full_name') != repository
+                  or not re.fullmatch('[a-f0-9]{40}', run.get('head_sha') or '')):
+              raise SystemExit('Require the exact successful default-branch firmware.yml run in this repository')
+          artifacts = json.loads(Path('artifacts.json').read_text()).get('artifacts', [])
+          output = {'producer': run['head_sha']}
+          for label, prefix, cap in (('raw', 'ax6000-firmware-sdk-packages', 8 * 1024**3),
+                                      ('diagnostics', 'ax6000-build-diagnostics', 512 * 1024**2)):
+              matches = [a for a in artifacts if a.get('name') == f'{prefix}-{run_id}']
+              if len(matches) != 1:
+                  raise SystemExit('Missing or duplicated producer artifact: ' + label)
+              artifact = matches[0]
+              if (artifact.get('expired') is not False or type(artifact.get('id')) is not int
+                      or artifact['id'] <= 0 or type(artifact.get('size_in_bytes')) is not int
+                      or not 0 < artifact['size_in_bytes'] <= cap
+                      or artifact.get('workflow_run', {}).get('id') != run_id
+                      or artifact['workflow_run'].get('head_sha') != run['head_sha']
+                      or not re.fullmatch('sha256:[a-f0-9]{64}', artifact.get('digest') or '')):
+                  raise SystemExit('Expired, oversized or mismatched producer artifact: ' + label)
+              output[label + '_id'] = artifact['id']
+              output[label + '_digest'] = artifact['digest'][7:]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              for name, value in output.items():
+                  stream.write(f'{name}={value}\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - &checkout_producer
+        name: Check out the exact firmware producer recipe
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.producer.outputs.producer }}
+          path: producer
+          persist-credentials: false
+      - &prepare_storage
+        name: Require disposable hosted artifact and SDK storage
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_KIND" == github-hosted ]] || { echo 'A disposable GitHub hosted runner is required.' >&2; exit 1; }
+          sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          if command -v docker >/dev/null; then sudo docker image prune --all --force; fi
+          python3 - <<'PY'
+          import os, shutil
+          free = shutil.disk_usage(os.environ['RUNNER_TEMP']).free
+          if free < 60 * 1024**3:
+              raise SystemExit('Require at least 60 GiB free before raw download, SDK extraction and verification')
+          PY
+      - &download_producer
+        name: Download and verify the exact artifact archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_ID: ${{ steps.producer.outputs.raw_id }}
+          RAW_DIGEST: ${{ steps.producer.outputs.raw_digest }}
+          DIAGNOSTICS_ID: ${{ steps.producer.outputs.diagnostics_id }}
+          DIAGNOSTICS_DIGEST: ${{ steps.producer.outputs.diagnostics_digest }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RAW_ID/zip" > "$RUNNER_TEMP/raw.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$DIAGNOSTICS_ID/zip" > "$RUNNER_TEMP/diagnostics.zip"
+          python3 - <<'PY'
+          import hashlib, os, shutil, stat, zipfile
+          from pathlib import Path, PurePosixPath
+          for label, cap in (('raw', 8 * 1024**3), ('diagnostics', 1024**3)):
+              archive = Path(os.environ['RUNNER_TEMP']) / (label + '.zip')
+              with archive.open('rb') as stream:
+                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+              if digest != os.environ[label.upper() + '_DIGEST']:
+                  raise SystemExit('Producer artifact archive digest differs: ' + label)
+              target = Path(label)
+              target.mkdir()
+              with zipfile.ZipFile(archive) as package:
+                  entries = package.infolist()
+                  if len(entries) > 30000 or sum(e.file_size for e in entries) > cap:
+                      raise SystemExit('Producer artifact extraction bound exceeded')
+                  seen = set()
+                  for entry in entries:
+                      path = PurePosixPath(entry.filename)
+                      kind = stat.S_IFMT(entry.external_attr >> 16)
+                      if (not path.parts or path.is_absolute() or '..' in path.parts
+                              or '\\' in entry.filename or entry.filename in seen
+                              or kind not in (0, stat.S_IFREG, stat.S_IFDIR)):
+                          raise SystemExit('Unsafe producer artifact member')
+                      seen.add(entry.filename)
+                      destination = target.joinpath(*path.parts)
+                      if entry.is_dir():
+                          destination.mkdir(parents=True, exist_ok=True)
+                      else:
+                          destination.parent.mkdir(parents=True, exist_ok=True)
+                          with package.open(entry) as source, destination.open('xb') as output:
+                              shutil.copyfileobj(source, output, 1024**2)
+              archive.unlink()
+          PY
+      - &verify_native
+        name: Require producer native verification for these exact images and SDK
+        env:
+          PRODUCER_COMMIT: ${{ steps.producer.outputs.producer }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('producer/scripts').resolve()))
+          spec = importlib.util.spec_from_file_location('release_import', 'producer/scripts/import-release.py')
+          importer = importlib.util.module_from_spec(spec); spec.loader.exec_module(importer)
+          metadata = importer.validate_metadata(Path('raw'), Path('producer/profiles/redmi-ax6000-612-recommended-new.json'),
+                                                 expected_producer_commit=os.environ['PRODUCER_COMMIT'])
+          profile, manifest = metadata['profile'], metadata['manifest']
+          if (profile.get('channel') != 'recommended' or profile.get('package_manager') != 'apk'
+                  or profile.get('exclude_asu') is not True or 'asu' in profile
+                  or profile.get('mediatek_mesh') is not True):
+              raise SystemExit('Require the reviewed recommended APK Mesh generation without ASU')
+          matches = list(Path('diagnostics').rglob('firmware-verification.json'))
+          if len(matches) != 1 or matches[0].stat().st_size > 8 * 1024**2:
+              raise SystemExit('Missing or ambiguous successful native verification evidence')
+          proof = json.loads(matches[0].read_text())
+          if (proof.get('ok') is not True or proof.get('channel') != profile['channel']
+                  or proof.get('build_id') != profile['build_id']
+                  or proof.get('source_commit') != manifest['source_commit']
+                  or proof.get('kernel_abi') != profile['firmware']['kernel_version']
+                  or proof.get('package_manager') != 'apk'
+                  or proof.get('sdk_context', {}).get('sdk_sha256') != profile['sdk']['sha256']
+                  or not proof.get('stock_factory')
+                  or set(proof.get('layouts', {})) != {'stock', 'mtkuboot', 'ubootmod'}):
+              raise SystemExit('Producer native verification identity differs')
+          inventory = {Path(entry['path']).name: entry for entry in manifest['files']}
+          for record in proof['layouts'].values():
+              image = inventory.get(record.get('image'))
+              if (image is None or image['sha256'] != record.get('image_sha256')
+                      or image['size'] != record.get('image_size')):
+                  raise SystemExit('Native verification does not describe these firmware image bytes')
+          Path('native-verification.json').write_bytes(matches[0].read_bytes())
+          PY
+      - name: Prepare disposable hosted SDK tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang cmake flex bison gawk gettext git \
+            libjson-c-dev libncurses-dev libssl-dev python3 python3-setuptools rsync unzip zlib1g-dev \
+            file wget curl zstd xz-utils ninja-build pkg-config libzstd-dev swig perl patch libelf-dev xxd
+          python3 scripts/hosted-publication.py -- bash scripts/build-apk-host.sh --work-dir "$RUNNER_TEMP/apk-host"
+          printf 'AX6000_APK=%s\n' "$RUNNER_TEMP/apk-host/build/src/apk" >> "$GITHUB_ENV"
+      - name: Compile the exact exported SDK and fresh packages before publication
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          profile = json.loads(Path('raw/profile.json').read_text())
+          sdk = Path('raw/bin/targets/mediatek/filogic') / Path(urlsplit(profile['sdk']['url']).path).name
+          with sdk.open('rb') as stream:
+              if hashlib.file_digest(stream, 'sha256').hexdigest() != profile['sdk']['sha256']:
+                  raise SystemExit('Exported SDK checksum differs')
+          work = Path(os.environ['RUNNER_TEMP']) / 'sdk-work'
+          work.mkdir()
+          shutil.copyfile(sdk, work / 'sdk.archive')
+          PY
+          python3 scripts/hosted-publication.py -- bash producer/scripts/build.sh --profile raw/profile.json --lock raw/lock.json \
+            --work-dir "$RUNNER_TEMP/sdk-work" --output-dir "$RUNNER_TEMP/sdk-raw" 2>&1 | tee sdk-build.log
+      - name: Verify actual SDK compilation and unchanged native context
+        id: sdk_check
+        env:
+          FIRMWARE_RUN_ID: ${{ inputs.firmware_run_id }}
+          PRODUCER_COMMIT: ${{ steps.producer.outputs.producer }}
+          RAW_DIGEST: ${{ steps.producer.outputs.raw_digest }}
+          DIAGNOSTICS_DIGEST: ${{ steps.producer.outputs.diagnostics_digest }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path('producer/scripts').resolve()))
+          import prepare
+          profile = json.loads(Path('raw/profile.json').read_text())
+          proof = json.loads(Path('native-verification.json').read_text())
+          roots = list((Path(os.environ['RUNNER_TEMP']) / 'sdk-work/extracted').iterdir())
+          if len(roots) != 1: raise SystemExit('Ambiguous extracted SDK')
+          sdk = roots[0]
+          prepare.check_kernel(profile, sdk)
+          context = proof['sdk_context']
+          expected = {'.config', '.config.set', '.vermagic', 'Module.symvers', 'modules.builtin.modinfo',
+                      'include/config/kernel.release', 'include/generated/autoconf.h'}
+          if set(context['matching_contexts']) != expected:
+              raise SystemExit('Incomplete producer kernel context evidence')
+          for name, record in context['matching_contexts'].items():
+              data = (sdk / context['kernel_relative_path'] / name).read_bytes()
+              if record != {'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}:
+                  raise SystemExit('SDK compilation changed native kernel context: ' + name)
+          baseline = prepare.baseline_packages(profile, sdk)
+          protected = prepare.baseline_protected_packages(profile, sdk)
+          compiled = set()
+          for path in (sdk / 'bin').rglob('*.apk'):
+              control = prepare.read_package_control(path, apk=os.environ['AX6000_APK'])
+              compiled.add(control.get('Base-Package', control['Package']))
+          required = set(profile['packages']) - protected - {name for name in baseline if name.startswith('kmod-')}
+          if not required <= compiled or 'kmod-amneziawg' not in compiled or 'tailscale' not in compiled:
+              raise SystemExit('Exact SDK did not compile the requested packages and AmneziaWG: ' + ', '.join(sorted(required - compiled)))
+          daily = Path(os.environ['RUNNER_TEMP']) / 'sdk-raw'
+          if (daily / 'profile.json').read_bytes() != Path('raw/profile.json').read_bytes():
+              raise SystemExit('SDK export changed the generated profile')
+          evidence = {'schema_version': 1, 'ok': True, 'build_id': profile['build_id'],
+                      'sdk_sha256': profile['sdk']['sha256'], 'kernel_context': context['matching_contexts'],
+                      'compiled_requested_packages': sorted(required), 'compiled_amneziawg': True,
+                      'firmware_run_id': int(os.environ['FIRMWARE_RUN_ID']), 'producer_commit': os.environ['PRODUCER_COMMIT'],
+                      'raw_artifact_sha256': os.environ['RAW_DIGEST'], 'diagnostics_artifact_sha256': os.environ['DIAGNOSTICS_DIGEST'],
+                      'profile_sha256': hashlib.sha256(Path('raw/profile.json').read_bytes()).hexdigest(),
+                      'lock_sha256': hashlib.sha256(Path('raw/lock.json').read_bytes()).hexdigest(),
+                      'manifest_sha256': hashlib.sha256(Path('raw/firmware-manifest.json').read_bytes()).hexdigest(),
+                      'native_verification_sha256': hashlib.sha256(Path('native-verification.json').read_bytes()).hexdigest()}
+          Path('sdk-acceptance.json').write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('sha256=' + hashlib.sha256(Path('sdk-acceptance.json').read_bytes()).hexdigest() + '\n')
+          PY
+      - name: Preserve the exact SDK acceptance handoff
+        id: acceptance_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-sdk-acceptance-${{ github.run_id }}
+          path: sdk-acceptance.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve genuine build and verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-acceptance-diagnostics-${{ github.run_id }}
+          path: |
+            native-verification.json
+            sdk-build.log
+            ${{ runner.temp }}/apk-host/tool-proof.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  generation:
+    needs: acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      # These aliases repeat the API, ZIP digest, producer and native checks on
+      # a fresh runner. No SDK executable or SDK build runs in the signing job.
+      - *bind_producer
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - *checkout_producer
+      - *prepare_storage
+      - *download_producer
+      - *verify_native
+      - name: Download this workflow's exact SDK acceptance handoff
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.acceptance.outputs.acceptance_id }}
+          path: acceptance-proof
+          merge-multiple: true
+      - name: Verify the hash-bound SDK acceptance handoff
+        env:
+          ACCEPTANCE_SHA256: ${{ needs.acceptance.outputs.acceptance_sha256 }}
+          FIRMWARE_RUN_ID: ${{ inputs.firmware_run_id }}
+          PRODUCER_COMMIT: ${{ steps.producer.outputs.producer }}
+          RAW_DIGEST: ${{ steps.producer.outputs.raw_digest }}
+          DIAGNOSTICS_DIGEST: ${{ steps.producer.outputs.diagnostics_digest }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          path = Path('acceptance-proof/sdk-acceptance.json')
+          if (not path.is_file() or path.stat().st_size > 1024**2
+                  or not re.fullmatch('[a-f0-9]{64}', os.environ['ACCEPTANCE_SHA256'])
+                  or hashlib.sha256(path.read_bytes()).hexdigest() != os.environ['ACCEPTANCE_SHA256']):
+              raise SystemExit('SDK acceptance handoff checksum differs')
+          proof = json.loads(path.read_text())
+          profile = json.loads(Path('raw/profile.json').read_text())
+          expected = {'schema_version': 1, 'ok': True, 'build_id': profile['build_id'],
+                      'sdk_sha256': profile['sdk']['sha256'], 'compiled_amneziawg': True,
+                      'firmware_run_id': int(os.environ['FIRMWARE_RUN_ID']), 'producer_commit': os.environ['PRODUCER_COMMIT'],
+                      'raw_artifact_sha256': os.environ['RAW_DIGEST'], 'diagnostics_artifact_sha256': os.environ['DIAGNOSTICS_DIGEST'],
+                      'profile_sha256': hashlib.sha256(Path('raw/profile.json').read_bytes()).hexdigest(),
+                      'lock_sha256': hashlib.sha256(Path('raw/lock.json').read_bytes()).hexdigest(),
+                      'manifest_sha256': hashlib.sha256(Path('raw/firmware-manifest.json').read_bytes()).hexdigest(),
+                      'native_verification_sha256': hashlib.sha256(Path('native-verification.json').read_bytes()).hexdigest()}
+          if any(proof.get(name) != value for name, value in expected.items()):
+              raise SystemExit('SDK acceptance belongs to different producer artifacts')
+          native = json.loads(Path('native-verification.json').read_text())
+          if proof.get('kernel_context') != native['sdk_context']['matching_contexts']:
+              raise SystemExit('SDK acceptance kernel context differs')
+          required = {'wapp', 'mapd', '1905daemon', 'libmapd', 'ax6000-mesh', 'luci-app-ax6000-mesh', 'tailscale'}
+          if not required <= set(proof.get('compiled_requested_packages', [])):
+              raise SystemExit('SDK acceptance omits requested Mesh packages')
+          PY
+      - name: Build pinned host usign on the fresh signing runner
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd cmake build-essential libjson-c-dev
+          pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
+          git init "$RUNNER_TEMP/usign-source"
+          git -C "$RUNNER_TEMP/usign-source" fetch --depth 1 https://github.com/openwrt/usign.git "$pin"
+          git -C "$RUNNER_TEMP/usign-source" checkout --detach FETCH_HEAD
+          [[ $(git -C "$RUNNER_TEMP/usign-source" rev-parse HEAD) == "$pin" ]]
+          python3 scripts/hosted-publication.py -- cmake -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
+          python3 scripts/hosted-publication.py -- cmake --build "$RUNNER_TEMP/usign-build" --parallel 1
+      - name: Publish the verified immutable firmware generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/generation-signing.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
+          unset OPKG_SIGNING_KEY
+          tar --exclude='./usign' -C raw -cf - . | zstd -T1 -3 -o "$RUNNER_TEMP/raw.tar.zst"
+          (cd "$RUNNER_TEMP" && sha256sum raw.tar.zst > raw.tar.zst.sha256)
+          python3 scripts/hosted-publication.py -- python3 producer/scripts/channel-snapshot.py publish-generation \
+            --raw raw --expected-profile producer/profiles/redmi-ax6000-612-recommended-new.json \
+            --raw-archive "$RUNNER_TEMP/raw.tar.zst" --checksum "$RUNNER_TEMP/raw.tar.zst.sha256" \
+            --repository "$GITHUB_REPOSITORY" --key "$key" --public-key keys/repository.pub \
+            --usign "$RUNNER_TEMP/usign-build/usign" --output generation
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          pointer = json.loads(Path('generation/generation-pointer.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write('Published verified immutable generation: ' + pointer['tag'] + '\n\n')
+              stream.write('Next: publish-existing.yml with this exact release_tag, bootstrap=false and the authenticated live replace_build_id.\n')
+          PY
+      - name: Preserve publication and genuine verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generation-publication-${{ github.run_id }}
+          path: |
+            generation
+            native-verification.json
+            acceptance-proof/sdk-acceptance.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -81,7 +81,10 @@ Kernel, vendor-стек и защищённые зависимости закр�
 `profiles/redmi-ax6000-612-recommended-new.json`: все три разметки, factory,
 SDK и фактическая нативная проверка. Это новая обычная сборка, без
 перемаркировки ранее выпущенного ImageBuilder или SDK.
-После успешного immutable Release оператор активирует его через
+После успешной сборки `publish-firmware-generation.yml` принимает точный ID
+запуска, проверяет пакеты через экспортированный SDK и выпускает подписанный
+immutable Release. [Порядок публикации](docs/PUBLISH-GENERATION.md).
+Затем оператор активирует поколение через
 `publish-existing.yml`, указав `channel=recommended`, точный `release_tag`
 и `replace_build_id` текущего подписанного поколения. Новый generated profile
 копируется из фактического RAW, а не составляется вручную.
