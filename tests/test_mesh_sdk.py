@@ -36,6 +36,61 @@ def seed_sdk_headers(sdk):
 
 
 class MeshSdkUapi(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('AX6000_METADATA_SOURCE'), 'Set AX6000_METADATA_SOURCE for the real SDK dependency graph')
+    def test_mesh_consumers_retain_frozen_mapfilter_without_sdk_compile_edges(self):
+        source = Path(os.environ['AX6000_METADATA_SOURCE'])
+        with tempfile.TemporaryDirectory(prefix='mesh-mapfilter-graph-') as temporary:
+            sdk = Path(temporary)
+            for name in ('include', 'scripts', 'config'):
+                shutil.copytree(source / name, sdk / name, symlinks=True)
+            for name in ('rules.mk', '.config'):
+                shutil.copyfile(source / name, sdk / name)
+            for name in ('1905daemon', 'ax6000-mesh', 'mapfilter', 'wapp', 'mapd', 'libmapd'):
+                shutil.copytree(ROOT / 'files/mediatek-mesh/packages' / name, sdk / 'package/ax6000-overrides' / name)
+            hostbin = sdk / 'staging_dir/host/bin'; hostbin.mkdir(parents=True)
+            (hostbin / 'mkhash').symlink_to(source / 'staging_dir/host/bin/mkhash')
+            (hostbin / 'awk').symlink_to(shutil.which('gawk'))
+            env = {**os.environ, 'TOPDIR': str(sdk), 'PATH': str(hostbin) + ':' + os.environ['PATH']}
+            baseline = sdk / 'ax6000-baseline/manifest.json'
+            baseline.parent.mkdir(); baseline.write_text('{}')
+            for native in (False, True):
+                if native:
+                    baseline.unlink()
+                shutil.rmtree(sdk / 'tmp', ignore_errors=True)
+                (sdk / 'tmp/info').mkdir(parents=True)
+                scan = subprocess.run(['make', '--no-print-directory', '-r', '-f', 'include/scan.mk',
+                                       'SCAN_DIR=package', 'SCAN_TARGET=packageinfo'], cwd=sdk, env=env,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(scan.returncode, 0, scan.stdout + scan.stderr)
+                metadata = (sdk / 'tmp/.packageinfo').read_text()
+                self.assertIn('Package: kmod-mapfilter\n', metadata)
+                graph = subprocess.run(['perl', 'scripts/package-metadata.pl', 'mk', 'tmp/.packageinfo'],
+                                       cwd=sdk, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(graph.returncode, 0, graph.stderr)
+                config = subprocess.run(['perl', 'scripts/package-metadata.pl', 'config', 'tmp/.packageinfo'],
+                                        cwd=sdk, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(config.returncode, 0, config.stderr)
+                for name in ('1905daemon', 'ax6000-mesh'):
+                    edges = [line for line in graph.stdout.splitlines() if f'/{name}/compile' in line]
+                    self.assertEqual(any('/mapfilter/compile' in line for line in edges), native, edges)
+                    package = sdk / 'package/ax6000-overrides' / name
+                    (package / 'runtime.mk').write_text('include Makefile\n$(eval $(call Package/' + name + '))\n'
+                        'runtime-dependency:\n\t@printf "EXTRA=%s\\nDEPENDS=%s\\nPACKED=%s\\n" "$(EXTRA_DEPENDS)" "$(DEPENDS)" "$(call FormatDepends,,$(EXTRA_DEPENDS))"\n')
+                    runtime = subprocess.run(['make', '--no-print-directory', '-r', '-f', 'runtime.mk',
+                                              'DUMP=1', 'TOPDIR=' + str(sdk), 'runtime-dependency'], cwd=package,
+                                             capture_output=True, text=True, timeout=60)
+                    self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+                    if native:
+                        self.assertIn('+kmod-mapfilter', runtime.stdout)
+                    else:
+                        self.assertIn('EXTRA=kmod-mapfilter (=6.12.108.3.0.1.2-r1)\n', runtime.stdout)
+                        self.assertIn('PACKED=kmod-mapfilter (=6.12.108.3.0.1.2-r1)\n', runtime.stdout)
+                        self.assertNotIn('+kmod-mapfilter', runtime.stdout)
+                self.assertEqual('select PACKAGE_kmod-mapfilter' in config.stdout, native)
+                proof = os.environ.get('AX6000_METADATA_PROOF_DIR')
+                if proof:
+                    (Path(proof) / ('mesh-mapfilter-native' if native else 'mesh-mapfilter-sdk')).write_text(graph.stdout)
+
     def test_native_sdk_export_carries_exact_headers_and_detects_tamper(self):
         self.assertTrue(hasattr(mesh, 'export_sdk_uapi'), 'Native mesh SDK header export is required')
         with tempfile.TemporaryDirectory() as temporary:
@@ -136,12 +191,13 @@ sdk-uapi-stage:
             # DUMP skips package packing. Evaluate its actual package definition
             # to confirm EXTRA_DEPENDS retains the precise frozen APK version.
             with (package / 'smoke.mk').open('a') as smoke:
-                smoke.write("\n$(eval $(call Package/wapp))\nsdk-runtime-dep:\n\t@printf '%s\\n' '$(EXTRA_DEPENDS)'\n")
+                smoke.write("\n$(eval $(call Package/wapp))\nsdk-runtime-dep:\n\t@printf '%s\\nPACKED=%s\\n' '$(EXTRA_DEPENDS)' '$(call FormatDepends,,$(EXTRA_DEPENDS))'\n")
             runtime = subprocess.run(['make', '--no-print-directory', '-r', '-f', 'smoke.mk', 'DUMP=1',
                                       'TOPDIR=' + str(sdk), 'sdk-runtime-dep'], cwd=package,
                                      capture_output=True, text=True, timeout=60)
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
-            self.assertIn('kmod-mt_wifi (= 6.12.108.7.6.7.3-r2)', runtime.stdout)
+            self.assertIn('kmod-mt_wifi (=6.12.108.7.6.7.3-r2)', runtime.stdout)
+            self.assertIn('PACKED=kmod-mt_wifi (=6.12.108.7.6.7.3-r2)\n', runtime.stdout)
             proof = os.environ.get('AX6000_METADATA_PROOF_DIR')
             if proof:
                 (Path(proof) / 'sdk-packageinfo').write_text(metadata)

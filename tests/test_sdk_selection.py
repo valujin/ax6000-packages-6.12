@@ -122,7 +122,7 @@ class SdkKconfigSelectionTest(unittest.TestCase):
         for path, before in self.context.items():
             self.assertEqual(path.read_bytes(), before)
 
-    def test_protected_frozen_apk_kmods_do_not_restore_unrequested_baked_defaults(self):
+    def test_frozen_apk_kmods_do_not_restore_requested_or_unrequested_baked_defaults(self):
         self.profile.update(id='redmi-ax6000-612-recommended', channel='recommended',
                             package_manager='apk')
         self.profile['packages'].append('kmod-tun')
@@ -154,7 +154,8 @@ class SdkKconfigSelectionTest(unittest.TestCase):
         self.assertNotIn('CONFIG_PACKAGE_kmod-ath9k-common=y', actual)
         self.assertIn('CONFIG_PACKAGE_kmod-amneziawg=m\n', actual)
         self.assertIn('CONFIG_PACKAGE_kmod-crypto-aead=m\n', actual)
-        self.assertIn('CONFIG_PACKAGE_kmod-tun=y\n', actual)
+        self.assertNotIn('CONFIG_PACKAGE_kmod-tun=y\n', actual)
+        self.assertNotIn('CONFIG_PACKAGE_kmod-tun=m\n', actual)
         self.assertIn('CONFIG_PACKAGE_apk-openssl=y\n', actual)
         for path, before in self.context.items():
             self.assertEqual(path.read_bytes(), before)

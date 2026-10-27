@@ -14,7 +14,7 @@ ifneq ($(wildcard $(TOPDIR)/ax6000-baseline/manifest.json),)
 PKG_BUILD_DEPENDS:=datconf
 # EXTRA_DEPENDS keeps the authenticated runtime requirement without an SDK
 # compile edge into the protected native vendor module.
-WAPP_DRIVER_EXTRA_DEPENDS:=kmod-mt_wifi (= 6.12.108.7.6.7.3-r2)
+WAPP_DRIVER_EXTRA_DEPENDS:=kmod-mt_wifi (=6.12.108.7.6.7.3-r2)
 WAPP_DRIVER_UAPI=$(TOPDIR)/ax6000-baseline/mesh-uapi/wapp_cmm_type.h
 WAPP_OID_UAPI=$(TOPDIR)/ax6000-baseline/mesh-uapi/mt_wlan_cmm_oid.h
 else

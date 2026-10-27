@@ -10,6 +10,13 @@ PKG_SOURCE_URL:=https://raw.githubusercontent.com/immortalwrt-mt798x/immortalwrt
 PKG_HASH:=82f7cc4ad5731e750f87c9a4ad19a39d2456bb8fec0cf79bf4b3f3ccb4f14795
 PKG_BUILD_DIR:=$(BUILD_DIR)/1905daemon
 PKG_BUILD_DEPENDS:=wapp
+
+ifneq ($(wildcard $(TOPDIR)/ax6000-baseline/manifest.json),)
+# Keep the authenticated native module at runtime without rebuilding it in SDKs.
+MAPFILTER_EXTRA_DEPENDS:=kmod-mapfilter (=6.12.108.3.0.1.2-r1)
+else
+MAPFILTER_DEPENDS:=+kmod-mapfilter
+endif
 PKG_BUILD_PARALLEL:=0
 PKG_LICENSE:=Proprietary
 
@@ -23,7 +30,8 @@ define Package/1905daemon
   SECTION:=net
   CATEGORY:=Network
   TITLE:=MediaTek 1905daemon for the AX6000 vendor driver
-  DEPENDS:=+libgcc +wapp +libnl-tiny +libopenssl +ip-bridge +kmod-mapfilter
+  DEPENDS:=+libgcc +wapp +libnl-tiny +libopenssl +ip-bridge $(MAPFILTER_DEPENDS)
+  EXTRA_DEPENDS:=$(MAPFILTER_EXTRA_DEPENDS)
 endef
 
 MAKE_FLAGS += SWTICH_DSA_ARCH=y PLANTFORM_DISABLE_GENL_NETLINK=y
