@@ -93,10 +93,10 @@ return view.extend({
 		}
 		function button(id, label, operation, style) {
 			const node = E('button', { 'class': 'cbi-button ' + (style || 'cbi-button-action'),
-				'data-action': id, click: () => action(operation) }, [label]);
+				'data-action': id, style: 'white-space: normal; max-width: 100%; box-sizing: border-box;', click: () => action(operation) }, [label]);
 			buttons.push(node); return node;
 		}
-		const controls = E('div', { 'class': 'cbi-page-actions' }, [
+		const controls = E('div', { 'class': 'cbi-page-actions', style: 'flex-wrap: wrap;' }, [
 			button('apply', _('Enable Mesh'), async () => { checked(await callConfigure(role.value, backhaul.value)); return callApply(); }, 'cbi-button-positive'), ' ',
 			button('pair', _('Add a node'), callPair), ' ',
 			button('disable', _('Disable Mesh and restore settings'), callDisable, 'cbi-button-reset')

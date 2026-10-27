@@ -52,6 +52,9 @@ function all(n){return !n || typeof n!=='object'?[]:[n,...(n.children||[]).flatM
   const pair = buttons.find(n=>n.attrs['data-action']==='pair');
   const disable = buttons.find(n=>n.attrs['data-action']==='disable');
   assert(apply&&pair&&disable);
+  const actions = nodes.find(n=>n.attrs.class==='cbi-page-actions');
+  assert((actions.attrs.style || '').includes('flex-wrap: wrap'), 'action row wraps on narrow screens');
+  assert(buttons.every(n=>(n.attrs.style || '').includes('white-space: normal')), 'long labels can wrap');
   await apply.attrs.click();
   assert.deepEqual(calls.filter(x=>['configure','apply'].includes(x[0])).map(x=>x[0]),['configure','apply']);
   assert(apply.disabled && pair.disabled && disable.disabled, 'pending operation locks actions');
