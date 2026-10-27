@@ -1,13 +1,7 @@
 {
   "all_kmods": false,
   "apk_key_sha256": "279ea19b627e16d0807e099de8bd6cf8b69830281defa9bdb9e4ae96f5beb751",
-  "asu": {
-    "cohort": "612-recommended",
-    "enabled": true,
-    "seed": "3254dd70ea96217f41221b29998780639bbf2e7f33deb735c8bd7b380274c4e3",
-    "server_url": "https://asu.ezon.by/612/recommended"
-  },
-  "build_id": "redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1",
+  "build_id": "redmi-ax6000-612-recommended-ae65e1de6997-2c5f0d54ae97",
   "build_source": {
     "defconfig": "defconfig/mt7986-ax6000.config",
     "device": "xiaomi_redmi-router-ax6000-stock",
@@ -15,6 +9,7 @@
   },
   "channel": "recommended",
   "enabled": true,
+  "exclude_asu": true,
   "feeds": [
     {
       "commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
@@ -93,23 +88,27 @@
     "luci-app-pbr",
     "luci",
     "luci-ssl",
+    "luci-theme-argon",
     "luci-i18n-base-ru",
     "luci-i18n-pbr-ru",
     "luci-app-package-manager",
     "luci-i18n-package-manager-ru",
     "luci-i18n-amneziawg-ru",
-    "attendedsysupgrade-common",
-    "luci-app-attendedsysupgrade",
-    "luci-i18n-attendedsysupgrade-ru"
+    "wapp",
+    "1905daemon",
+    "libmapd",
+    "mapd",
+    "datconf",
+    "libkvcutil",
+    "ax6000-mesh",
+    "luci-app-ax6000-mesh",
+    "luci-i18n-ax6000-mesh-ru",
+    "kmod-mapfilter"
   ],
-  "imagebuilder": {
-    "sha256": "952871ae7a71285445fd68c01df13ee68b9be51da1d51ef0e2b9fe549adcb5e2",
-    "size": 262861586,
-    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1/immortalwrt-imagebuilder-mediatek-filogic.Linux-x86_64.tar.zst"
-  },
   "luci_languages": [
     "ru"
   ],
+  "mediatek_mesh": true,
   "package_manager": "apk",
   "package_only": [
     "tailscale"
@@ -137,6 +136,7 @@
     "resolveip",
     "luci",
     "luci-ssl",
+    "luci-theme-argon",
     "luci-i18n-base-ru",
     "luci-i18n-pbr-ru",
     "luci-i18n-mwan3-ru",
@@ -151,9 +151,16 @@
     "geoip-shell",
     "geoview",
     "geoipupdate",
-    "attendedsysupgrade-common",
-    "luci-app-attendedsysupgrade",
-    "luci-i18n-attendedsysupgrade-ru"
+    "wapp",
+    "1905daemon",
+    "libmapd",
+    "mapd",
+    "datconf",
+    "libkvcutil",
+    "ax6000-mesh",
+    "luci-app-ax6000-mesh",
+    "luci-i18n-ax6000-mesh-ru",
+    "kmod-mapfilter"
   ],
   "pbr_source": "mossdef-stable",
   "publication": {
@@ -163,8 +170,8 @@
   },
   "schema_version": 1,
   "sdk": {
-    "sha256": "50a1bd72eee117acf22d353e11b93930820f3a5c72fbf1cead663043320b163d",
-    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-50a1bd72eee1/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+    "sha256": "2c5f0d54ae97a7be45da7ae17902f30bc4eb2d9a640b4b6d7bed1e9b55159c35",
+    "url": "https://github.com/valujin/ax6000-packages-6.12/releases/download/firmware-redmi-ax6000-612-recommended-ae65e1de6997-2c5f0d54ae97/immortalwrt-sdk-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
   },
   "vendor_country_db": true
 }

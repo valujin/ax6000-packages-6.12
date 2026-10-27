@@ -1,5 +1,5 @@
 """Finite LATEST authorization and unchanged real normal guards; no actual activation."""
-import base64,copy,hashlib,importlib.util,io,json,sys,unittest
+import base64,copy,hashlib,importlib.util,io,json,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 import test_latest_same_image_migration as migration_fixtures
@@ -79,15 +79,43 @@ class LatestActivation(unittest.TestCase):
    with self.assertRaises(ValueError):self.a.require_live_unchanged(snapshot,state,self.a.SITE,None,None,Path(temp))
  def test_retired_latest_ASU_workflow_is_absent(self):
   self.assertFalse((ROOT/'.github/workflows/activate-latest-migration.yml').exists())
- def test_clean_cli_checks_exact_real_proof_bytes_and_refuses_pending_smokes_without_secrets(self):
-  import subprocess
+ def historical_root(self):
+  temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup);root=Path(temp.name)
+  # The archived command authorizes this exact retained REC, not the mutable active cohort.
+  for destination,source in {
+   'scripts/activate-latest-migration.py':'scripts/activate-latest-migration.py',
+   self.a.PROFILE:self.a.PROFILE,
+   'profiles/redmi-ax6000-612-latest.json':'profiles/redmi-ax6000-612-latest.json',
+   'profiles/redmi-ax6000-612-recommended.json':'profiles/redmi-ax6000-612-recommended-b122.json',
+   'keys/repository.pub':'keys/repository.pub',
+  }.items():
+   target=root/destination;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes((ROOT/source).read_bytes())
+  return root
+ def check_args(self,root,smoke):
   raw=(json.dumps(self.fixture().proof(),sort_keys=True,indent=2)+'\n').encode()
   self.assertEqual(hashlib.sha256(raw).hexdigest(),self.a.PINS['migration_proof_sha256'])
+  ticket=self.ticket()|{'smoke_evidence_sha256':smoke};auth=json.dumps(ticket).encode()
+  return [sys.executable,'-I',str(root/'scripts/activate-latest-migration.py'),'--check-inputs','--pointer-base64',encode(self.pointer()),'--expected-predecessor',self.a.PREDECESSOR['manifest_sha256'],'--migration-proof-base64',base64.b64encode(raw).decode(),'--migration-proof-sha256',self.a.PINS['migration_proof_sha256'],'--authorization-base64',base64.b64encode(auth).decode(),'--authorization-sha256',hashlib.sha256(auth).hexdigest(),'--site-url',self.a.SITE,'--profiles',str(root/'profiles'),'--public-key',str(root/'keys/repository.pub')]
+ def test_clean_cli_checks_exact_real_proof_bytes_and_refuses_pending_smokes_without_secrets(self):
+  root=self.historical_root()
   for smoke,success in [('4'*64,True),(None,False)]:
-   ticket=self.ticket()|{'smoke_evidence_sha256':smoke};auth=json.dumps(ticket).encode()
-   args=[sys.executable,'-I',str(ROOT/'scripts/activate-latest-migration.py'),'--check-inputs','--pointer-base64',encode(self.pointer()),'--expected-predecessor',self.a.PREDECESSOR['manifest_sha256'],'--migration-proof-base64',base64.b64encode(raw).decode(),'--migration-proof-sha256',self.a.PINS['migration_proof_sha256'],'--authorization-base64',base64.b64encode(auth).decode(),'--authorization-sha256',hashlib.sha256(auth).hexdigest(),'--site-url',self.a.SITE,'--profiles',str(ROOT/'profiles'),'--public-key',str(ROOT/'keys/repository.pub')]
-   result=subprocess.run(args,env={'PATH':'/usr/bin:/bin'},capture_output=True,text=True)
+   result=subprocess.run(self.check_args(root,smoke),env={'PATH':'/usr/bin:/bin'},capture_output=True,text=True,timeout=15)
    self.assertEqual(result.returncode==0,success,result.stderr)
    if success:self.assertEqual(json.loads(result.stdout),{'eligible_for_normal_activation':True,'check_inputs_only':True,'pages_deployed':False})
- def test_fixed_generated_profile_and_active_profiles_are_genuine(self):self.a.validate_fixed_profiles(ROOT/'profiles',ROOT/'keys/repository.pub')
+   else:self.assertIn('Missing actual local acceptance digest',result.stderr)
+ def test_fixed_generated_profile_and_historical_retained_profiles_are_genuine(self):
+  root=self.historical_root()
+  spec=importlib.util.spec_from_file_location('historical_latest_activation',root/'scripts/activate-latest-migration.py')
+  archived=importlib.util.module_from_spec(spec);spec.loader.exec_module(archived)
+  self.assertEqual(archived.validate_fixed_profiles(root/'profiles',root/'keys/repository.pub')['build_id'],self.a.BUILD)
+  with self.assertRaisesRegex(ValueError,'Only fixed checkout profiles/key'):
+   archived.validate_fixed_profiles(ROOT/'profiles',ROOT/'keys/repository.pub')
+ def test_archived_cli_refuses_current_recommended_mesh_cohort_without_secrets(self):
+  current=json.loads((ROOT/'profiles/redmi-ax6000-612-recommended.json').read_bytes())
+  self.assertIs(current.get('mediatek_mesh'),True)
+  self.assertNotEqual(current['build_id'],self.a.RECOMMENDED['build_id'])
+  result=subprocess.run(self.check_args(ROOT,'4'*64),env={'PATH':'/usr/bin:/bin'},capture_output=True,text=True,timeout=15)
+  self.assertNotEqual(result.returncode,0)
+  self.assertIn('Fixed accepted source profile/key differs',result.stderr)
+  self.assertEqual(result.stdout,'')
 if __name__=='__main__':unittest.main()
