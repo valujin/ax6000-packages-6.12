@@ -1,0 +1,60 @@
+--- a/Makefile
++++ b/Makefile
+@@ -102,18 +102,18 @@
+ CFLAGS += -I$(abspath ./src/1905_if)
+ endif
+ CFLAGS += -I$(abspath ./)
+ CFLAGS += -I$(abspath ./mapd_interface/)
+-CFLAGS += -I$(abspath ../wappd/wapp_usr_intf/)
+-CFLAGS += -I$(abspath ../wappd/include/)
++CFLAGS += -I$(STAGING_DIR)/usr/include/mediatek/wapp/wapp_usr_intf
++CFLAGS += -I$(STAGING_DIR)/usr/include/mediatek/wapp/include
+ CFLAGS += -I$(abspath ./src/networkoptimization/)
+ CFLAGS += -I$(abspath ./src/mapfilter_if/)
+ ifeq ($(CONFIG_DATA_ELEMENT_SUPPORT),y)
+ CFLAGS += -I$(abspath ./src/data_element/)
+ endif
+ 
+ ifeq ($(CONFIG_1905_SUPPPORT),y)
+-FLAGS_1905 += -I$(abspath ../1905daemon/lib_export/)
++FLAGS_1905 += -I$(STAGING_DIR)/usr/include/mediatek/1905
+ else
+ CFLAGS += -I$(abspath ./1905_local_lib/)
+ endif
+ 
+@@ -168,19 +168,19 @@
+ OBJS += mapd.o
+ OBJS += ./mapd_interface/ctrl_iface.o ./mapd_interface/ctrl_iface_unix.o
+ OBJS += ./src/dot11_if/wapp_if.o
+ 
+-LIBS += ../wappd/libwapp_usr_intf_client.a
++LIBS += $(STAGING_DIR)/usr/lib/libwapp_usr_intf_client.a
+ LIBS += libmapd_core.a
+ LIBS += libmapd_steer_core.a
+ ifeq ($(CONFIG_1905_SUPPPORT),y)
+-LIBS += ../1905daemon/lib_export/lib1905_interface.a
+-endif
+-LIBS_bs += ../wappd/libwapp_usr_intf_client.a
++LIBS += $(STAGING_DIR)/usr/lib/lib1905_interface.a
++endif
++LIBS_bs += $(STAGING_DIR)/usr/lib/libwapp_usr_intf_client.a
+ LIBS_bs += libmapd_bs_core.a
+ LIBS_bs += libmapd_bs_steer_core.a
+ ifdef CONFIG_SUPPORT_OPENWRT
+-LIBS_c += -L ../libmapd -lmapd_interface_client
++LIBS_c += -L$(STAGING_DIR)/usr/lib -lmapd_interface_client
+ else
+ 
+ LIBS += -L ../../../lib/libmapd -lmapd_interface_client
+ 
+@@ -189,9 +189,9 @@
+ OBJS_c += mapd_ctrl/mapd_cli.o ./src/utils/common.o
+ ifeq ($(BUILD), local)
+ LIBS_c += /proj/mtk15451/mapd_lib/$(ARCH)/libwapp_usr_intf_client.a
+ else
+-LIBS_c +=  ../wappd/libwapp_usr_intf_client.a
++LIBS_c +=  $(STAGING_DIR)/usr/lib/libwapp_usr_intf_client.a
+ endif
+ 
+ MAPD_LIB = libmapd_core.a
+ ifeq ($(CONFIG_MULTIAP_MTK_LIB),y)

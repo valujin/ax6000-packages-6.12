@@ -57,6 +57,9 @@ MAKE_FLAGS += UAPD_INCLUDE_PATH=$(PKG_BUILD_DIR)/driver-uapi
 define Build/InstallDev
 	$(INSTALL_DIR) $(1)/usr/lib
 	$(CP) $(PKG_BUILD_DIR)/libwapp_usr_intf_client.a $(1)/usr/lib/
+	$(INSTALL_DIR) $(1)/usr/include/mediatek/wapp/include $(1)/usr/include/mediatek/wapp/wapp_usr_intf
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/include/*.h $(1)/usr/include/mediatek/wapp/include/
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/wapp_usr_intf/*.h $(1)/usr/include/mediatek/wapp/wapp_usr_intf/
 endef
 
 define Package/wapp/install

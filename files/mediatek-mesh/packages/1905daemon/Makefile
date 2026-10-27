@@ -38,6 +38,12 @@ MAKE_FLAGS += SWTICH_DSA_ARCH=y PLANTFORM_DISABLE_GENL_NETLINK=y
 TARGET_CFLAGS += -I$(STAGING_DIR)/usr/include/libnl-tiny
 TARGET_LDFLAGS += -lnl-tiny -lm
 
+define Build/InstallDev
+	$(INSTALL_DIR) $(1)/usr/include/mediatek/1905 $(1)/usr/lib
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/lib_export/*.h $(1)/usr/include/mediatek/1905/
+	$(CP) $(PKG_BUILD_DIR)/lib_export/lib1905_interface.a $(1)/usr/lib/
+endef
+
 define Package/1905daemon/install
 	$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/lib $(1)/usr/share/ax6000-mesh/vendor
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/p1905_managerd $(PKG_BUILD_DIR)/1905ctrl $(1)/usr/bin/
