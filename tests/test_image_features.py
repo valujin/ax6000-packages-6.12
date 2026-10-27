@@ -5,7 +5,9 @@ from unittest.mock import patch
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -20,7 +22,72 @@ import vendor_country
 from test_pbr_sources import archive
 
 
+def argon_payload():
+    fixture = ROOT / 'tests/fixtures/argon-native612/installed-assets.tar.gz'
+    data = fixture.read_bytes()
+    if hashlib.sha256(data).hexdigest() != '5d4edb90d3f4f9e9513bafedf4885b9efde17b6364ab52e655e74e2a2e10d987':
+        raise AssertionError('Genuine installed Argon fixture checksum differs')
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as payload:
+        return {entry.name: payload.extractfile(entry).read() for entry in payload if entry.isfile()}
+
+
 class ImageFeatureTests(unittest.TestCase):
+    def test_argon_requested_in_native_seed_cannot_be_missing_from_image(self):
+        seed = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended-new.json').read_text())
+        self.assertIn('luci-theme-argon', seed['packages'])
+        self.assertIn('luci-theme-argon', seed['image_packages'])
+        profile = {'package_manager': 'apk', 'packages': ['luci-theme-argon'],
+                   'image_packages': ['luci-theme-argon']}
+        with self.assertRaisesRegex(ValueError, 'package version differs: luci-theme-argon'):
+            features.verify(profile, {}, {}, lambda path, cap: b'', lambda path, mode: None)
+
+    def test_argon_image_selection_requires_requested_package(self):
+        with self.assertRaisesRegex(ValueError, 'Argon image package must also be requested'):
+            features.expected({'packages': [], 'image_packages': ['luci-theme-argon']}, {})
+
+    def test_argon_genuine_modern_templates_and_css_reject_missing_or_modified_payload(self):
+        profile = {'package_manager': 'apk', 'packages': ['luci-theme-argon'],
+                   'image_packages': ['luci-theme-argon']}
+        policy = features.expected(profile, {})
+        self.assertEqual(policy['versions'], {'luci-theme-argon': '2.4.7-r20260824'})
+        files = argon_payload()
+        self.assertEqual(set(files), set(policy['hashes']))
+        installed = {'luci-theme-argon': {'Version': '2.4.7-r20260824'}}
+        modes = {}
+        def verify():
+            return features.verify(profile, {}, installed, lambda path, cap: files.get(path, b''),
+                                   lambda path, mode: modes.update({path: mode}))
+        checked = verify()
+        self.assertIn('usr/share/ucode/luci/template/themes/argon/header.ut', checked['files'])
+        self.assertTrue(all(mode == 0o644 for mode in modes.values()))
+        for path in files:
+            original = files[path]
+            for bad in (b'', original + b'changed'):
+                files[path] = bad
+                with self.subTest(path=path, missing=not bad):
+                    with self.assertRaisesRegex(ValueError, 'feature hash differs'):
+                        verify()
+            files[path] = original
+        installed['luci-theme-argon']['Version'] = 'old'
+        with self.assertRaisesRegex(ValueError, 'package version differs: luci-theme-argon'):
+            verify()
+
+    @unittest.skipUnless(os.environ.get('AX6000_METADATA_SOURCE'),
+                         'Set AX6000_METADATA_SOURCE for exact pinned Argon source install rules')
+    def test_argon_genuine_fixture_matches_pinned_feed_install_rules(self):
+        theme = Path(os.environ['AX6000_METADATA_SOURCE']) / 'feeds/luci/themes/luci-theme-argon'
+        for path, installed in argon_payload().items():
+            if path.startswith('usr/share/ucode/luci/'):
+                data = (theme / 'ucode' / path.removeprefix('usr/share/ucode/luci/')).read_bytes()
+                # Execute the pinned luci.mk SubstituteVersion sed expressions.
+                data = subprocess.run(['sed', '-e', r's/{# *\([^ ]*\)PKG_VERSION *#}/\12.4.7/g',
+                    '-e', r's/"\({{ *\(media\|resource\) *}}[^"]*\.\(js\|css\)\)"/"\1?v=2.4.7"/g'],
+                    input=data, capture_output=True, check=True).stdout
+            else:
+                relative = 'htdocs/' + path[4:] if path.startswith('www/') else 'root/' + path
+                data = (theme / relative).read_bytes()
+            self.assertEqual(installed, data, path)
+
     def test_vendor_hash_checks_preserve_exact_pinned_file_modes(self):
         from test_verify_firmware import verify as native_verify
 

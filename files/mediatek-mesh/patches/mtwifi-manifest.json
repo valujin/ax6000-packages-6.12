@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source_commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
   "patch": "mtwifi-mesh.patch",
-  "sha256": "968ef7a9944aacd5ab0655f3405471876b882b4811e0b32286a2d20efe786a92",
+  "sha256": "c53a22c0cbb39254dcd94c0909f8054d2887d94f0b0c1cca7b1b767056bd117e",
   "files": {
     "package/mtk/applications/mtwifi-cfg-ucode/Makefile": {
       "before_sha256": "e2adc9c633d68a8dce73c2392c736dd203b5b10c54dc84538dbc8e082952be98",
@@ -22,7 +22,7 @@
     },
     "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/converter.uc": {
       "before_sha256": "ed47141b2769def53471a88109f05d6048fcd018124f9caf8b2a2926b39c2a52",
-      "after_sha256": "d7a7088390c9e6f7e56cf327a9c18b4c9eaa0428feeffa3ae1177cc1dc3c9374"
+      "after_sha256": "b777ce87e38c33bc39fe6d5eb1878ac30f03fee65035fcf7466cce2a1083aede"
     },
     "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/ucode/mtwifi/config.uc": {
       "before_sha256": "4cf8c0baea59e1ca9ce30ee9b09b5585dd0b7885deb4ea64d8d0de66a6fafc91",

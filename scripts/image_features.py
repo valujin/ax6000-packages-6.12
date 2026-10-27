@@ -20,6 +20,23 @@ import pbr_sources
 import vendor_country
 
 
+# luci-theme-argon 2.4.7-r20260824 from the recommended pinned LuCI feed
+# d6167ea0645cbd1327708d85f94824f42d0eb872. Template hashes include the
+# feed's actual luci.mk SubstituteVersion processing; CSS minification is off
+# in this theme's recipe. Legacy static assets alone cannot render modern LuCI.
+ARGON_HASHES = {
+    'usr/share/ucode/luci/template/themes/argon/footer.ut': 'c05b81f9250a453bb0f01ea287f94cfc410a8c060ac2924b17bf29b7bbdad10b',
+    'usr/share/ucode/luci/template/themes/argon/footer_login.ut': 'e87efa6a12ee4764bdd7ea785559822e1998b8d1bd678d86f4314412b2ccbb8b',
+    'usr/share/ucode/luci/template/themes/argon/head_meta.ut': 'abbf79da2aad595c481dcebcbb1168fdb5613dd0cdd261e301c10ab107a2679b',
+    'usr/share/ucode/luci/template/themes/argon/header.ut': '2d2ac0395c6fb926336c7bdb5c135481b72183415d863af2c025a557109f0b76',
+    'usr/share/ucode/luci/template/themes/argon/header_login.ut': '4bf4b215bcefbcc61529d9af57094a30c5344809ab9f1471025b830a4a8a5627',
+    'usr/share/ucode/luci/template/themes/argon/out_header_login.ut': 'd99ca83e2749aac7677cc03040aa77fa13116c134bf0e17f496073639a5fa116',
+    'usr/share/ucode/luci/template/themes/argon/sysauth.ut': 'aea72c1efc5c32022e1af48baa74ffc916efe45a477b297b7cbc5716d7591cc1',
+    'www/luci-static/argon/css/cascade.css': '12345def603c0c6ffbba5faecdaeec417dbbd2748a135e942896e8c226a72a1e',
+    'etc/uci-defaults/30_luci-theme-argon': '6f4acab86d7d63e850869bc1c9523dda909472905265478813f6b1cc38c9e42b',
+}
+
+
 def need(ok, message):
     if not ok:
         raise ValueError(message)
@@ -56,6 +73,11 @@ def minified_js(data, source):
 def expected(profile, lock, source=None):
     no_asu.validate(profile)
     files, hashes, versions, suffixes = {}, {}, {}, {}
+    if 'luci-theme-argon' in profile.get('image_packages', []):
+        need('luci-theme-argon' in profile.get('packages', []),
+             'Argon image package must also be requested')
+        hashes.update(ARGON_HASHES)
+        versions['luci-theme-argon'] = '2.4.7-r20260824'
     asu = asu_client.policy(profile)
     if asu:
         manager = asu_client.package_manager(profile)

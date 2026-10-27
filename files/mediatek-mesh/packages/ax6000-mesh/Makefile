@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ax6000-mesh
 PKG_VERSION:=1
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 ifneq ($(wildcard $(TOPDIR)/ax6000-baseline/manifest.json),)
 # Keep the authenticated native module at runtime without rebuilding it in SDKs.

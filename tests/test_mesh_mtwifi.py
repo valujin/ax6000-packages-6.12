@@ -103,17 +103,25 @@ class MeshMtwifiTests(unittest.TestCase):
             self.skipTest('host ucode unavailable; set UCODE to execute converter')
         defs = json.loads((self.base / 'files/usr/share/schema/mtwifi/dat-defs.json').read_text())
         source = (self.base / 'files/usr/share/ucode/mtwifi/converter.uc').read_text()
-        source = '\n'.join(line for line in source.splitlines() if not line.startswith('import '))
-        source = source.replace('export function ', 'function ')
-        adapter = '''function set_indexed_value(value, idx, val) {
+        adapter = '''export function set_indexed_value(value, idx, val) {
             let items = split(value || '', ';');
             while (length(items) <= idx) push(items, '');
             items[idx] = val;
             return join(';', items);
-        }\n'''
-        script = 'let defs = ' + json.dumps(defs) + ';\n' + adapter + source
-        script += '\nprintf("%J", convert(' + json.dumps({'config': config, 'interfaces': interfaces}) + '));'
-        result = subprocess.run([self.ucode, '-e', script], text=True, capture_output=True)
+        };\n'''
+        # netifd imports this module before it can register any radio. Keep the
+        # real import/export syntax: stripping exports concealed a missing
+        # exported-function terminator that prevented Wi-Fi from starting.
+        with tempfile.TemporaryDirectory(prefix='mesh-converter-module-') as temporary:
+            modules = Path(temporary)
+            (modules / 'mtwifi').mkdir()
+            (modules / 'mtwifi/converter.uc').write_text(source)
+            (modules / 'mtwifi/defaults.uc').write_text('export const defs = ' + json.dumps(defs) + ';\n')
+            (modules / 'datconf.uc').write_text(adapter)
+            script = "import * as converter from 'mtwifi.converter';\n"
+            script += 'printf("%J", converter.convert(' + json.dumps({'config': config, 'interfaces': interfaces}) + '));'
+            result = subprocess.run([self.ucode, '-L', str(modules), '-e', script],
+                                    text=True, capture_output=True)
         if not valid:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('mtwifi:', result.stderr)

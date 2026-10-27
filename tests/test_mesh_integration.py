@@ -148,6 +148,8 @@ class MeshIntegration(unittest.TestCase):
         MESH.configure(selected, self.source, native=True)
         policy = image_features.expected(selected, {})
         files = {name: data for name, (data, mode) in policy['files'].items()}
+        from test_image_features import argon_payload
+        files.update(argon_payload())
         for relative in json.loads((ROOT / 'files/mediatek-mesh/patches/mtwifi-manifest.json').read_text())['files']:
             if '/files/' in relative:
                 files[relative.split('/files/', 1)[1]] = (self.source / relative).read_bytes()

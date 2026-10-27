@@ -2,9 +2,10 @@
 USE_PROCD=1
 
 start_service() {
-  state=$(cat /var/run/ax6000-mesh-operation/state 2>/dev/null)
-  case "$state" in applying) method=apply ;; disabling) method=disable ;; *) return 1 ;; esac
+  local mesh_state mesh_operation
+  mesh_state=$(cat /var/run/ax6000-mesh-operation/state 2>/dev/null)
+  case "$mesh_state" in applying) mesh_operation=apply ;; disabling) mesh_operation=disable ;; *) return 1 ;; esac
   procd_open_instance job
-  procd_set_param command /usr/libexec/ax6000-mesh-job "$method"
+  procd_set_param command /usr/libexec/ax6000-mesh-job "$mesh_operation"
   procd_close_instance
 }

@@ -496,7 +496,7 @@
 +// Only an explicit turnkey agent yields provisioning ownership to wappd.
 +export function is_map_agent(conf) {
 +    return conf.map_mode == 1 && strict_bool(conf.map_agent) == "1";
-+}
++};
 +
  export function convert(uci_cfg) {
  	let dat = {};
