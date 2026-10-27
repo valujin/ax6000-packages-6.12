@@ -1,0 +1,148 @@
+name: Publish a verified local recommended firmware generation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_release_id:
+        description: Exact private draft containing locally verified publication inputs
+        required: true
+        type: string
+      producer_commit:
+        description: Exact local native and SDK recipe commit
+        required: true
+        type: string
+      local_manifest_sha256:
+        description: SHA256 of the locally checked local-publication.json handoff
+        required: true
+        type: string
+
+concurrency:
+  group: package-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  generation:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate explicit local publication identities
+        env:
+          CANDIDATE_ID: ${{ inputs.candidate_release_id }}
+          PRODUCER_COMMIT: ${{ inputs.producer_commit }}
+          LOCAL_MANIFEST_SHA256: ${{ inputs.local_manifest_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          for name, pattern in [('CANDIDATE_ID', '[1-9][0-9]{0,19}'),
+                                ('PRODUCER_COMMIT', '[a-f0-9]{40}'),
+                                ('LOCAL_MANIFEST_SHA256', '[a-f0-9]{64}')]:
+              if not re.fullmatch(pattern, os.environ[name]):
+                  raise SystemExit('Invalid local publication identity: ' + name)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.producer_commit }}
+          path: producer
+          persist-credentials: false
+      - name: Download only the exact local candidate inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ID: ${{ inputs.candidate_release_id }}
+          PRODUCER_COMMIT: ${{ inputs.producer_commit }}
+          LOCAL_MANIFEST_SHA256: ${{ inputs.local_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          gh api "repos/$GITHUB_REPOSITORY/releases/$CANDIDATE_ID" > candidate-release.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/$CANDIDATE_ID/assets?per_page=100" > candidate-assets.json
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          release = json.loads(Path('candidate-release.json').read_text())
+          if (release.get('id') != int(os.environ['CANDIDATE_ID']) or release.get('draft') is not True
+                  or release.get('target_commitish') != os.environ['PRODUCER_COMMIT']
+                  or not release.get('tag_name', '').startswith('local-build-')):
+              raise SystemExit('Require the explicitly identified local producer draft')
+          assets = json.loads(Path('candidate-assets.json').read_text())
+          required = {'raw.tar.zst', 'raw.tar.zst.sha256', 'native-verification.json',
+                      'sdk-acceptance.json', 'local-publication.json'}
+          if len(assets) != len(required) or {a.get('name') for a in assets} != required:
+              raise SystemExit('Local candidate asset inventory differs')
+          for asset in assets:
+              name = asset['name']
+              cap = 2 * 1024**3 - 1 if name == 'raw.tar.zst' else 8 * 1024**2
+              if (type(asset.get('id')) is not int or asset['id'] <= 0 or asset.get('state') != 'uploaded'
+                      or type(asset.get('size')) is not int or not 0 < asset['size'] <= cap):
+                  raise SystemExit('Invalid local candidate asset')
+              path = Path('candidate') / name
+              with path.open('xb') as output:
+                  subprocess.run(['gh', 'api', f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/assets/{asset['id']}",
+                                  '-H', 'Accept: application/octet-stream'], stdout=output, check=True)
+              if path.stat().st_size != asset['size']:
+                  raise SystemExit('Downloaded local candidate size differs')
+              with path.open('rb') as stream:
+                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+              if asset.get('digest') not in (None, 'sha256:' + digest):
+                  raise SystemExit('Downloaded local candidate API digest differs')
+              if name == 'local-publication.json' and digest != os.environ['LOCAL_MANIFEST_SHA256']:
+                  raise SystemExit('Explicit local handoff checksum differs')
+          PY
+      - name: Validate genuine local native and SDK receipts and reimport raw
+        env:
+          PRODUCER_COMMIT: ${{ inputs.producer_commit }}
+          LOCAL_MANIFEST_SHA256: ${{ inputs.local_manifest_sha256 }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd cmake build-essential libjson-c-dev
+          python3 scripts/local_publication.py verify --input candidate --producer producer \
+            --producer-commit "$PRODUCER_COMMIT" --manifest-sha256 "$LOCAL_MANIFEST_SHA256" --output raw
+      - name: Prepare the pinned independent host signer
+        run: |
+          set -euo pipefail
+          pin=f1f65026a94137c91b5466b149ef3ea3f20091e9
+          git init "$RUNNER_TEMP/usign-source"
+          git -C "$RUNNER_TEMP/usign-source" fetch --depth 1 https://github.com/openwrt/usign.git "$pin"
+          git -C "$RUNNER_TEMP/usign-source" checkout --detach FETCH_HEAD
+          [[ $(git -C "$RUNNER_TEMP/usign-source" rev-parse HEAD) == "$pin" ]]
+          cmake -S "$RUNNER_TEMP/usign-source" -B "$RUNNER_TEMP/usign-build"
+          cmake --build "$RUNNER_TEMP/usign-build" --parallel 1
+      - name: Publish only the verified immutable generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPKG_SIGNING_KEY: ${{ secrets.OPKG_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$OPKG_SIGNING_KEY" ]] || { echo 'Set OPKG_SIGNING_KEY before publication.' >&2; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/generation-signing.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$OPKG_SIGNING_KEY" > "$key"
+          unset OPKG_SIGNING_KEY
+          python3 producer/scripts/channel-snapshot.py publish-generation --raw raw \
+            --expected-profile producer/profiles/redmi-ax6000-612-recommended-new.json \
+            --raw-archive candidate/raw.tar.zst --checksum candidate/raw.tar.zst.sha256 \
+            --repository "$GITHUB_REPOSITORY" --key "$key" --public-key keys/repository.pub \
+            --usign "$RUNNER_TEMP/usign-build/usign" --output generation
+      - name: Preserve local provenance and immutable publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-generation-publication-${{ github.run_id }}
+          path: |
+            generation
+            candidate/local-publication.json
+            candidate/native-verification.json
+            candidate/sdk-acceptance.json
+            candidate-release.json
+            candidate-assets.json
+          if-no-files-found: ignore
+          retention-days: 30

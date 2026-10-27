@@ -1,5 +1,8 @@
 # Publish a verified recommended Mesh generation
 
+For the current owned-server build, use [the local publication path](LOCAL-PUBLICATION.md).
+The workflow described below is the separate hosted-build path.
+
 `publish-firmware-generation.yml` fills the manual step between `firmware.yml`
 and `publish-existing.yml`. It uses the existing repository secret
 `OPKG_SIGNING_KEY`; a local production private key is unnecessary. It publishes
