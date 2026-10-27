@@ -50,7 +50,7 @@ class RecommendedOnlyTests(unittest.TestCase):
    self.assertEqual(target.read_text(),'preserve')
  def test_manual_no_asu_generation_only_removes_client_and_preserves_exact_abi(self):
   spec=importlib.util.spec_from_file_location('no_asu_snapshot',ROOT/'scripts/channel-snapshot.py');snap=importlib.util.module_from_spec(spec);spec.loader.exec_module(snap)
-  old=json.loads((ROOT/'profiles/redmi-ax6000-612-recommended.json').read_text());new=copy.deepcopy(old)
+  old=json.loads((ROOT/'tests/fixtures/rec-r5-apk-profile.json').read_text());new=copy.deepcopy(old)
   new.pop('asu');new.pop('imagebuilder');new['exclude_asu']=True
   for field in ['packages','image_packages']:new[field]=[n for n in old[field] if not no_asu.package(n)]
   new['sdk']={'url':'https://example.org/new-sdk','sha256':'9'*64};new['build_id']='new-no-asu-native'

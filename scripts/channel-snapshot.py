@@ -183,9 +183,15 @@ def validate_mesh_replacement(old, new):
         if not isinstance(before, list) or not isinstance(after, list) or len(set(after)) != len(after):
             raise ValueError('Invalid MediaTek mesh package selection')
         keep = [name for name in before if not no_asu.package(name)]
-        if set(after) != set(keep) | mesh.PACKAGES:
-            raise ValueError('MediaTek mesh changes packages beyond the reviewed mesh stack and ASU removal')
-        if [name for name in after if name not in mesh.PACKAGES] != [name for name in keep if name not in mesh.PACKAGES]:
+        additions = mesh.PACKAGES
+        # The reviewed Mesh firmware fixes Argon by installing its actual theme
+        # package. Ignore its position only when it is newly added; an existing
+        # Argon selection must retain both membership and its original order.
+        if 'luci-theme-argon' in after and 'luci-theme-argon' not in before:
+            additions = additions | {'luci-theme-argon'}
+        if set(after) != set(keep) | additions:
+            raise ValueError('MediaTek mesh changes packages beyond the reviewed mesh stack, Argon addition and ASU removal')
+        if [name for name in after if name not in additions] != [name for name in keep if name not in additions]:
             raise ValueError('MediaTek mesh changes unrelated package selection order')
 
 

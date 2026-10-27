@@ -18,7 +18,7 @@ spec.loader.exec_module(snapshot)
 
 class MeshReplacement(unittest.TestCase):
     def generations(self):
-        old = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended.json').read_text())
+        old = json.loads((ROOT / 'tests/fixtures/rec-r5-apk-profile.json').read_text())
         new = copy.deepcopy(old)
         new.pop('asu', None)
         new.pop('imagebuilder', None)
@@ -34,6 +34,47 @@ class MeshReplacement(unittest.TestCase):
         snapshot.validate_generation_replacement(old, new, old['build_id'])
         with self.assertRaises(ValueError):
             snapshot.validate_generation_replacement(old, new, None)
+
+    def test_reviewed_argon_addition_matches_final_native_profile_delta(self):
+        old, new = self.generations()
+        for field in ('packages', 'image_packages'):
+            new[field].append('luci-theme-argon')
+        snapshot.validate_generation_replacement(old, new, old['build_id'])
+        with self.assertRaises(ValueError):
+            snapshot.validate_generation_replacement(old, new, 'wrong-predecessor')
+
+    def test_argon_does_not_allow_extra_dependencies_themes_removals_or_reordering(self):
+        old, new = self.generations()
+        for field in ('packages', 'image_packages'):
+            new[field].append('luci-theme-argon')
+        for field in ('packages', 'image_packages'):
+            for extra in ('coreutils-stat', 'luci-theme-material', 'unreviewed'):
+                changed = copy.deepcopy(new)
+                changed[field].append(extra)
+                with self.subTest(field=field, extra=extra), self.assertRaises(ValueError):
+                    snapshot.validate_generation_replacement(old, changed, old['build_id'])
+            changed = copy.deepcopy(new)
+            changed[field].remove('pbr')
+            with self.subTest(field=field, change='removal'), self.assertRaises(ValueError):
+                snapshot.validate_generation_replacement(old, changed, old['build_id'])
+            changed = copy.deepcopy(new)
+            changed[field][0], changed[field][1] = changed[field][1], changed[field][0]
+            with self.subTest(field=field, change='order'), self.assertRaises(ValueError):
+                snapshot.validate_generation_replacement(old, changed, old['build_id'])
+
+    def test_preexisting_argon_must_remain_and_keep_its_original_order(self):
+        old, new = self.generations()
+        for field in ('packages', 'image_packages'):
+            old[field].insert(1, 'luci-theme-argon')
+            new[field].insert(1, 'luci-theme-argon')
+        snapshot.validate_generation_replacement(old, new, old['build_id'])
+        for field in ('packages', 'image_packages'):
+            for remove in (False, True):
+                changed = copy.deepcopy(new)
+                changed[field].remove('luci-theme-argon')
+                if not remove: changed[field].append('luci-theme-argon')
+                with self.subTest(field=field, remove=remove), self.assertRaises(ValueError):
+                    snapshot.validate_generation_replacement(old, changed, old['build_id'])
 
     def test_mesh_cannot_mask_unrelated_policy_or_package_changes(self):
         old, new = self.generations()

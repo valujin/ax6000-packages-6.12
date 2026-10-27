@@ -112,6 +112,8 @@ jobs:
           persist-credentials: false
       - name: Monitor recommended inputs and check no-ASU activation
         id: profiles
+        env:
+          AX6000_HOSTED_SDK_BUILDS: ${{ vars.AX6000_HOSTED_SDK_BUILDS }}
         run: |
           python3 - <<'PY'
           import json
@@ -136,11 +138,14 @@ jobs:
           enabled = active
           apk = True
           apk_signing = active
+          hosted_builds = os.environ.get('AX6000_HOSTED_SDK_BUILDS', '').lower() == 'true'
           subprocess.run(['python3', 'scripts/monitor.py', '--profile', str(profile),
                           '--output', 'state/recommended-monitored.json'], check=True)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('- recommended: ' + ('daily profile active' if active else
+              summary.write('- recommended: ' + ('native firmware profile active' if active else
                   'publication disabled until the fresh no-ASU firmware generation is activated') + '\n')
+              summary.write('- Hosted SDK builds: ' + ('ON (explicit repository opt-in; active profile required)' if hosted_builds else
+                  'OFF (operational hold; source monitoring only; local refresh is manual)') + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'enabled={str(enabled).lower()}\n')
               output.write(f'apk={str(apk).lower()}\n')
@@ -155,7 +160,7 @@ jobs:
 
   publish:
     needs: monitor
-    if: needs.monitor.outputs.enabled == 'true'
+    if: needs.monitor.outputs.enabled == 'true' && vars.AX6000_HOSTED_SDK_BUILDS == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     permissions:

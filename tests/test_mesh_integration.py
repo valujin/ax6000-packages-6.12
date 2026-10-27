@@ -90,11 +90,19 @@ class MeshIntegration(unittest.TestCase):
             MESH.configure(profile(), self.source)
         self.assertFalse((self.source / 'package').exists())
 
-    def test_checked_in_profile_only_enables_new_recommended_generation(self):
+    def test_checked_in_profiles_only_enable_mesh_for_recommended_native_generation(self):
         source = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended-new.json').read_text())
-        self.assertTrue(source.get('mediatek_mesh'))
+        self.assertTrue(MESH.validate(source))
         self.assertEqual(source['package_only'], ['tailscale'])
-        for filename in ('redmi-ax6000-612-recommended.json', 'redmi-ax6000-612-latest-new.json', 'redmi-ax6000-new.json'):
+        active = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended.json').read_text())
+        if active.get('exclude_asu') is True:
+            self.assertTrue(MESH.validate(active))
+            self.assertEqual(active['package_only'], ['tailscale'])
+        else:
+            # Before activation the generated profile still describes the ASU predecessor.
+            self.assertIn('asu', active)
+            self.assertNotIn('mediatek_mesh', active)
+        for filename in ('redmi-ax6000-612-latest-new.json', 'redmi-ax6000-new.json'):
             self.assertNotIn('mediatek_mesh', json.loads((ROOT / 'profiles' / filename).read_text()))
 
     def vendor_source(self):
