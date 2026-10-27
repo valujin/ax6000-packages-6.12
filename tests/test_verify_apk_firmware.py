@@ -140,6 +140,19 @@ class NativeApkImageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'OPKG database'): self.inspect()
 
     def test_sdk_apk_native_bank_tool_and_prepared_kernel_are_all_bound(self):
+        # Source-local override modules are frozen even when requested. They
+        # have different ownership from refreshable modules supplied by feeds.
+        name = 'kmod-mapfilter'
+        payload = self.root / 'mapfilter-payload'; payload.mkdir()
+        archive = self.bank / (name + '-1-r1.apk')
+        subprocess.run([APK, '--no-network', 'mkpkg', '--info', 'name:' + name,
+                        '--info', 'version:1-r1', '--info', 'arch:aarch64_cortex-a53',
+                        '--info', 'depends:kernel=' + self.abi, '--files', str(payload),
+                        '--output', str(archive)], check=True, capture_output=True)
+        self.controls[name] = package_format.read_control(archive, apk=APK); self.archives[name] = archive
+        self.profile['packages'].append(name)
+        with (self.source / 'tmp/.packageinfo').open('a') as metadata:
+            metadata.write('Source-Makefile: package/ax6000-overrides/mapfilter/Makefile\nPackage: kmod-mapfilter\n')
         relative = Path('build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_filogic/linux-6.12.108')
         kernel = self.source / relative
         config_set = b'CONFIG_MODULE_UNLOAD=y\nCONFIG_SMP=y\n'
@@ -170,7 +183,7 @@ class NativeApkImageTests(unittest.TestCase):
         self.assertNotEqual((sdk_host / 'bin/.apk.bin').read_bytes(), tool.read_bytes())
         baseline = {'schema_version': 1, 'package_manager': 'apk', 'source_commit': self.profile['firmware']['commit'],
                     'kernel_version': self.abi, 'architecture': 'aarch64_cortex-a53',
-                    'frozen_packages': sorted(self.controls), 'frozen_kmods': sorted(verify.VENDOR),
+                    'frozen_packages': sorted(self.controls), 'frozen_kmods': sorted(verify.VENDOR | {'kmod-mapfilter'}),
                     'files': [{'package': name, 'version': self.controls[name]['Version'],
                                'path': 'apks/' + path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
                               for name, path in sorted(self.archives.items())],
@@ -204,7 +217,7 @@ class NativeApkImageTests(unittest.TestCase):
             return verify.inspect_sdk(archive, kernel, self.source, self.root, self.profile,
                                       native_controls=self.controls, native_packages=self.archives)[0]
         proof = inspect()
-        self.assertEqual(proof['apk_baseline']['frozen_kmods'], 4)
+        self.assertEqual(proof['apk_baseline']['frozen_kmods'], 5)
         self.assertTrue(proof['apk_baseline']['whole_native_archive_bytes_matched'])
         self.assertTrue(proof['apk_baseline']['source_transform']['independently_recomputed'])
         name = next(name for name in values if name.startswith('ax6000-baseline/apks/'))

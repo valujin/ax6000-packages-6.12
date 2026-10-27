@@ -898,10 +898,23 @@ def inspect_sdk(archive, kernel, source, work, profile, native_controls=None, na
         require(set(baseline.get('frozen_kmods', [])) == {name for name in identities if name.startswith('kmod-')}
                 and 'kernel' in identities, 'APK SDK frozen kernel/module bank differs')
         if native_controls is not None:
-            core = set(apk_world.core_recipe_roots(regular(source / 'tmp/.packageinfo', 64 * MIB).read_text()))
+            # Native source-local kmods, including local overrides, are frozen.
+            # Userspace protection excludes overrides for a different purpose;
+            # it cannot determine which kernel modules the SDK must retain.
+            core, recipe = set(), ''
+            for line in regular(source / 'tmp/.packageinfo', 64 * MIB).read_text().splitlines():
+                if line.startswith('Source-Makefile:'):
+                    recipe = line.split(':', 1)[1].strip()
+                elif line.startswith('Package:') and recipe.startswith('package/') and not recipe.startswith('package/feeds/'):
+                    name = line.split(':', 1)[1].strip()
+                    if name.startswith('kmod-'):
+                        core.add(name)
             refreshed = (set(profile.get('packages', [])) - core) & {name for name in native_controls if name.startswith('kmod-')}
-            require(set(baseline['frozen_kmods']) == {name for name in native_controls if name.startswith('kmod-')} - refreshed,
-                    'APK SDK omits a native frozen kernel module')
+            expected_frozen = {name for name in native_controls if name.startswith('kmod-')} - refreshed
+            actual_frozen = set(baseline['frozen_kmods'])
+            require(actual_frozen == expected_frozen,
+                    'APK SDK omits a native frozen kernel module or includes an unexpected one: '
+                    f'missing={sorted(expected_frozen - actual_frozen)}, extra={sorted(actual_frozen - expected_frozen)}')
         context = baseline.get('kernel_context', {})
         require(context.get('path') == relative and set(context.get('files', {})) ==
                 {'.config', 'Module.symvers', 'include/generated/autoconf.h', 'include/config/kernel.release'},
