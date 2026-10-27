@@ -1,0 +1,36 @@
+#!/bin/sh
+# Independent of rpcd, the browser, and the one-shot operation worker.
+set -eu
+state=/etc/ax6000-mesh
+transaction=/usr/libexec/ax6000-mesh-transaction
+birth() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
+while [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ]; do
+  "$transaction" present || exit 1
+  deadline=$(cat "$state/deadline")
+  case "$deadline" in ''|*[!0-9]*) exit 1 ;; esac
+  read -r now _ < /proc/uptime; now=${now%%.*}
+  if [ "$(cat "$state/boot-id")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || [ "$now" -ge "$deadline" ]; then
+    exec 8>/var/lock/ax6000-mesh.lock
+    if flock -n 8; then
+      # Recheck under the lock: a setup that just committed must survive.
+      [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ] || exit 0
+      timeout 15 /etc/init.d/ax6000-mesh-operation stop 8>&- || :
+      exec "$transaction" expire 9>&8 8>&-
+    fi
+    [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ] || exit 0
+    # Stop procd's worker, then terminate only the original lock owner if its
+    # PID still has the exact recorded process birth (never a recycled PID).
+    timeout 15 /etc/init.d/ax6000-mesh-operation stop 8>&- || :
+    owner=$(cat "$state/owner-pid")
+    original_birth=$(cat "$state/owner-birth")
+    case "$owner" in ''|*[!0-9]*) exit 1 ;; esac
+    [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ] || exit 0
+    if [ "$owner" -gt 1 ] && [ "$(birth "$owner")" = "$original_birth" ]; then
+      kill -TERM "$owner" 2>/dev/null || :
+      sleep 5
+      if [ "$(birth "$owner")" = "$original_birth" ]; then kill -KILL "$owner" 2>/dev/null || :; fi
+    fi
+    exec "$transaction" expire 8>&-
+  fi
+  sleep 2
+done

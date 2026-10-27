@@ -1,7 +1,13 @@
 #!/bin/sh
 socket=$1
 shift
+ready() {
+  case "$socket" in
+    @*) awk -v socket="$socket" '$6 == "01" && $8 == socket { found=1 } END { exit !found }' /proc/net/unix ;;
+    *) [ -S "$socket" ] ;;
+  esac
+}
 n=0
-while [ ! -S "$socket" ] && [ "$n" -lt 30 ]; do n=$((n + 1)); sleep 1; done
-[ -S "$socket" ] || exit 1
+while ! ready && [ "$n" -lt 30 ]; do n=$((n + 1)); sleep 1; done
+ready || exit 1
 exec "$@"

@@ -30,18 +30,6 @@ msgstr "Службы Mesh запущены"
 msgid "Mesh services are not running"
 msgstr "Службы Mesh не запущены"
 
-msgid "Service status does not confirm that another node has joined. Check the additional node and its clients after pairing."
-msgstr "Статус служб не подтверждает подключение другого узла. После сопряжения проверьте дополнительный узел и его клиентов."
-
-msgid "Disable Mesh and restore Wi-Fi"
-msgstr "Выключить Mesh и восстановить Wi-Fi"
-
-msgid "Pair a node"
-msgstr "Добавить узел"
-
-msgid "Enable Mesh"
-msgstr "Включить Mesh"
-
 msgid "Unable to read Mesh status: "
 msgstr "Не удалось получить состояние Mesh: "
 
@@ -51,32 +39,77 @@ msgstr "Объедините роутеры Redmi AX6000 с нашей прош�
 msgid "Setup"
 msgstr "Настройка"
 
-msgid "Choose one main router. Set every other router to Additional node. Before enabling a node, disable its LAN DHCP server and assign it a unique management address in the main router’s network."
-msgstr "Выберите один основной роутер. На остальных выберите роль «Дополнительный узел». Перед включением узла отключите его DHCP-сервер LAN и задайте уникальный адрес управления в сети основного роутера."
-
 msgid "Role"
 msgstr "Роль"
 
 msgid "Connection between routers"
 msgstr "Соединение между роутерами"
 
-msgid "The main router uses its existing Wi-Fi names and passwords. Mesh controls radio settings while enabled. Enabling or disabling it briefly interrupts Wi-Fi; configure it over Ethernet."
-msgstr "Основной роутер использует текущие имена и пароли Wi-Fi. Пока Mesh включён, он управляет настройками радиомодулей. Включение и выключение кратковременно прерывает Wi-Fi — выполняйте настройку по кабелю."
+msgid "Preparing Mesh…"
+msgstr "Подготовка Mesh…"
 
-msgid "For Ethernet, connect LAN to LAN. For Wi-Fi, enable Mesh on both routers, then press Pair a node on both within two minutes. Keep the routers near each other for initial pairing."
-msgstr "Для кабельного соединения подключите LAN к LAN. Для Wi-Fi включите Mesh на обоих роутерах, затем нажмите «Добавить узел» на обоих в течение двух минут. При первом сопряжении расположите роутеры рядом."
+msgid "Waiting for connection or pairing…"
+msgstr "Ожидание соединения или сопряжения…"
 
-msgid "WAN, routing and firewall settings are preserved. Disable Mesh to restore the saved wireless configuration."
-msgstr "Настройки WAN, маршрутизации и межсетевого экрана сохраняются. При выключении Mesh восстанавливается сохранённая конфигурация беспроводной сети."
+msgid "Obtaining the management address…"
+msgstr "Получение адреса управления…"
 
-msgid "Applying settings… Keep this page open."
-msgstr "Применяются настройки… Оставьте эту страницу открытой."
+msgid "Checking the connection…"
+msgstr "Проверка соединения…"
 
-msgid "Use one visible WPA2-PSK access point per band in LAN, with matching names and passwords. Disable separate 802.11r settings. On additional nodes, also disable IPv6 router advertisements and DHCPv6 serving."
-msgstr "В каждом диапазоне должна быть одна видимая точка WPA2-PSK в LAN, с одинаковыми именами и паролями. Отключите отдельную настройку 802.11r. На дополнительных узлах также отключите объявления IPv6 RA и сервер DHCPv6."
+msgid "Mesh node connected"
+msgstr "Узел Mesh подключён"
 
-msgid "Wi-Fi settings"
-msgstr "Настройки Wi-Fi"
+msgid "Setup failed; previous settings restored"
+msgstr "Настройка не удалась; прежние настройки восстановлены"
 
-msgid "LAN and DHCP settings"
-msgstr "Настройки LAN и DHCP"
+msgid "Restoring previous settings…"
+msgstr "Восстановление прежних настроек…"
+
+msgid "A running service does not mean a node has joined."
+msgstr "Запуск службы не означает, что узел подключён."
+
+msgid "Pairing time remaining (seconds): "
+msgstr "До окончания сопряжения (секунд): "
+
+msgid "Mesh nodes"
+msgstr "Узлы Mesh"
+
+msgid "No joined nodes reported."
+msgstr "Подключённые узлы не обнаружены."
+
+msgid "Unknown node"
+msgstr "Неизвестный узел"
+
+msgid "Address unknown"
+msgstr "Адрес неизвестен"
+
+msgid "Enable Mesh on the main router. For a Wi-Fi node, select Add a node here, then start joining on the additional node while the pairing window is open."
+msgstr "Включите Mesh на основном роутере. Для подключения узла по Wi-Fi нажмите здесь «Добавить узел», затем начните подключение на дополнительном узле, пока окно сопряжения открыто."
+
+msgid "For Ethernet, connect the additional node WAN port to a LAN port on the main router. For Wi-Fi, keep the routers nearby and open pairing on the main router before joining."
+msgstr "Для соединения по кабелю подключите порт WAN дополнительного узла к порту LAN основного роутера. Для Wi-Fi расположите роутеры рядом и откройте сопряжение на основном роутере перед подключением узла."
+
+msgid "Enable Mesh"
+msgstr "Включить Mesh"
+
+msgid "Join Mesh"
+msgstr "Подключиться к Mesh"
+
+msgid "Add a node"
+msgstr "Добавить узел"
+
+msgid "Disable Mesh and restore settings"
+msgstr "Выключить Mesh и восстановить настройки"
+
+msgid "The additional node may have a new address. Check the main router’s DHCP lease list. If setup fails, recovery is attempted; check the error and retry restoration if needed."
+msgstr "Адрес дополнительного узла мог измениться. Проверьте список DHCP-аренд основного роутера. При ошибке настройки выполняется попытка восстановления; проверьте сообщение об ошибке и при необходимости повторите восстановление."
+
+msgid "The main router keeps its Wi-Fi names and passwords. The additional node receives its settings automatically. Wi-Fi may briefly disconnect during setup."
+msgstr "Основной роутер сохраняет имена и пароли Wi-Fi. Дополнительный узел получает настройки автоматически. Во время настройки Wi-Fi может ненадолго отключиться."
+
+msgid "The additional node obtains its management address automatically, so this page may disconnect. Check the main router’s DHCP lease list for the address. If joining fails, recovery is attempted; check the error and retry restoration if needed."
+msgstr "Дополнительный узел получает адрес управления автоматически, поэтому соединение с этой страницей может прерваться. Найдите адрес в списке DHCP-аренд основного роутера. При ошибке подключения выполняется попытка восстановления; проверьте сообщение об ошибке и при необходимости повторите восстановление."
+
+msgid "Restore previous settings"
+msgstr "Восстановить прежние настройки"

@@ -148,8 +148,10 @@ class MeshIntegration(unittest.TestCase):
         MESH.configure(selected, self.source, native=True)
         policy = image_features.expected(selected, {})
         files = {name: data for name, (data, mode) in policy['files'].items()}
-        from test_image_features import argon_payload
+        from test_image_features import argon_payload, mtwifi_timeout_sources
         files.update(argon_payload())
+        timeout_path = 'lib/netifd/wireless-device.uc'
+        files[timeout_path] = mtwifi_timeout_sources()['after.uc']
         for relative in json.loads((ROOT / 'files/mediatek-mesh/patches/mtwifi-manifest.json').read_text())['files']:
             if '/files/' in relative:
                 files[relative.split('/files/', 1)[1]] = (self.source / relative).read_bytes()
@@ -162,6 +164,13 @@ class MeshIntegration(unittest.TestCase):
         checked = verify()
         self.assertIn('mapd', checked['packages'])
         self.assertIn('lib/netifd/wireless/mtwifi.sh', checked['files'])
+        self.assertIn(timeout_path, checked['files'])
+        timeout_source = files[timeout_path]
+        for wrong in (b'', mtwifi_timeout_sources()['before.uc'], timeout_source + b'changed'):
+            files[timeout_path] = wrong
+            with self.assertRaisesRegex(ValueError, 'feature hash differs: lib/netifd/wireless-device.uc'):
+                verify()
+        files[timeout_path] = timeout_source
         original = installed.pop('mapd')
         with self.assertRaisesRegex(ValueError, 'package version'):
             verify()

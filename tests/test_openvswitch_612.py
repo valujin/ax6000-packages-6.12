@@ -23,6 +23,7 @@ class OpenVSwitch612Tests(unittest.TestCase):
             ('target/linux/mediatek/Makefile',b'KERNEL_PATCHVER:=6.12\n'),
             ('target/linux/mediatek/image/filogic.mk',gzip.decompress((ROOT/'tests/fixtures/ax6000-612-recommended-filogic.mk.gz').read_bytes())),
             ('package/kernel/linux/modules/netdevices.mk',gzip.decompress((ROOT/'tests/fixtures/ax6000-612-netdevices.gz').read_bytes())),
+            ('package/network/config/wifi-scripts/files/lib/netifd/wireless-device.uc',gzip.decompress((ROOT/'tests/fixtures/mtwifi-wireless-device-ae65e1d.uc.gz').read_bytes())),
             ('feeds/packages/net/openvswitch/Makefile',gzip.decompress((ROOT/'tests/fixtures/openvswitch-packages-52ddbd1-Makefile.gz').read_bytes()))]:
             p=self.source/relative;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
 

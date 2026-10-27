@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+START=19
+USE_PROCD=1
+start_service() {
+  local mesh_phase
+  /usr/libexec/ax6000-mesh-transaction present || return 0
+  mesh_phase=$(cat /etc/ax6000-mesh/phase 2>/dev/null)
+  [ "$mesh_phase" = pending ] || return 0
+  procd_open_instance enrollment
+  procd_set_param command /usr/libexec/ax6000-mesh-watchdog
+  procd_set_param term_timeout 5
+  procd_set_param respawn 3600 5 3
+  procd_close_instance
+}

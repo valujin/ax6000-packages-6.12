@@ -15,64 +15,56 @@ abi_ok() {
   [ "${digest%% *}" = 7fd55be3915c7c9ee84bcaf4698ba1c49efded4131164c01761ac1be7a8fd623 ]
 }
 
+phase() {
+  [ ! -d /var/run/ax6000-mesh-operation ] || printf '%s\n' "$1" > /var/run/ax6000-mesh-operation/phase
+}
+
 preflight() {
+  . /usr/share/ax6000-mesh/vendor.sh
   board=$(cat /tmp/sysinfo/board_name 2>/dev/null || :)
   case "$board" in xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod) ;; *) fail 'This device is not a supported Redmi AX6000.' ;; esac
   abi_ok || fail 'This firmware does not contain the matching MediaTek mesh driver ABI.'
   for binary in wapp wappctrl mapd p1905_managerd mapd_cli; do command -v "$binary" >/dev/null || fail "Required daemon $binary is missing."; done
   [ -d /sys/class/net/br-lan ] || fail 'The br-lan bridge is required.'
-  [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null || :)" = 0 ] || fail 'Disable VLAN filtering on br-lan before enabling mesh.'
+  [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null || :)" = 0 ] || fail 'Mesh requires a LAN bridge without VLAN filtering.'
   [ -d /sys/class/net/ra0 ] && [ -d /sys/class/net/rax0 ] || fail 'Both MediaTek AP radios must be active.'
   role=$(get ax6000_mesh.main.role); backhaul=$(get ax6000_mesh.main.backhaul)
   case "$role" in controller|agent) ;; *) fail 'Invalid mesh role.' ;; esac
   case "$backhaul" in wired|wireless) ;; *) fail 'Invalid backhaul.' ;; esac
-  if [ "$role" = agent ] && [ "$(get dhcp.lan.ignore)" != 1 ]; then
-    fail 'Disable DHCP serving on LAN and assign this agent a distinct management address before enabling mesh.'
-  fi
-  if [ "$role" = agent ]; then
-    for option in ra dhcpv6 ndp; do
-      case "$(get dhcp.lan.$option)" in ''|0|disabled) ;; *) fail 'Disable LAN IPv6 router advertisements, DHCPv6 and NDP relay before enabling mesh on an agent.' ;; esac
-    done
-    sections=$(uci -q -X show dhcp | sed -n "s/^dhcp\.\([A-Za-z0-9_]*\)=dhcp$/\1/p")
-    for section in $sections; do
-      [ "$(get dhcp.$section.interface)" = lan ] || [ "$section" = lan ] || continue
-      [ "$(get dhcp.$section.ignore)" = 1 ] || fail 'Disable every DHCP server configured on LAN before enabling mesh on an agent.'
-      for option in ra dhcpv6 ndp; do
-        case "$(get dhcp.$section.$option)" in ''|0|disabled) ;; *) fail 'Disable LAN IPv6 router advertisements, DHCPv6 and NDP relay before enabling mesh on an agent.' ;; esac
-      done
-    done
-  fi
-  # Restrict configuration to one active AP on each of two radios, both in LAN.
   [ -z "$(uci -q changes wireless)" ] || fail 'Apply or discard pending wireless changes first.'
   aps=$(uci -q -X show wireless | sed -n "s/^wireless\.\([A-Za-z0-9_]*\)=wifi-iface$/\1/p")
-  ap1= ap2= dev1= dev2= ssid= key=
+  ap1= ap2= dev1= dev2= ssid24= key24= enc24= ssid5= key5= enc5=
   for ap in $aps; do
+    case "$ap" in
+      ax6000_mesh_ap1|ax6000_mesh_ap2|ax6000_mesh_bh1|ax6000_mesh_bh2)
+        [ "$(get ax6000_mesh.main.enabled)" = 1 ] || fail 'A mesh-owned wireless section already exists.'
+        continue ;;
+    esac
     mode=$(get wireless.$ap.mode)
-    if [ "$mode" = sta ]; then
-      case "$ap:$(get ax6000_mesh.main.enabled):$role:$backhaul" in
-        ax6000_mesh_bh1:1:agent:wireless|ax6000_mesh_bh2:1:agent:wireless) continue ;;
-        *) fail 'Remove existing wireless station interfaces before enabling mesh.' ;;
-      esac
-    fi
+    [ "$mode" != sta ] || fail 'An existing wireless uplink must be removed before enabling Mesh.'
     [ "$mode" = ap ] || continue
-    [ "$(get wireless.$ap.disabled)" != 1 ] || continue
-    [ "$(get wireless.$ap.network)" = lan ] || fail 'Each active AP must belong only to LAN.'
+    [ "$(get wireless.$ap.disabled)" != 1 ] || fail 'Remove disabled extra AP sections before enabling Mesh.'
+    [ "$(get wireless.$ap.network)" = lan ] || fail 'Client APs must belong only to LAN.'
     dev=$(get wireless.$ap.device)
     case "$dev" in ''|*[!A-Za-z0-9_]*) fail 'Invalid wireless device name.' ;; esac
     [ "$(get wireless.$dev.type)" = mtwifi ] || fail 'Only MediaTek radios are supported.'
-    [ "$(get wireless.$ap.hidden)" != 1 ] || fail 'Show the SSID on both mesh APs before enabling mesh.'
-    [ "$(get wireless.$ap.ieee80211r)" != 1 ] || fail 'Disable 802.11r on the mesh APs.'
-    [ "$(get wireless.$ap.encryption)" = psk2 ] || fail 'Both APs must use WPA2-PSK (psk2).'
-    ap_ssid=$(get wireless.$ap.ssid); ap_key=$(get wireless.$ap.key)
-    # The WTS parser accepts printable ASCII, with spaces and backslashes escaped.
-    case "$ap_ssid" in ''|*[![:print:]]*) fail 'SSID must contain printable ASCII characters.' ;; esac
-    case "$ap_key" in ''|*[![:print:]]*) fail 'WPA key must contain printable ASCII characters.' ;; esac
-    [ "${#ap_ssid}" -le 32 ] && [ "${#ap_key}" -ge 8 ] && [ "${#ap_key}" -le 63 ] || fail 'SSID or WPA key length is invalid.'
-    if [ -z "$ap1" ]; then ap1=$ap; dev1=$dev; ssid=$ap_ssid; key=$ap_key
-    elif [ -z "$ap2" ]; then ap2=$ap; dev2=$dev; [ "$dev1" != "$dev2" ] || fail 'Use one AP per radio.'; [ "$ssid" = "$ap_ssid" ] && [ "$key" = "$ap_key" ] || fail 'Both APs must have the same SSID and WPA key.'
-    else fail 'Exactly one active AP per radio is supported.'; fi
+    [ "$(get wireless.$ap.ieee80211r)" != 1 ] || fail 'Disable separate 802.11r settings before enabling Mesh.'
+    band=$(get wireless.$dev.band)
+    case "$band" in
+      2g) [ -z "$ap1" ] || fail 'Use one client AP on each radio.'; ap1=$ap; dev1=$dev ;;
+      5g) [ -z "$ap2" ] || fail 'Use one client AP on each radio.'; ap2=$ap; dev2=$dev ;;
+      *) fail 'Expected 2.4 GHz and 5 GHz MediaTek radios.' ;;
+    esac
+    ap_ssid=$(get wireless.$ap.ssid); ap_key=$(get wireless.$ap.key); ap_enc=$(get wireless.$ap.encryption)
+    if [ "$role" = controller ]; then
+      [ "$(get wireless.$ap.hidden)" != 1 ] || fail 'Client SSIDs must be visible for Mesh pairing.'
+      mesh_validate_credentials "$ap_ssid" "$ap_key" "$ap_enc" || fail 'Client SSID or Wi-Fi password is invalid.'
+      mesh_auth_code "$ap_enc" >/dev/null || fail 'Client APs must use WPA2-PSK or WPA2/WPA3 mixed mode.'
+    fi
+    if [ "$band" = 2g ]; then ssid24=$ap_ssid; key24=$ap_key; enc24=$ap_enc
+    else ssid5=$ap_ssid; key5=$ap_key; enc5=$ap_enc; fi
   done
-  [ -n "$ap1" ] && [ -n "$ap2" ] || fail 'Exactly two active MediaTek APs are required.'
+  [ -n "$ap1" ] && [ -n "$ap2" ] && [ "$dev1" != "$dev2" ] || fail 'One client AP on each MediaTek radio is required.'
   for port in lan2 lan3 lan4; do [ -e "/sys/class/net/br-lan/brif/$port" ] || fail 'Expected LAN ports lan2 through lan4 in br-lan.'; done
 }
 
@@ -95,34 +87,43 @@ prepare() {
     case "$name" in BhProfile[0-9]Valid|BhProfile[0-9]Ssid|BhProfile[0-9]AuthMode|BhProfile[0-9]EncrypType|BhProfile[0-9]WpaPsk|BhProfile[0-9]RaID) datconf -f /etc/map/mapd_cfg set "$name" "$value" >/dev/null 2>&1 || fail 'Cannot restore mesh backhaul profile.' ;; esac
   done < /etc/map/mapd_user.cfg
   if [ "$role" = controller ]; then device_role=1; agent=0; root=1; else device_role=2; agent=1; root=0; fi
-  for entry in "DeviceRole=$device_role" 'lan_interface=lan2 lan3 lan4' 'wan_interface=' 'DhcpCtl=0' 'ChPlanningEnable=0' 'ChPlanningEnableR2=0' 'NetworkOptimizationEnabled=0' 'AutoBHSwitching=0'; do
+  lan_interfaces="lan2 lan3 lan4"
+  [ "$role:$backhaul" != agent:wired ] || lan_interfaces="$lan_interfaces wan"
+  bss_priority="ra0;ra1;rax0;rax1;apcli0;apclix0"
+  for entry in "bss_config_priority=$bss_priority" "DeviceRole=$device_role" "lan_interface=$lan_interfaces" 'wan_interface=' 'DhcpCtl=0' 'ChPlanningEnable=0' 'ChPlanningEnableR2=0' 'NetworkOptimizationEnabled=0' 'AutoBHSwitching=0'; do
     datconf -f /etc/map/mapd_cfg set "${entry%%=*}" "${entry#*=}" >/dev/null 2>&1 || fail 'Cannot prepare mesh settings.'
   done
   bh_type=eth
   if [ "$role" = agent ] && [ "$backhaul" = wireless ]; then bh_type=wifi; fi
   mac=$(cat /sys/class/net/br-lan/address)
   case "$mac" in ??\:??\:??\:??\:??\:??) ;; *) fail 'Invalid LAN bridge address.' ;; esac
-  cat > /etc/map/1905d.cfg <<END
+  # Keep vendor defaults: missing gtk_rekey_interval creates a zero-delay rekey loop.
+  sed -E '/^(map_controller_alid|map_agent_alid|map_agent|map_root|bh_type|br_inf|lan|map_ver|bss_config_priority)=/d' "$template/1905d.cfg" > /etc/map/1905d.cfg
+  cat >> /etc/map/1905d.cfg <<END
 map_controller_alid=$mac
 map_agent_alid=$mac
 map_agent=$agent
 map_root=$root
 bh_type=$bh_type
-radio_band=24G;5G;
 br_inf=br-lan
 lan=lan2
 lan=lan3
 lan=lan4
 map_ver=R2
-bss_config_priority=ra0;rax0;apcli0;apclix0
+bss_config_priority=$bss_priority
 END
-  # Identical 2.4/5 GHz AP credentials, with both FH and BH enabled.
-  : >> /etc/map/wts_bss_info_config
-  chmod 600 /etc/map/wts_bss_info_config
-  escaped_ssid=$(printf '%s' "$ssid" | sed 's/\\/\\\\/g; s/ /\\ /g')
-  escaped_key=$(printf '%s' "$key" | sed 's/\\/\\\\/g; s/ /\\ /g')
-  printf '#ucc_bss_info\n1,ff:ff:ff:ff:ff:ff 8x %s 0x0020 0x0008 %s 1 1 hidden-N 4095 N/A N/A\n2,ff:ff:ff:ff:ff:ff 11x %s 0x0020 0x0008 %s 1 1 hidden-N 4095 N/A N/A\n3,ff:ff:ff:ff:ff:ff 12x %s 0x0020 0x0008 %s 1 1 hidden-N 4095 N/A N/A\n' "$escaped_ssid" "$escaped_key" "$escaped_ssid" "$escaped_key" "$escaped_ssid" "$escaped_key" > /etc/map/wts_bss_info_config
+  [ "$role:$backhaul" != agent:wired ] || printf 'lan=wan\n' >> /etc/map/1905d.cfg
+  read -r bh_ssid < "$state/backhaul-ssid"
+  read -r bh_key < "$state/backhaul-key"
+  if [ "$role" = agent ]; then
+    # Agent client credentials are supplied by the controller via WSC/M2.
+    # Initial placeholders are private and must not overwrite enrolled DATs.
+    ssid24=AX6000-joining; ssid5=AX6000-joining; key24=$bh_key; key5=$bh_key; enc24=sae-mixed; enc5=sae-mixed
+  fi
+  mesh_write_bss /etc/map/wts_bss_info_config "$ssid24" "$key24" "$enc24" "$ssid5" "$key5" "$enc5" "$bh_ssid" "$bh_key" || fail 'Cannot prepare client and backhaul profiles.'
   cp "$template/ethernet_cfg.txt" /etc/ethernet_cfg.txt
+  # Native 1905 DSA reads interface names; VLAN IDs alone do not identify LAN.
+  printf '\nlan=%s\nbr_lan=br-lan\n' "$lan_interfaces" >> /etc/ethernet_cfg.txt
   cp "$template/wapp_ap_ra0.conf" /etc/wapp_ap_ra0.conf
   cp "$template/wapp_ap_rax0.conf" /etc/wapp_ap_rax0.conf
   printf 'conf_list=/etc/wapp_ap_ra0.conf;/etc/wapp_ap_rax0.conf;\n' > /etc/wapp_ap.conf
@@ -156,103 +157,260 @@ END
 }
 
 wait_radios() {
-  attempt=0
-  while [ "$attempt" -lt 60 ]; do
+  local mesh_ready_now mesh_ready_deadline
+  read -r mesh_ready_now _ < /proc/uptime; mesh_ready_now=${mesh_ready_now%%.*}
+  mesh_ready_deadline=$((mesh_ready_now + 150))
+  while [ "$mesh_ready_now" -lt "$mesh_ready_deadline" ]; do
     ready=1
     for radio in ra0 rax0; do
       flags=$(cat "/sys/class/net/$radio/flags" 2>/dev/null || :)
       case "$flags" in 0x[0-9a-fA-F]*) [ "$((flags & 1))" -eq 1 ] || ready=0 ;; *) ready=0 ;; esac
     done
     if [ "$ready" = 1 ] && wifi isup >/dev/null 2>&1; then return 0; fi
-    attempt=$((attempt + 1)); sleep 1
+    sleep 1
+    read -r mesh_ready_now _ < /proc/uptime; mesh_ready_now=${mesh_ready_now%%.*}
   done
   return 1
 }
 
-restore() {
-  /etc/init.d/ax6000-mesh stop >/dev/null 2>&1 || :
-  if [ -f "$state/owns-mapfilter" ]; then
-    [ ! -d /sys/module/mapfilter ] || rmmod mapfilter >/dev/null 2>&1 || return 1
-  fi
-  uci -q revert wireless || return 1
-  if [ -f "$state/original-wireless" ]; then cp "$state/original-wireless" "$config" || return 1; fi
-  for band in b0 b1; do
-    profile="/etc/wireless/mediatek/mt7986-ax6000.dbdc.$band.dat"
-    [ ! -f "$state/original-$band" ] || cp "$state/original-$band" "$profile" || return 1
+disconnect_backhaul() {
+  local mesh_iface mesh_flags
+  uci -q set ax6000_mesh.main.enabled=0
+  uci -q commit ax6000_mesh
+  /etc/init.d/ax6000-mesh stop 9>&- >/dev/null 2>&1 || :
+  rm -f /var/run/ax6000-mesh-pairing
+  for mesh_iface in apcli0 apclix0; do
+    [ -d "/sys/class/net/$mesh_iface" ] || continue
+    mesh_flags=$(cat "/sys/class/net/$mesh_iface/flags") || return 1
+    [ "$((mesh_flags & 1))" != 0 ] || continue
+    iwpriv "$mesh_iface" set ApCliEnable=0 >/dev/null 2>&1 || return 1
+    ip link set dev "$mesh_iface" down || return 1
   done
-  uci -q set ax6000_mesh.main.enabled=0 || return 1
-  uci -q commit ax6000_mesh || return 1
-  wifi reload >/dev/null 2>&1 || return 1
+}
+
+radios_down() {
+  local mesh_status mesh_devices mesh_device mesh_count=0 mesh_interface mesh_flags
+  mesh_status=$(ubus call network.wireless status 2>/dev/null) || return 1
+  [ -n "$mesh_status" ] || return 1
+  mesh_devices=$(uci -q -X show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_]*\)=wifi-device$/\1/p')
+  for mesh_device in $mesh_devices; do
+    [ "$(get wireless.$mesh_device.type)" = mtwifi ] || continue
+    mesh_count=$((mesh_count + 1))
+    [ "$(jsonfilter -s "$mesh_status" -e "@.$mesh_device.up" 2>/dev/null)" = false ] || return 1
+    [ "$(jsonfilter -s "$mesh_status" -e "@.$mesh_device.pending" 2>/dev/null)" = false ] || return 1
+  done
+  [ "$mesh_count" = 2 ] || return 1
+  for mesh_interface in ra0 ra1 rax0 rax1 apcli0 apclix0; do
+    [ -d "/sys/class/net/$mesh_interface" ] || continue
+    mesh_flags=$(cat "/sys/class/net/$mesh_interface/flags") || return 1
+    case "$mesh_flags" in 0x[0-9a-fA-F]*) [ "$((mesh_flags & 1))" = 0 ] || return 1 ;; *) return 1 ;; esac
+  done
+}
+
+lock_radios() {
+  local mesh_attempt=0
+  exec 8>/var/lock/mtwifi.lock
+  while ! flock -n 8; do
+    [ "$mesh_attempt" -lt 30 ] || return 1
+    mesh_attempt=$((mesh_attempt + 1)); sleep 1
+  done
+}
+
+valid_radio_modules() {
+  local mesh_module
+  [ -f "$state/radio-modules" ] && [ ! -L "$state/radio-modules" ] || return 1
+  grep -qx mt_wifi "$state/radio-modules" || return 1
+  while read -r mesh_module; do
+    case "$mesh_module" in mtk_warp_proxy|mtk_warp|mt_wifi) ;; *) return 1 ;; esac
+  done < "$state/radio-modules"
+}
+
+# Restore DAT only after unloading the adapter with its original BSSID count.
+# A subshell releases the driver lock on every failure as well as success.
+quiesce_radios() (
+  local mesh_attempt=0 mesh_module mesh_interface
+  timeout 20 wifi down 9>&- >/dev/null 2>&1 || return 1
+  until radios_down; do
+    [ "$mesh_attempt" -lt 45 ] || return 1
+    mesh_attempt=$((mesh_attempt + 1)); sleep 1
+  done
+  lock_radios || return 1
+  radios_down || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  if [ ! -e "$state/radio-modules" ]; then
+    [ -d /sys/module/mt_wifi ] || return 1
+    # Keep this first module set through partial unloads and restoration retries.
+    for mesh_module in mtk_warp_proxy mtk_warp mt_wifi; do
+      [ ! -d "/sys/module/$mesh_module" ] || printf '%s\n' "$mesh_module"
+    done > "$state/radio-modules.new" || return 1
+    mv "$state/radio-modules.new" "$state/radio-modules" || return 1
+    sync || return 1
+  fi
+  valid_radio_modules || return 1
+  for mesh_module in mtk_warp_proxy mtk_warp mt_wifi; do
+    [ -d "/sys/module/$mesh_module" ] || continue
+    timeout 20 rmmod "$mesh_module" 8>&- 9>&- >/dev/null 2>&1 || return 1
+  done
+  for mesh_module in mtk_warp_proxy mtk_warp mt_wifi; do
+    [ ! -d "/sys/module/$mesh_module" ] || return 1
+  done
+  for mesh_interface in ra0 ra1 rax0 rax1 apcli0 apclix0; do
+    [ ! -e "/sys/class/net/$mesh_interface" ] || return 1
+  done
+)
+
+restore_radios() {
+  (
+    local mesh_module
+    lock_radios || exit 1
+    valid_radio_modules || exit 1
+    for mesh_module in mt_wifi mtk_warp mtk_warp_proxy; do
+      grep -qx "$mesh_module" "$state/radio-modules" || continue
+      [ -d "/sys/module/$mesh_module" ] && continue
+      timeout 20 modprobe "$mesh_module" 8>&- 9>&- >/dev/null 2>&1 || exit 1
+      [ -d "/sys/module/$mesh_module" ] || exit 1
+    done
+    [ -d /sys/module/mt_wifi ] || exit 1
+  ) || return 1
+  # The pinned wifi up command reloads network configuration before setup.
+  # It must acquire mtwifi.lock itself, after the subshell releases descriptor 8.
+  timeout 20 wifi up 9>&- >/dev/null 2>&1 || return 1
   wait_radios || return 1
   iwpriv ra0 set mapR2Enable=0 >/dev/null 2>&1 || return 1
   iwpriv ra0 set mapTSEnable=0 >/dev/null 2>&1 || return 1
 }
 
+restore() {
+  disconnect_backhaul || return 1
+  /usr/libexec/ax6000-mesh-transaction rollback "${1:-failure}"
+}
+
+lease_ok() {
+  local mesh_lan mesh_address
+  mesh_lan=$(ubus call network.interface.lan status 2>/dev/null) || return 1
+  [ "$(printf '%s' "$mesh_lan" | jsonfilter -e '@.up')" = true ] || return 1
+  [ "$(printf '%s' "$mesh_lan" | jsonfilter -e '@.proto')" = dhcp ] || return 1
+  mesh_address=$(printf '%s' "$mesh_lan" | jsonfilter -e '@["ipv4-address"][0].address')
+  case "$mesh_address" in ''|0.*|127.*|169.254.*) return 1 ;; esac
+  [ "$(printf '%s' "$mesh_address" | awk -F. 'NF==4 { for(i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i>255) exit; print "valid" }')" = valid ]
+}
+
+pair_mesh() {
+  local mesh_result mesh_message
+  [ "$(get ax6000_mesh.main.enabled)" = 1 ] || fail 'Mesh is not enabled.'
+  mesh_result=$(/usr/libexec/ax6000-mesh-vendor pair) || fail 'Wireless pairing could not be started.'
+  if [ "$(printf '%s' "$mesh_result" | jsonfilter -e '@.ok')" != true ]; then
+    mesh_message=$(printf '%s' "$mesh_result" | jsonfilter -e '@.error')
+    fail "${mesh_message:-Wireless pairing could not be started.}"
+  fi
+}
+
 apply_mesh() {
-  [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Mesh is already enabled; disable it before reapplying.'
-  if [ -d /sys/module/mapfilter ]; then owns_mapfilter=0; else owns_mapfilter=1; fi
+  [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Mesh is already enabled; disable it before changing its role.'
+  phase preparing
   preflight
-  [ ! -d "$state" ] || fail 'A previous wireless snapshot exists; disable mesh to restore it first.'
   for binary in wapp mapd p1905_managerd; do ! pidof "$binary" >/dev/null || fail "A $binary process is already running."; done
-  mkdir -m 700 "$state"
-  trap 'rm -rf "$state"' EXIT
-  trap 'exit 1' HUP INT TERM
-  cp "$config" "$state/original-wireless"
-  for band in b0 b1; do
-    profile="/etc/wireless/mediatek/mt7986-ax6000.dbdc.$band.dat"
-    [ -f "$profile" ] || fail 'Expected AX6000 radio profile is missing.'
-    cp "$profile" "$state/original-$band"
-  done
-  chmod 600 "$state"/*
+  /usr/libexec/ax6000-mesh-transaction begin "$role" "$backhaul" || fail 'Could not save a complete recovery snapshot.'
   success=0
-  if [ "$owns_mapfilter" = 1 ]; then : > "$state/owns-mapfilter"; fi
-  trap '[ "$success" = 1 ] || { if restore; then rm -rf "$state"; else printf "%s\n" "Restore failed; snapshot retained in $state." >&2; fi; }' EXIT
+  trap '[ "$success" = 1 ] || [ "$(cat "$state/phase" 2>/dev/null || :)" = committed ] || { if restore; then phase restored; else printf "%s\n" "Restore failed; recovery snapshot retained." >&2; fi; }' EXIT
   trap 'exit 1' HUP INT TERM
+  if [ "$role" = agent ]; then /usr/libexec/ax6000-mesh-transaction prepare-agent || fail 'Could not prepare the additional node network.'; fi
+  bh_random=$(head -c 32 /dev/urandom | sha256sum)
+  bh_key=$(printf '%.32s' "${bh_random%% *}")
+  bh_ssid="AX6000-BH-$(printf '%.12s' "${bh_random%% *}")"
+  [ "${#bh_key}" = 32 ] || fail 'Could not create backhaul credentials.'
+  printf '%s\n' "$bh_ssid" > "$state/backhaul-ssid"
+  printf '%s\n' "$bh_key" > "$state/backhaul-key"
+  [ -d /sys/module/mapfilter ] || : > "$state/owns-mapfilter"
   modprobe mapfilter >/dev/null 2>&1 || fail 'The MediaTek mapfilter kernel module is unavailable.'
-  for device in "$dev1" "$dev2"; do
+  for index in 1 2; do
+    if [ "$index" = 1 ]; then device=$dev1; client=$ap1; else device=$dev2; client=$ap2; fi
     uci -q set "wireless.$device.map_mode=1"
     if [ "$role" = agent ]; then agent=1; else agent=0; fi
     uci -q set "wireless.$device.map_agent=$agent"
-  done
-  for ap in "$ap1" "$ap2"; do uci -q set "wireless.$ap.map_bss_type=96"; done
-  if [ "$role" = agent ] && [ "$backhaul" = wireless ]; then
-    for index in 1 2; do
+    uci -q set "wireless.$client.map_bss_type=32"
+    if [ "$role" = agent ]; then
+      uci -q set "wireless.$client.ssid=AX6000-joining"
+      uci -q set "wireless.$client.key=$bh_key"
+      uci -q set "wireless.$client.encryption=sae-mixed"
+      uci -q set "wireless.$client.hidden=0"
+    fi
+    section="ax6000_mesh_ap$index"
+    uci -q set "wireless.$section=wifi-iface"
+    uci -q set "wireless.$section.device=$device"
+    uci -q set "wireless.$section.mode=ap"
+    uci -q set "wireless.$section.network=lan"
+    uci -q set "wireless.$section.ssid=$bh_ssid"
+    uci -q set "wireless.$section.key=$bh_key"
+    uci -q set "wireless.$section.encryption=psk2"
+    uci -q set "wireless.$section.hidden=1"
+    uci -q set "wireless.$section.map_bss_type=64"
+    if [ "$role:$backhaul" = agent:wireless ]; then
       section="ax6000_mesh_bh$index"
-      [ -z "$(get wireless.$section)" ] || fail 'A mesh backhaul section already exists.'
-      if [ "$index" = 1 ]; then device=$dev1; else device=$dev2; fi
       uci -q set "wireless.$section=wifi-iface"
       uci -q set "wireless.$section.device=$device"
       uci -q set "wireless.$section.mode=sta"
       uci -q set "wireless.$section.network=lan"
       uci -q set "wireless.$section.ssid=mesh-backhaul"
-    done
-  fi
+    fi
+  done
   uci -q commit wireless
-  cp "$config" "$state/active-wireless"
   uci -q set ax6000_mesh.main.enabled=1
   uci -q commit ax6000_mesh
-  wifi reload >/dev/null 2>&1 || fail 'Wireless reload failed; settings restored.'
-  wait_radios || fail 'Wireless radios did not become ready; settings restored.'
-  if ! start_error=$(/etc/init.d/ax6000-mesh start 2>&1); then
-    fail "Mesh service failed to start; settings restored. $(printf '%.256s' "$start_error")"
+  if [ "$role" = agent ]; then
+    # The converter deliberately preserves enrolled agent DAT credentials.
+    # Seed both new BSS slots securely before its first ownership handover.
+    for radio in ra0 rax0 ra1 rax1; do
+      case "$radio" in *0) mesh_seed_ssid=AX6000-joining; mesh_seed_auth=WPA2PSKWPA3PSK; mesh_seed_hidden=0 ;;
+        *) mesh_seed_ssid=$bh_ssid; mesh_seed_auth=WPA2PSK; mesh_seed_hidden=1 ;; esac
+      wifi_config_save "$radio" SSID "$mesh_seed_ssid"
+      wifi_config_save "$radio" WPAPSK "$bh_key"
+      wifi_config_save "$radio" AuthMode "$mesh_seed_auth"
+      wifi_config_save "$radio" EncrypType AES
+      wifi_config_save "$radio" HideSSID "$mesh_seed_hidden"
+    done
   fi
-  n=0
-  while [ "$n" -lt 45 ]; do
-    if /usr/libexec/ax6000-mesh-health; then success=1; break; fi
-    n=$((n + 1)); sleep 1
+  /usr/libexec/ax6000-mesh-transaction seal || fail 'Could not record the prepared configuration.'
+  if [ "$role" = agent ]; then /etc/init.d/network reload 9>&- >/dev/null 2>&1 || fail 'Agent network reload failed.'; fi
+  wifi reload 9>&- >/dev/null 2>&1 || fail 'Wireless reload failed.'
+  wait_radios || fail 'Wireless radios did not become ready.'
+  if ! start_error=$(/etc/init.d/ax6000-mesh start 9>&- 2>&1); then fail "Mesh service failed to start. $(printf '%.256s' "$start_error")"; fi
+  read -r mesh_health_now _ < /proc/uptime; mesh_health_now=${mesh_health_now%%.*}
+  mesh_health_deadline=$((mesh_health_now + 30)); mesh_healthy=0
+  while [ "$mesh_health_now" -lt "$mesh_health_deadline" ]; do
+    if /usr/libexec/ax6000-mesh-health; then mesh_healthy=1; break; fi
+    sleep 1
+    read -r mesh_health_now _ < /proc/uptime; mesh_health_now=${mesh_health_now%%.*}
   done
-  [ "$success" = 1 ] || fail 'Mesh daemons did not start; wireless settings restored.'
+  [ "$mesh_healthy" = 1 ] || fail 'Mesh services did not become ready.'
+  if [ "$role" = agent ]; then
+    if [ "$backhaul" = wireless ]; then phase pairing; pair_mesh; else phase address; fi
+    read -r mesh_now _ < /proc/uptime; mesh_now=${mesh_now%%.*}
+    mesh_join_deadline=$((mesh_now + 180)); mesh_joined=0
+    while [ "$mesh_now" -lt "$mesh_join_deadline" ]; do
+      enrollment=$(/usr/libexec/ax6000-mesh-vendor status) || enrollment='{}'
+      if [ "$(printf '%s' "$enrollment" | jsonfilter -e '@.connected')" = true ]; then
+        phase address
+        if lease_ok; then mesh_joined=1; break; fi
+      fi
+      sleep 1
+      read -r mesh_now _ < /proc/uptime; mesh_now=${mesh_now%%.*}
+    done
+    [ "$mesh_joined" = 1 ] || fail 'The node did not join a controller and receive an address.'
+    phase connected
+  else phase ready; fi
+  /usr/libexec/ax6000-mesh-transaction commit || fail 'Could not commit the Mesh configuration.'
+  success=1
   trap - EXIT HUP INT TERM
 }
 
 disable_mesh() {
-  [ -z "$(uci -q changes wireless)" ] || fail 'Apply or discard pending wireless changes first.'
-  if [ -f "$state/active-wireless" ] && ! cmp -s "$config" "$state/active-wireless"; then
-    fail 'Wireless configuration changed since mesh was enabled. Restore it manually before disabling mesh.'
+  if [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ] && /usr/libexec/ax6000-mesh-transaction present; then
+    : # A previous restoration was interrupted; retry from the valid snapshot.
+  else
+    /usr/libexec/ax6000-mesh-transaction check || fail 'Configuration changed after Mesh setup; restore those edits before disabling Mesh.'
   fi
-  [ -f "$state/original-wireless" ] || fail 'No wireless snapshot is available for restoration.'
-  restore || fail "Restore failed; snapshot retained in $state."
-  rm -rf "$state"
+  restore disable || fail 'Restore failed; recovery snapshot retained.'
 }
 
 case "${1:-}" in
@@ -267,6 +425,7 @@ case "${1:-}" in
   case "$2" in controller|agent) ;; *) fail 'Invalid mesh role.' ;; esac
   case "$3" in wired|wireless) ;; *) fail 'Invalid backhaul.' ;; esac
   [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Disable mesh before changing its role or backhaul.'
+  if [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ] && /usr/libexec/ax6000-mesh-transaction present; then fail 'Restore the previous settings before configuring Mesh.'; fi
   uci -q set ax6000_mesh.main=mesh
   uci -q set "ax6000_mesh.main.role=$2"
   uci -q set "ax6000_mesh.main.backhaul=$3"
@@ -274,12 +433,10 @@ case "${1:-}" in
   ;;
  apply) apply_mesh ;;
  disable) disable_mesh ;;
- pair)
-  [ "$(get ax6000_mesh.main.enabled)" = 1 ] || fail 'Mesh is not enabled.'
-  [ "$(get ax6000_mesh.main.backhaul)" = wireless ] || fail 'Pairing is only needed for wireless backhaul.'
-  pidof wapp >/dev/null || fail 'The wireless daemon is not running.'
-  timeout 8 wappctrl ra0 wps_pbc >/dev/null || fail 'Wireless pairing could not be started.'
-  ;;
+ pair) pair_mesh ;;
+ disconnect-backhaul) disconnect_backhaul ;;
+ quiesce-radios) quiesce_radios ;;
+ restore-radios) restore_radios ;;
  abi) abi_ok ;;
  preflight) preflight ;;
  prepare) preflight; prepare ;;

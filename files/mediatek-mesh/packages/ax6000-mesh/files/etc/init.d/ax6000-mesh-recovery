@@ -1,0 +1,10 @@
+#!/bin/sh /etc/rc.common
+# Restore interrupted enrollment before netifd (START=20) can attach an uplink.
+START=18
+boot() {
+  /usr/libexec/ax6000-mesh-transaction recover-boot || {
+    logger -t ax6000-mesh 'Interrupted enrollment recovery failed; snapshot retained.'
+    return 1
+  }
+}
+start() { boot; }

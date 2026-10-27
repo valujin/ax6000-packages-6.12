@@ -94,7 +94,8 @@ class Source612Tests(unittest.TestCase):
                                   ('target/linux/mediatek/Makefile',b'KERNEL_PATCHVER:=6.12\n'),
                                   ('target/linux/mediatek/image/filogic.mk',gzip.decompress((ROOT/f'tests/fixtures/ax6000-612-{channel}-filogic.mk.gz').read_bytes())),
                                   ('package/kernel/linux/modules/netdevices.mk',gzip.decompress((ROOT/'tests/fixtures/ax6000-612-netdevices.gz').read_bytes())),
-                                  ('feeds/packages/net/openvswitch/Makefile',gzip.decompress((ROOT/'tests/fixtures/openvswitch-packages-52ddbd1-Makefile.gz').read_bytes()))]:
+                                  ('feeds/packages/net/openvswitch/Makefile',gzip.decompress((ROOT/'tests/fixtures/openvswitch-packages-52ddbd1-Makefile.gz').read_bytes())),
+                                  ('package/network/config/wifi-scripts/files/lib/netifd/wireless-device.uc',gzip.decompress((ROOT/'tests/fixtures/mtwifi-wireless-device-ae65e1d.uc.gz').read_bytes()))]:
             target=self.source/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(payload)
 
     def test_patched_native_compressor_command_has_one_worker_for_every_layout(self):
@@ -129,7 +130,7 @@ class Source612Tests(unittest.TestCase):
                 output=(self.source/'include/kernel-defaults.mk').read_text()
                 self.assertIn('/bin/xz -T1 -9 -fz --check=crc32',output)
                 self.assertNotIn('-T$(if',output)
-                self.assertEqual(len(patches),7)
+                self.assertEqual(len(patches),8 if channel == 'recommended' else 7)
                 firmware.vendor_fixes(profile(channel),self.source,check_only=True)
                 firmware.vendor_fixes(profile(channel),self.source)
         target=self.source/'include/kernel-defaults.mk';target.write_text(target.read_text()+'# unexpected drift\n')

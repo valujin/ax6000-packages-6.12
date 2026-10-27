@@ -8,7 +8,7 @@ exec 9>/var/lock/ax6000-mesh.lock
 # An activation or restoration will start the daemons itself.
 flock -n 9 || exit 0
 [ "$(uci -q get ax6000_mesh.main.enabled)" = 1 ] || exit 0
-[ -f /etc/ax6000-mesh/original-wireless ] || exit 0
+/usr/libexec/ax6000-mesh-transaction present || exit 0
 exec 8>/var/lock/mtwifi.lock
 attempt=0
 while ! flock -n 8; do
@@ -16,4 +16,4 @@ while ! flock -n 8; do
   [ "$attempt" -lt 30 ] || exit 0
   sleep 1
 done
-/etc/init.d/ax6000-mesh restart >/dev/null 2>&1
+/etc/init.d/ax6000-mesh restart 8>&- 9>&- >/dev/null 2>&1

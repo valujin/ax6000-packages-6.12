@@ -1,2 +1,20 @@
+# Retain the complete transaction, including originals and absent-file markers.
+# START18 recovery restores pending enrollment before network starts.
 /etc/ax6000-mesh/
+# Keep the exact enrolled UCI/vendor baseline as well as the rollback snapshot.
+/etc/config/network
+/etc/config/dhcp
+/etc/config/wireless
+/etc/config/ax6000_mesh
+/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat
+/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat
+/etc/map/mapd_cfg
 /etc/map/mapd_user.cfg
+/etc/map/1905d.cfg
+/etc/map/wts_bss_info_config
+/etc/mapd_strng.conf
+/etc/ethernet_cfg.txt
+/etc/wapp_ap_ra0.conf
+/etc/wapp_ap_rax0.conf
+/etc/wapp_ap.conf
+/etc/wapp_main_inf.conf

@@ -17,7 +17,7 @@ define Package/ax6000-mesh
   SECTION:=net
   CATEGORY:=Network
   TITLE:=AX6000 MediaTek EasyMesh service
-  DEPENDS:=+mapd +datconf +wireless-tools +uci +rpcd +jshn +libubox $(MAPFILTER_DEPENDS) +coreutils-timeout +ip-full
+  DEPENDS:=+mapd +datconf +wireless-tools +uci +rpcd +jshn +libubox $(MAPFILTER_DEPENDS) +coreutils-timeout +coreutils-stat +ip-full +jsonfilter
   EXTRA_DEPENDS:=$(MAPFILTER_EXTRA_DEPENDS)
 endef
 

@@ -14,6 +14,15 @@ call)
       backhaul="$(uci -q get ax6000_mesh.main.backhaul || echo wired)"
       running=0
       if /usr/libexec/ax6000-mesh-health; then running=1; fi
+      enrollment='{}'; pairing_remaining=0; connected=false
+      if [ "$running" = 1 ]; then
+        enrollment="$(/usr/libexec/ax6000-mesh-vendor status)" || enrollment='{}'
+        if json_load "$enrollment" 2>/dev/null; then
+          json_get_var pairing_remaining pairing_remaining
+          json_get_var connected connected
+        else enrollment='{}'; fi
+      fi
+      case "$pairing_remaining" in ''|*[!0-9]*) pairing_remaining=0 ;; esac
       json_init
       available=0
       case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
@@ -24,17 +33,31 @@ call)
       json_add_boolean available "$available"
       json_add_boolean enabled "$enabled"
       json_add_boolean running "$running"
+      recovery_pending=0
+      if [ "$(cat /etc/ax6000-mesh/phase 2>/dev/null || :)" = pending ] && /usr/libexec/ax6000-mesh-transaction present >/dev/null 2>&1; then recovery_pending=1; fi
+      json_add_boolean recovery_pending "$recovery_pending"
       json_add_string role "$role"
       json_add_string backhaul "$backhaul"
       if [ -f /var/run/ax6000-mesh-operation/state ]; then
         state="$(cat /var/run/ax6000-mesh-operation/state)"
       elif [ "$enabled" != 1 ]; then state=disabled; elif [ "$running" = 1 ]; then state=running; else state=stopped; fi
+      phase=$(cat /var/run/ax6000-mesh-operation/phase 2>/dev/null || :)
+      if [ -z "$phase" ]; then
+        if [ "$connected" = 1 ] || [ "$connected" = true ]; then phase=connected
+        elif [ "$running" = 1 ]; then phase=ready; else phase=$state; fi
+      fi
       json_add_string state "$state"
+      json_add_string phase "$phase"
+      json_add_int pairing_remaining "$pairing_remaining"
       if [ "$running" = 1 ]; then json_add_string detail 'Mesh service is responding.'; elif [ "$enabled" = 1 ]; then json_add_string detail 'Mesh service is not responding.'; else json_add_string detail 'Mesh is disabled.'; fi
       if [ -s /var/run/ax6000-mesh-error ]; then
         json_add_string error "$(head -c 512 /var/run/ax6000-mesh-error)"
+      elif [ -s /etc/ax6000-mesh-last-error ]; then
+        json_add_string error "$(head -c 512 /etc/ax6000-mesh-last-error)"
       fi
-      json_dump
+      status_json=$(json_dump)
+      # Both values were generated/validated with jshn, never raw daemon text.
+      printf '%s,"enrollment":%s}\n' "${status_json%\}}" "$enrollment"
       ;;
     configure)
       if [ -d /var/run/ax6000-mesh-operation ]; then
@@ -54,7 +77,7 @@ call)
       fi
       case "$method" in apply) state=applying ;; disable) state=disabling ;; esac
       printf '%s\n' "$state" > /var/run/ax6000-mesh-operation/state
-      rm -f /var/run/ax6000-mesh-error
+      rm -f /var/run/ax6000-mesh-error /etc/ax6000-mesh-last-error
       /etc/init.d/ax6000-mesh-operation stop >/dev/null 2>&1 || :
       if /etc/init.d/ax6000-mesh-operation start >/dev/null 2>&1; then
         json_init; json_add_boolean ok 1; json_add_string state "$state"; json_dump

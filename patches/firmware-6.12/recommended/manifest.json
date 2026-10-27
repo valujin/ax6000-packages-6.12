@@ -55,6 +55,13 @@
       "sha256": "a20d232052d9cb26085fde170c3067aace554fe7e81c685813ead36d7f49f6a8",
       "before_sha256": "bc095625fc8cc66c2cd1f6a864ad6a1070746a7ebb990bc805f0fd952b18964a",
       "after_sha256": "2d9e21421f98817ad3ef4de72907f07ecfd9950eb13d4deb8d2bb85c1a6a34c7"
+    },
+    {
+      "patch": "170-mtwifi-setup-timeout.patch",
+      "path": "package/network/config/wifi-scripts/files/lib/netifd/wireless-device.uc",
+      "sha256": "8780dbff0935c7b2495698c6bf7fdb4f8b879c3f9fa089100956dfff84f19d82",
+      "before_sha256": "b42b77c783542e2f56e264910d0fb4a15a86a514c0c60aafd63c489231f6ebd7",
+      "after_sha256": "b7db6a27ab0a9806a563bc89bef2a2f66addb6ea21295521b3f3181486bfadb3"
     }
   ]
 }

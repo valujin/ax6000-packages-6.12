@@ -1,0 +1,163 @@
+#!/bin/sh
+# Queries the pinned SDK 20250408 daemon; never infer membership from PIDs.
+LC_ALL=C
+export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+
+get() { uci -q get "$1" 2>/dev/null || :; }
+uptime_seconds() { local value rest; read -r value rest < /proc/uptime; printf '%s' "${value%%.*}"; }
+valid_mac() {
+  case "$1" in ''|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff) return 1 ;; esac
+  printf '%s\n' "$1" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+}
+error_json() { json_init; json_add_boolean ok 0; json_add_string error "$1"; json_dump; return 1; }
+
+pair() {
+  [ "$(get ax6000_mesh.main.enabled)" = 1 ] || { error_json 'Mesh is not enabled.'; return; }
+  case "$(get ax6000_mesh.main.role)" in
+    controller) ;; # Registrar is available independently of its saved backhaul.
+    agent) [ "$(get ax6000_mesh.main.backhaul)" = wireless ] || { error_json 'Wireless pairing is unavailable for this backhaul.'; return; } ;;
+    *) error_json 'Invalid mesh role.'; return ;;
+  esac
+  pidof wapp >/dev/null || { error_json 'The wireless daemon is not running.'; return; }
+  # wapp_cmm.c:5181 chooses AP registrar or APCLI enrollee from its MAP role.
+  # wps.c:56 uses visible FH; driver wsc_tlv.c:2380 sends separate BH profiles.
+  # include/map_1905.h:152 defines the concurrent WPS timeout as 150 seconds.
+  if timeout 8 wappctrl ra0 wps_pbc 9>&- >/dev/null 2>&1; then
+    now=$(uptime_seconds)
+    case "$now" in ''|*[!0-9]*) error_json 'Cannot record the pairing timeout.'; return ;; esac
+    printf '%s\n' "$((now + 150))" > /var/run/ax6000-mesh-pairing || { error_json 'Cannot record the pairing timeout.'; return; }
+    json_init; json_add_boolean ok 1; json_add_boolean pairing 1; json_add_int timeout_seconds 150; json_dump
+  else
+    error_json 'Wireless pairing could not be started.'
+  fi
+}
+
+read_topology() {
+  local data count keys entry alid role upstream medium metric_keys metric local_seen=0 seen='|'
+  timeout 3 mapd_cli /tmp/mapd_ctrl dump_topology_v1 "$work/t.json" 9>&- >/dev/null 2>&1 || return 1
+  [ -s "$work/t.json" ] || return 1
+  count=$(wc -c < "$work/t.json")
+  [ "$count" -le 16384 ] || return 1
+  data=$(cat "$work/t.json")
+  json_load "$data" 2>/dev/null || return 1
+  json_select 'topology information' 2>/dev/null || return 1
+  json_get_keys keys
+  count=0
+  for entry in $keys; do
+    count=$((count + 1)); [ "$count" -le 16 ] || return 1
+    json_select "$entry" 2>/dev/null || return 1
+    json_get_var alid 'AL MAC'
+    json_get_var role 'Device role'
+    json_get_var upstream 'Upstream 1905 device'
+    alid=$(printf '%s' "$alid" | tr A-F a-f)
+    upstream=$(printf '%s' "$upstream" | tr A-F a-f)
+    valid_mac "$alid" || return 1
+    case "$seen" in *"|$alid|"*) return 1 ;; esac
+    seen="$seen$alid|"
+    case "$role" in 01|02|03) ;; *) return 1 ;; esac
+    valid_mac "$upstream" || upstream=
+    medium=unknown
+    # topologySrv.c:2255 writes BH Info separately from link counters.
+    # topo_srv_dump_bh_link_info (:1601) puts the medium in this array.
+    if json_select 'BH Info' 2>/dev/null; then
+      json_get_keys metric_keys
+      for metric in $metric_keys; do
+        json_select "$metric" 2>/dev/null || break
+        json_get_var medium 'Backhaul Medium Type'
+        json_select ..
+        case "$medium" in Ethernet) medium=wired; break ;; 2.4G|5G|5GL|5GH|6G) medium=wireless; break ;; *) medium=unknown ;; esac
+      done
+      json_select ..
+    fi
+    # SDK 20250408 topologySrv.c:5336 inserts own device at list head;
+    # :5006 inserts every remote device AFTER it. dump_topology_v1:2708
+    # starts from that own record (default start_index=1), for both roles.
+    # The daemon's ALID may differ from the bridge's interface MAC.
+    if [ "$count" = 1 ]; then
+      local_alid=$alid
+      local_seen=1
+      local_role=$role
+      local_upstream=$upstream
+    else
+      peer_count=$((peer_count + 1))
+      [ "$role" != 02 ] || agent_count=$((agent_count + 1))
+      printf '%s|%s|%s|%s\n' "$alid" "$role" "$upstream" "$medium" >> "$work/peers"
+    fi
+    case "$role" in 01|03) controller_alid=$alid ;; esac
+    json_select ..
+  done
+  [ "$local_seen" = 1 ]
+}
+
+status() {
+  local work local_alid= controller_alid= local_role= local_upstream= role
+  local topology_valid=0 peer_count=0 agent_count=0 connected=0 bh_connected=0 fh_status=-1 bh_status=-1
+  local now expiry remaining=0 reply alid peer_role upstream medium
+  role=$(get ax6000_mesh.main.role)
+  exec 8>/var/lock/ax6000-mesh-status.lock
+  if flock -n 8; then
+    # The daemon's destination buffer is 30 bytes (ctrl_iface.c:808).
+    work=$(mktemp -d /tmp/axm.XXXXXX)
+    if [ -n "$work" ] && [ -d "$work" ]; then
+      trap 'rm -rf "$work"' EXIT
+      : > "$work/peers"
+      if read_topology; then
+        topology_valid=1
+      else
+        peer_count=0; agent_count=0; local_alid=; controller_alid=; local_role=; local_upstream=
+        : > "$work/peers"
+      fi
+      # mapd.c:5716 requires live APCLI association, or configured Ethernet
+      # with a path to the controller. This is stronger than WPS phase alone.
+      reply=$(timeout 3 mapd_cli /tmp/mapd_ctrl bh_conn_status 9>&- 2>/dev/null || :)
+      if printf '%s\n' "$reply" | grep -qx 'backhaul connection status 1'; then bh_connected=1; fi
+      reply=$(timeout 3 mapd_cli /tmp/mapd_ctrl conn_status 9>&- 2>/dev/null || :)
+      fh_status=$(printf '%s\n' "$reply" | sed -n 's/^conn_status fhbss: \([0-4]\), bhsta: [0-6]$/\1/p' | head -n 1)
+      bh_status=$(printf '%s\n' "$reply" | sed -n 's/^conn_status fhbss: [0-4], bhsta: \([0-6]\)$/\1/p' | head -n 1)
+      fh_status=${fh_status:--1}; bh_status=${bh_status:--1}
+    fi
+  fi
+  if [ "$topology_valid" = 1 ]; then
+    if [ "$role" = controller ] && [ "$local_role" = 01 ] && [ "$agent_count" -gt 0 ]; then
+      connected=1
+    elif [ "$role" = agent ] && [ "$local_role" = 02 ] && [ -n "$controller_alid" ] &&
+         [ "$controller_alid" != "$local_alid" ] && [ "$bh_connected" = 1 ] && [ "$fh_status" = 2 ]; then
+      connected=1
+    fi
+  fi
+  now=$(uptime_seconds)
+  expiry=$(cat /var/run/ax6000-mesh-pairing 2>/dev/null || :)
+  case "$now:$expiry" in *[!0-9:]*|:*|*:) ;; *) remaining=$((expiry - now)); [ "$remaining" -ge 0 ] && [ "$remaining" -le 150 ] || remaining=0 ;; esac
+  json_init
+  json_add_boolean ok 1
+  json_add_boolean topology_valid "$topology_valid"
+  json_add_string local_alid "$local_alid"
+  json_add_string controller_alid "$controller_alid"
+  json_add_int peer_count "$peer_count"
+  json_add_boolean bh_connected "$bh_connected"
+  json_add_int fh_status "$fh_status"
+  json_add_int bh_status "$bh_status"
+  json_add_boolean connected "$connected"
+  json_add_int pairing_remaining "$remaining"
+  json_add_array peers
+  if [ "$topology_valid" = 1 ]; then
+    while IFS='|' read -r alid peer_role upstream medium; do
+      json_add_object
+      json_add_string alid "$alid"
+      case "$peer_role" in 01|03) json_add_string role controller ;; 02) json_add_string role agent ;; esac
+      json_add_string upstream_alid "$upstream"
+      json_add_string backhaul "$medium"
+      # topologySrv.c:2750 omits remote devices with in_network == 0.
+      json_add_boolean connected 1
+      json_close_object
+    done < "$work/peers"
+  fi
+  json_close_array
+  json_dump
+  [ -z "$work" ] || rm -rf "$work"
+  trap - EXIT
+}
+
+case "${1:-}" in status) status ;; pair) pair ;; *) error_json 'Unknown vendor operation.' ;; esac

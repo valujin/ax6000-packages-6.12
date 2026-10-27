@@ -148,6 +148,11 @@ def expected(profile, lock, source=None):
                               (versions, mesh['versions']), (suffixes, mesh['version_suffixes'])):
         need(not set(target).intersection(additions), 'Optional feature output collision')
         target.update(additions)
+    if profile.get('mediatek_mesh'):
+        # Exact installed postimage of reviewed generic patch170. This checks
+        # the image's timeout fix even if an old same-version wifi-scripts APK
+        # accidentally survives an incremental source rebuild.
+        hashes['lib/netifd/wireless-device.uc'] = 'b7db6a27ab0a9806a563bc89bef2a2f66addb6ea21295521b3f3181486bfadb3'
     if source is not None:
         for path in list(mesh['files']):
             if path.endswith('.js'):

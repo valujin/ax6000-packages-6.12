@@ -1,0 +1,16 @@
+--- a/package/network/config/wifi-scripts/files/lib/netifd/wireless-device.uc
++++ b/package/network/config/wifi-scripts/files/lib/netifd/wireless-device.uc
+@@ -232,7 +232,12 @@
+ 	if (!wdev_script_task)
+ 		return run_handler_cb(wdev, cb);
+ 
+-	wdev_script_timeout = uloop.timer(DEFAULT_SCRIPT_TIMEOUT,
++	// MediaTek DBDC cold setup reloads the shared chip and initializes its
++	// main BSS before the requested radio; this can exceed 30 seconds.
++	// Keep other drivers and teardown handlers on the normal deadline.
++	let script_timeout = op == "setup" && wdev.data.config.type == "mtwifi"
++		? 120 * 1000 : DEFAULT_SCRIPT_TIMEOUT;
++	wdev_script_timeout = uloop.timer(script_timeout,
+ 		() => run_handler_timeout(wdev, cb)
+ 	);
+ }

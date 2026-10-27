@@ -31,7 +31,32 @@ def argon_payload():
         return {entry.name: payload.extractfile(entry).read() for entry in payload if entry.isfile()}
 
 
+def mtwifi_timeout_sources():
+    data = (ROOT / 'tests/fixtures/native612-mtwifi-timeout/source.tar.gz').read_bytes()
+    if hashlib.sha256(data).hexdigest() != 'af1552dca943a160d374252ff08fade5bb008c043ede1ebdaf3838fb3c133301':
+        raise AssertionError('Pinned wifi-scripts source fixture checksum differs')
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as payload:
+        return {entry.name: payload.extractfile(entry).read() for entry in payload if entry.isfile()}
+
+
 class ImageFeatureTests(unittest.TestCase):
+    def test_timeout_image_fixture_is_exact_pinned_source_plus_reviewed_patch(self):
+        directory = ROOT / 'patches/firmware-6.12/recommended'
+        manifest = json.loads((directory / 'manifest.json').read_bytes())
+        spec = next(p for p in manifest['patches'] if p['patch'] == '170-mtwifi-setup-timeout.patch')
+        files = mtwifi_timeout_sources()
+        self.assertEqual(hashlib.sha256(files['before.uc']).hexdigest(), spec['before_sha256'])
+        self.assertEqual(hashlib.sha256(files['after.uc']).hexdigest(), spec['after_sha256'])
+        patch = directory / spec['patch']
+        self.assertEqual(hashlib.sha256(patch.read_bytes()).hexdigest(), spec['sha256'])
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / spec['path']
+            target.parent.mkdir(parents=True)
+            target.write_bytes(files['before.uc'])
+            subprocess.run(['git', 'apply', '--check', str(patch)], cwd=temporary, check=True)
+            subprocess.run(['git', 'apply', str(patch)], cwd=temporary, check=True)
+            self.assertEqual(target.read_bytes(), files['after.uc'])
+
     def test_argon_requested_in_native_seed_cannot_be_missing_from_image(self):
         seed = json.loads((ROOT / 'profiles/redmi-ax6000-612-recommended-new.json').read_text())
         self.assertIn('luci-theme-argon', seed['packages'])

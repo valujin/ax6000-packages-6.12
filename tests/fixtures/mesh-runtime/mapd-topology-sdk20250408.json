@@ -1,0 +1,44 @@
+{
+  "topology information": [
+    {
+      "AL MAC": "02:00:00:00:00:01",
+      "MAP Version": "R2",
+      "Device role": "01",
+      "Distance from controller": "0",
+      "BH Interface(AP)": [
+        {"MAC address": "02:00:00:01:00:01", "interface name": "NA"}
+      ],
+      "BH Interface(APCLI)": [],
+      "backhaul link metrics": [],
+      "Number of radios": "0",
+      "Radio Info": [],
+      "BH Info": [],
+      "APCLI INFO": [],
+      "Other Clients Info": []
+    },
+    {
+      "AL MAC": "02:00:00:00:00:02",
+      "MAP Version": "R2",
+      "Device role": "02",
+      "Distance from controller": "1",
+      "Upstream 1905 device": "02:00:00:00:00:01",
+      "BH Interface(AP)": [],
+      "BH Interface(APCLI)": [
+        {"MAC address": "02:00:00:02:00:02", "interface name": "N/A"}
+      ],
+      "backhaul link metrics": [],
+      "Number of radios": "0",
+      "Radio Info": [],
+      "BH Info": [
+        {
+          "neighbor almac addr": "02:00:00:00:00:01",
+          "connected iface addr": "02:00:00:02:00:02",
+          "Backhaul Medium Type": "5G",
+          "RSSI": "-54"
+        }
+      ],
+      "APCLI INFO": [],
+      "Other Clients Info": []
+    }
+  ]
+}

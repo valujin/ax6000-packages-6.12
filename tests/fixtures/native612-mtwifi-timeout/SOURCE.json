@@ -1,0 +1,15 @@
+{
+  "source_repository": "https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git",
+  "source_commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+  "source_path": "package/network/config/wifi-scripts/files/lib/netifd/wireless-device.uc",
+  "patch": "170-mtwifi-setup-timeout.patch",
+  "patch_sha256": "8780dbff0935c7b2495698c6bf7fdb4f8b879c3f9fa089100956dfff84f19d82",
+  "before_sha256": "b42b77c783542e2f56e264910d0fb4a15a86a514c0c60aafd63c489231f6ebd7",
+  "after_sha256": "b7db6a27ab0a9806a563bc89bef2a2f66addb6ea21295521b3f3181486bfadb3",
+  "archive_sha256": "af1552dca943a160d374252ff08fade5bb008c043ede1ebdaf3838fb3c133301",
+  "installed_path": "lib/netifd/wireless-device.uc",
+  "installed_mode": "0644",
+  "install_rule": "Pinned wifi-scripts Package/install copies files with CP, preserving source bytes/mode without transformation.",
+  "license": "GPL-2.0",
+  "provenance": "Full before bytes read from pinned native Git object. Full after bytes produced by exact hash-verified reviewed patch in isolated scratch. Actual retained source was not modified."
+}

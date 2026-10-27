@@ -1,3 +1,3 @@
 #!/bin/sh
 pidof wapp >/dev/null && pidof p1905_managerd >/dev/null && pidof mapd >/dev/null || exit 1
-timeout 2 mapd_cli /tmp/mapd_ctrl ping 2>/dev/null | grep -qx PONG
+timeout 2 mapd_cli /tmp/mapd_ctrl ping 9>&- 2>/dev/null | grep -qx PONG

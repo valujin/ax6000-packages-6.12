@@ -1,0 +1,337 @@
+#!/bin/sh
+# Persistent enrollment transaction. Original server configuration is restored
+# only after the dedicated agent uplink has been detached and verified down.
+set -eu
+umask 077
+LC_ALL=C; export LC_ALL
+state=/etc/ax6000-mesh
+lock=/var/lock/ax6000-mesh.lock
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+get() { uci -q get "$1" 2>/dev/null || :; }
+paths() {
+  cat <<'PATHS'
+network /etc/config/network
+wireless /etc/config/wireless
+mesh /etc/config/ax6000_mesh
+dat0 /etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat
+dat1 /etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat
+map-cfg /etc/map/mapd_cfg
+map-user /etc/map/mapd_user.cfg
+1905 /etc/map/1905d.cfg
+wts /etc/map/wts_bss_info_config
+strng /etc/mapd_strng.conf
+ethernet /etc/ethernet_cfg.txt
+wapp-ra0 /etc/wapp_ap_ra0.conf
+wapp-rax0 /etc/wapp_ap_rax0.conf
+wapp-list /etc/wapp_ap.conf
+wapp-main /etc/wapp_main_inf.conf
+dhcp /etc/config/dhcp
+PATHS
+}
+process_birth() {
+  [ -r "/proc/$1/stat" ] || return 1
+  sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'
+}
+phase() { cat "$state/phase" 2>/dev/null || :; }
+valid() {
+  [ -d "$state" ] && [ ! -L "$state" ] && [ -f "$state/snapshot.sha256" ] || return 1
+  case "$(phase)" in pending|committed) ;; *) return 1 ;; esac
+  case "$(cat "$state/role" 2>/dev/null)" in controller|agent) ;; *) return 1 ;; esac
+  case "$(cat "$state/backhaul" 2>/dev/null)" in wired|wireless) ;; *) return 1 ;; esac
+  (cd "$state" && sha256sum -s -c snapshot.sha256) || return 1
+  local label path
+  while read -r label path; do
+    if [ -f "$state/original-$label" ] && [ ! -L "$state/original-$label" ]; then
+      [ ! -e "$state/absent-$label" ] || return 1
+      [ "$(stat -c %u:%g:%a "$state/original-$label")" = "$(cat "$state/mode-$label")" ] || return 1
+    else [ -f "$state/absent-$label" ] || return 1; fi
+  done <<EOF_PATHS
+$(paths)
+EOF_PATHS
+}
+require() { valid || fail 'No complete valid Mesh snapshot is available; retained files were not changed.'; }
+lock_transaction() {
+  mkdir -p /var/lock
+  lock=$(readlink -f "$lock") || fail 'Cannot resolve the Mesh lock path.'
+  # An inherited descriptor shares the caller's existing flock ownership.
+  # Opening the same path again would deadlock the control worker.
+  if [ "$(readlink -f /proc/$$/fd/9 2>/dev/null || :)" != "$lock" ]; then exec 9>"$lock"; fi
+  if [ "${1:-}" = expire ]; then
+    local attempt=0
+    while ! flock -n 9; do
+      [ "$attempt" -lt 30 ] || fail 'Expired Mesh worker still holds the lock; snapshot retained.'
+      attempt=$((attempt + 1)); sleep 1
+    done
+  else flock -n 9 || fail 'Another Mesh operation is in progress.'; fi
+}
+no_pending_uci() {
+  local package
+  for package in network dhcp wireless ax6000_mesh; do
+    [ -z "$(uci -q changes "$package")" ] || fail 'Apply or discard pending network, DHCP, wireless and Mesh changes first.'
+  done
+}
+bridge_section() {
+  local section found=
+  for section in $(uci -q -X show network | sed -n 's/^network\.\([A-Za-z0-9_]*\)=device$/\1/p'); do
+    [ "$(get network.$section.name)" = br-lan ] || continue
+    [ -z "$found" ] || fail 'Multiple br-lan device definitions are unsupported.'
+    found=$section
+  done
+  [ -n "$found" ] && [ "$(get network.$found.type)" = bridge ] || fail 'A br-lan bridge device is required.'
+  printf '%s\n' "$found"
+}
+preflight_agent() {
+  [ "$(get network.lan.device)" = br-lan ] || fail 'LAN must use the br-lan bridge.'
+  bridge=$(bridge_section)
+  [ -d /sys/class/net/wan ] || fail 'The dedicated WAN port is unavailable.'
+  [ "$(get network.wan.device)" = wan ] || fail 'WAN must use the dedicated physical wan port.'
+  case "$(get network.wan6.device)" in ''|@wan|wan) ;; *) fail 'Unsupported WAN6 device.' ;; esac
+  local section ports
+  for section in $(uci -q -X show network | sed -n 's/^network\.\([A-Za-z0-9_]*\)=interface$/\1/p'); do
+    case "$section" in wan|wan6) continue ;; esac
+    case "$(get network.$section.device)" in wan|wan.*|@wan|@wan6) fail 'The WAN port is used by another interface.' ;; esac
+  done
+  ports=" $(get network.$bridge.ports) "
+  case "$ports" in *' wan '*) fail 'WAN already belongs to br-lan; connect its cable only when instructed.' ;; esac
+  [ ! -e /sys/class/net/wan/master ] || fail 'WAN already belongs to a bridge.'
+}
+write_phase() { printf '%s\n' "$1" > "$state/phase.new"; mv "$state/phase.new" "$state/phase"; sync; }
+begin() {
+  local role=${1:-} backhaul=${2:-} temporary label path now
+  case "$role" in controller|agent) ;; *) fail 'Invalid Mesh role.' ;; esac
+  case "$backhaul" in wired|wireless) ;; *) fail 'Invalid backhaul.' ;; esac
+  [ ! -e "$state" ] || fail 'A previous Mesh snapshot exists; disable or recover it first.'
+  no_pending_uci
+  [ "$role" != agent ] || preflight_agent
+  temporary="$state.new.$$"
+  mkdir -m 700 "$temporary" || fail 'Cannot create a private snapshot.'
+  trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+  while read -r label path; do
+    [ ! -L "$path" ] || fail 'Symlinked configuration files are unsupported.'
+    if [ -e "$path" ]; then
+      [ -f "$path" ] || fail 'A configuration path is not a regular file.'
+      cp -p "$path" "$temporary/original-$label" || fail 'Cannot snapshot Mesh configuration.'
+      stat -c %u:%g:%a "$temporary/original-$label" > "$temporary/mode-$label"
+    else : > "$temporary/absent-$label"; fi
+  done <<EOF_PATHS
+$(paths)
+EOF_PATHS
+  if [ -d /etc/map ] && [ ! -L /etc/map ]; then stat -c %a /etc/map > "$temporary/map-directory-mode";
+  elif [ -e /etc/map ]; then fail 'Unsupported map configuration directory.';
+  else : > "$temporary/absent-map-directory"; fi
+  printf '%s\n' "$role" > "$temporary/role"
+  printf '%s\n' "$backhaul" > "$temporary/backhaul"
+  cat /proc/sys/kernel/random/boot_id > "$temporary/boot-id"
+  # Bind a watchdog signal to the actual inherited lock owner and process birth.
+  if [ "$(readlink -f /proc/$PPID/fd/9 2>/dev/null || :)" = "$lock" ]; then
+    printf '%s\n' "$PPID" > "$temporary/owner-pid"
+    process_birth "$PPID" > "$temporary/owner-birth"
+  else printf '0\n' > "$temporary/owner-pid"; printf '0\n' > "$temporary/owner-birth"; fi
+  read -r now _ < /proc/uptime; now=${now%%.*}
+  printf '%s\n' "$((now + 360))" > "$temporary/deadline"
+  for label in dnsmasq odhcpd; do
+    if pidof "$label" >/dev/null 2>&1; then printf '1\n'; else printf '0\n'; fi > "$temporary/was-running-$label"
+  done
+  (cd "$temporary" && find . -maxdepth 1 -type f ! -name snapshot.sha256 -exec sha256sum '{}' ';' > snapshot.sha256) || fail 'Cannot hash snapshot.'
+  printf 'pending\n' > "$temporary/phase"
+  sync
+  mv "$temporary" "$state" || fail 'Cannot publish Mesh snapshot.'
+  sync
+  trap - EXIT HUP INT TERM
+  if ! timeout 15 /etc/init.d/ax6000-mesh-watchdog start 9>&-; then
+    # begin has changed no configuration: do not strand an unsealed snapshot
+    # before the caller has installed its failure trap.
+    timeout 15 /etc/init.d/ax6000-mesh-watchdog stop 9>&- || :
+    rm -rf "$state"; sync
+    fail 'Cannot start the independent Mesh watchdog; original configuration is unchanged.'
+  fi
+}
+stop_servers() {
+  local service polls
+  for service in dnsmasq odhcpd; do
+    if pidof "$service" >/dev/null 2>&1; then
+      timeout 20 /etc/init.d/$service stop 9>&- || fail 'Cannot stop LAN DHCP/IPv6 services safely.'
+    fi
+    # procd acknowledges stop before its daemon has necessarily exited.
+    polls=0
+    while pidof "$service" >/dev/null 2>&1; do
+      [ "$polls" -lt 20 ] || fail 'A LAN DHCP/IPv6 service is still running.'
+      polls=$((polls + 1)); sleep 1 9>&-
+    done
+  done
+}
+prepare_agent() {
+  require
+  [ "$(phase)" = pending ] && [ "$(cat "$state/role")" = agent ] || fail 'Agent preparation requires a pending agent transaction.'
+  [ ! -f "$state/prepared" ] || fail 'Agent network is already prepared.'
+  no_pending_uci; preflight_agent
+  stop_servers
+  local section option
+  for section in $(uci -q -X show dhcp | sed -n 's/^dhcp\.\([A-Za-z0-9_]*\)=dhcp$/\1/p'); do
+    [ "$section" = lan ] || [ "$(get dhcp.$section.interface)" = lan ] || continue
+    uci set "dhcp.$section.ignore=1"
+    for option in ra dhcpv6 ndp; do uci set "dhcp.$section.$option=disabled"; done
+  done
+  uci commit dhcp
+  uci set network.wan.auto=0
+  [ -z "$(get network.wan6)" ] || uci set network.wan6.auto=0
+  uci commit network
+  timeout 15 ifdown wan 9>&-
+  [ -z "$(get network.wan6)" ] || timeout 15 ifdown wan6 9>&-
+  uci set network.lan.proto=dhcp
+  for option in ipaddr netmask gateway broadcast dns ip6addr ip6gw ip6assign ip6hint ip6class; do uci -q delete "network.lan.$option" || :; done
+  if [ "$(cat "$state/backhaul")" = wired ]; then uci add_list "network.$bridge.ports=wan"; fi
+  uci commit network
+  : > "$state/prepared"; sync
+}
+normalized() {
+  local label=$1 path=$2
+  case "$label" in
+    dat0|dat1) sed -E '/^(SSID[12]|WPAPSK[12]|AuthMode|EncrypType|HideSSID|PMFMFPC|PMFMFPR|PMFSHA256|Channel)=/d' "$path" ;;
+    map-cfg|map-user) sed -E '/^BhProfile[0-9](Valid|Ssid|AuthMode|EncrypType|WpaPsk|RaID)=/d' "$path" ;;
+    *) cat "$path" ;;
+  esac
+}
+current_digest() {
+  local label path digest
+  while read -r label path; do
+    if [ "${1:-}" = uci-only ]; then
+      case "$label" in network|dhcp|wireless|mesh) ;; *) continue ;; esac
+    fi
+    [ ! -L "$path" ] || return 1
+    if [ -f "$path" ]; then
+      digest=$(normalized "$label" "$path" | sha256sum) || return 1
+      printf '%s %s %s\n' "$label" "$(stat -c %a "$path")" "${digest%% *}"
+    elif [ ! -e "$path" ]; then printf '%s absent\n' "$label";
+    else return 1; fi
+  done <<EOF_PATHS
+$(paths)
+EOF_PATHS
+}
+seal() {
+  require; [ "$(phase)" = pending ] || fail 'Only pending transactions can be sealed.'
+  [ ! -e "$state/expected" ] || fail 'Transaction is already sealed.'
+  no_pending_uci
+  current_digest uci-only > "$state/expected-uci" || fail 'Cannot seal UCI configuration.'
+  current_digest > "$state/expected.new" || fail 'Cannot seal Mesh configuration.'
+  mv "$state/expected.new" "$state/expected"; sync
+}
+check() {
+  require; [ -f "$state/expected" ] || fail 'The Mesh configuration has not been sealed.'
+  no_pending_uci
+  local current
+  current=$(current_digest) || fail 'Cannot inspect current Mesh configuration.'
+  [ "$current" = "$(cat "$state/expected")" ] || fail 'Mesh configuration changed outside enrollment; restore those edits before disabling Mesh.'
+}
+commit() {
+  [ "$(phase)" = pending ] || fail 'No pending Mesh transaction exists.'
+  require; no_pending_uci
+  [ -f "$state/expected-uci" ] || fail 'The Mesh configuration has not been sealed.'
+  local current
+  current=$(current_digest uci-only) || fail 'Cannot inspect current UCI configuration.'
+  [ "$current" = "$(cat "$state/expected-uci")" ] || fail 'UCI configuration changed during enrollment; refusing commit.'
+  # The converter and service prepare generate these fixed vendor files after
+  # seal. Adopt their actual post-enrollment baseline, while UCI stays strict.
+  current_digest > "$state/expected.new" || fail 'Cannot capture enrolled vendor configuration.'
+  mv "$state/expected.new" "$state/expected"; sync
+  local service
+  for service in dnsmasq odhcpd; do
+    [ "$(cat "$state/was-running-$service")" != 1 ] || timeout 20 /etc/init.d/$service start 9>&- || fail 'Cannot resume DHCP/IPv6 services.'
+  done
+  write_phase committed
+  /etc/init.d/ax6000-mesh-watchdog stop 9>&- || :
+}
+disconnect_agent() {
+  [ "$(cat "$state/role")" = agent ] || return 0
+  local interface flags
+  if [ "$(cat "$state/backhaul")" = wired ]; then
+    if [ "${1:-}" != boot ]; then
+      timeout 15 ifdown wan 9>&- || :
+      [ -z "$(get network.wan6)" ] || timeout 15 ifdown wan6 9>&- || :
+    fi
+    [ -d /sys/class/net/wan ] || return 0
+    ip link set dev wan nomaster || fail 'Cannot detach agent WAN; original DHCP configuration was not restored.'
+    ip link set dev wan down || fail 'Cannot disable agent WAN.'
+    [ ! -e /sys/class/net/wan/master ] && [ ! -e /sys/class/net/br-lan/brif/wan ] || fail 'Agent WAN is still bridged; refusing DHCP restoration.'
+  else
+    for interface in /sys/class/net/apcli*; do
+      [ -d "$interface" ] || continue
+      flags=$(cat "$interface/flags") || fail 'Cannot verify wireless backhaul state.'
+      [ "$((flags & 1))" = 0 ] || fail 'Wireless backhaul is still up; refusing DHCP restoration.'
+    done
+  fi
+}
+rollback() {
+  require
+  local reason=${1:-disable} label path destination service owns_mapfilter=0
+  [ ! -f "$state/owns-mapfilter" ] || owns_mapfilter=1
+  # A committed setup being disabled is now an unfinished restoration. Mark it
+  # durably before quiesce so power loss makes START18 complete the rollback.
+  write_phase pending
+  # Never restore DHCP on a connected uplink, including after a partial restore.
+  if [ "$reason" != boot ]; then
+    timeout 30 /usr/libexec/ax6000-mesh-control disconnect-backhaul 9>&- || fail 'Cannot stop Mesh and disconnect its backhaul; snapshot retained.'
+  fi
+  stop_servers
+  disconnect_agent "$reason"
+  if [ "$reason" != boot ]; then
+    # The MediaTek driver tears down VIFs using the current DAT BSSID count.
+    # Stop/unload it before replacing that topology with the saved profiles.
+    timeout 180 /usr/libexec/ax6000-mesh-control quiesce-radios 9>&- || fail 'Wireless quiesce failed; current topology and snapshot retained for retry.'
+  fi
+  while read -r label path; do
+    if [ -f "$state/absent-$label" ]; then rm -f "$path" || fail 'Cannot remove a Mesh-owned configuration file.';
+    else
+      mkdir -p "${path%/*}"
+      destination="$path.mesh-restore.$$"
+      cp -p "$state/original-$label" "$destination" || fail 'Restore failed; complete original snapshot retained.'
+      mv -f "$destination" "$path" || fail 'Restore failed; complete original snapshot retained.'
+    fi
+  done <<EOF_PATHS
+$(paths)
+EOF_PATHS
+  if [ -f "$state/map-directory-mode" ]; then chmod "$(cat "$state/map-directory-mode")" /etc/map;
+  else rmdir /etc/map 2>/dev/null || :; fi
+  for label in network dhcp wireless ax6000_mesh; do uci -q revert "$label"; done
+  sync
+  if [ "$reason" != boot ]; then
+    # Resume loads driver modules before wifi up reloads the restored network
+    # configuration. Keep the snapshot until both radios are ready.
+    timeout 270 /usr/libexec/ax6000-mesh-control restore-radios 9>&- || fail 'Wireless restore failed; snapshot retained for retry.'
+    for service in dnsmasq odhcpd; do
+      [ "$(cat "$state/was-running-$service")" != 1 ] || timeout 20 /etc/init.d/$service start 9>&- || fail 'DHCP/IPv6 restore failed; snapshot retained for retry.'
+    done
+  fi
+  if [ "$owns_mapfilter" = 1 ] && [ -d /sys/module/mapfilter ]; then
+    rmmod mapfilter || fail 'Cannot unload the Mesh-owned mapfilter module; snapshot retained.'
+  fi
+  if [ "$reason" != timeout ]; then /etc/init.d/ax6000-mesh-watchdog stop 9>&- || :; fi
+  rm -rf "$state"; sync
+  if [ "$reason" = timeout ]; then
+    printf '%s\n' 'Mesh enrollment timed out; original settings restored.' > /var/run/ax6000-mesh-error
+  fi
+}
+case "${1:-}" in
+  present) valid; exit $? ;;
+  status)
+    if valid; then printf '{"state":"%s","role":"%s","backhaul":"%s"}\n' "$(phase)" "$(cat "$state/role")" "$(cat "$state/backhaul")";
+    elif [ -e "$state" ]; then printf '{"state":"invalid"}\n'; else printf '{"state":"none"}\n'; fi
+    exit 0 ;;
+esac
+lock_transaction "${1:-}"
+case "${1:-}" in
+  begin) begin "${2:-}" "${3:-}" ;;
+  prepare-agent) prepare_agent ;;
+  seal) seal ;;
+  check) check ;;
+  commit) commit ;;
+  rollback) rollback "${2:-disable}" ;;
+  expire) if [ "$(phase)" = pending ]; then rollback timeout; fi ;;
+  recover-boot)
+    # sysupgrade selects files/symlinks only; tar may recreate this parent with
+    # default permissions. Secure stored credentials before any boot services.
+    if [ -d "$state" ] && [ ! -L "$state" ]; then chmod 700 "$state" || fail 'Cannot secure the Mesh snapshot directory.'; fi
+    if [ "$(phase)" = pending ]; then rollback boot; elif [ -e "$state" ]; then require; fi ;;
+
+  *) fail 'Invalid Mesh transaction operation.' ;;
+esac

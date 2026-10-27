@@ -1,5 +1,5 @@
 #!/bin/sh
-# Persist the daemon-owned fields for the two supported AX6000 mesh BSSs.
+# Persist daemon-owned FH/BH BSS fields without replacing the other BSS slot.
 set -eu
 LC_ALL=C
 export LC_ALL
@@ -7,19 +7,20 @@ umask 077
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 [ "$#" = 3 ] || fail 'Expected interface, field and value.'
 case "$1" in
-  ra0) profile=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat ;;
-  rax0) profile=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat ;;
+  ra0|ra1) profile=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat ;;
+  rax0|rax1) profile=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat ;;
   apcli0|apclix0) exit 0 ;;
   *) fail 'Unsupported mesh interface.' ;;
 esac
+case "$1" in *0) slot=1 ;; *1) slot=2 ;; esac
 field=$2
 value=$3
 case "$field" in
-  SSID) [ "${#value}" -ge 1 ] && [ "${#value}" -le 32 ] || fail 'Invalid SSID length.'; field=SSID1 ;;
-  WPAPSK) [ "${#value}" -ge 8 ] && [ "${#value}" -le 63 ] || fail 'Invalid WPA key length.'; field=WPAPSK1 ;;
-  AuthMode) [ "$value" = WPA2PSK ] || fail 'Unsupported authentication mode.' ;;
+  SSID) [ "${#value}" -ge 1 ] && [ "${#value}" -le 32 ] || fail 'Invalid SSID length.'; field=SSID$slot ;;
+  WPAPSK) [ "${#value}" -ge 8 ] && [ "${#value}" -le 63 ] || fail 'Invalid WPA key length.'; field=WPAPSK$slot ;;
+  AuthMode) case "$value" in WPA2PSK|WPA2PSKWPA3PSK) ;; *) fail 'Unsupported authentication mode.' ;; esac ;;
   EncrypType) [ "$value" = AES ] || fail 'Unsupported encryption type.' ;;
-  HideSSID) [ "$value" = 0 ] || fail 'Hidden mesh APs are unsupported.' ;;
+  HideSSID) case "$value" in 0|1) ;; *) fail 'Invalid hidden SSID setting.' ;; esac ;;
   Channel) case "$value" in ''|*[!0-9]*) fail 'Invalid channel.' ;; esac; [ "$value" -ge 1 ] && [ "$value" -le 196 ] || fail 'Invalid channel.' ;;
   *) fail 'Unsupported wireless field.' ;;
 esac
@@ -32,10 +33,25 @@ while ! flock -n 9; do
   attempt=$((attempt + 1)); [ "$attempt" -lt 30 ] || fail 'Wireless configuration is busy.'; sleep 1
 done
 if [ "$field" = Channel ] && [ "$(datconf -f "$profile" get AutoChannelSelect 2>/dev/null || :)" = 3 ]; then exit 0; fi
+set_token() {
+  local name="$1" token="$2" previous tail
+  previous=$(datconf -f "$profile" get "$name" 2>/dev/null || :)
+  if [ "$slot" = 1 ]; then
+    case "$previous" in *';'*) token="$token;${previous#*;}" ;; esac
+  else
+    tail=
+    case "$previous" in *';'*) tail=${previous#*;}; case "$tail" in *';'*) tail=";${tail#*;}" ;; *) tail= ;; esac ;; esac
+    token="${previous%%;*};$token$tail"
+  fi
+  datconf -f "$profile" set "$name" "$token" >/dev/null 2>&1 || fail 'Could not persist the mesh wireless setting.'
+}
 case "$field" in
-  AuthMode|EncrypType|HideSSID)
-    previous=$(datconf -f "$profile" get "$field" 2>/dev/null || :)
-    case "$previous" in *';'*) value="$value;${previous#*;}" ;; esac
+  AuthMode)
+    set_token AuthMode "$value"
+    if [ "$value" = WPA2PSKWPA3PSK ]; then set_token PMFMFPC 1; else set_token PMFMFPC 0; fi
+    set_token PMFMFPR 0
+    set_token PMFSHA256 0
     ;;
+  EncrypType|HideSSID) set_token "$field" "$value" ;;
+  *) datconf -f "$profile" set "$field" "$value" >/dev/null 2>&1 || fail 'Could not persist the mesh wireless setting.' ;;
 esac
-datconf -f "$profile" set "$field" "$value" >/dev/null 2>&1 || fail 'Could not persist the mesh wireless setting.'

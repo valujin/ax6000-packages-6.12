@@ -29,7 +29,7 @@ const rpc = {declare(spec) {return async function(...args) {
 };}};
 function E(tag, attrs, children) {
   if (Array.isArray(attrs)) {children=attrs;attrs={};}
-  return {tag,attrs:attrs||{},children:children||[],value:attrs?.value||'',disabled:false,
+  return {tag,attrs:attrs||{},children:children||[],value:attrs?.value||'',disabled:false,style:{},
     getAttribute(key){return this.attrs[key];},
     replaceChildren(...nodes){this.children=nodes;},appendChild(node){this.children.push(node);}};
 }
@@ -47,6 +47,8 @@ function all(n){return !n || typeof n!=='object'?[]:[n,...(n.children||[]).flatM
   assert(!nodes.some(n=>n.tag==='img'), 'RPC text must not become DOM markup');
   assert(!nodes.some(n=>n.attrs.innerHTML), 'no innerHTML');
   const apply = buttons.find(n=>n.attrs['data-action']==='apply');
+  const backhaulRow = nodes.find(n=>n.children && n.children.some(c=>c && c.tag==='label' && c.attrs.for==='mesh-backhaul'));
+  assert.equal(backhaulRow.style.display, 'none', 'controller hides agent connection selector in Argon');
   const pair = buttons.find(n=>n.attrs['data-action']==='pair');
   const disable = buttons.find(n=>n.attrs['data-action']==='disable');
   assert(apply&&pair&&disable);
@@ -63,6 +65,46 @@ function all(n){return !n || typeof n!=='object'?[]:[n,...(n.children||[]).flatM
   assert(notifications.length>0, 'show backend error');
   assert(!apply.disabled,'failed action unlocks buttons');
   assert(polls.length===1);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+        result = subprocess.run(['node', '-e', harness, str(VIEW)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_agent_setup_and_peer_status(self):
+        harness = r'''
+const fs = require('fs'), assert = require('assert');
+let status = {ok:true,available:true,enabled:false,running:false,role:'agent',backhaul:'wired',state:'disabled'};
+const calls=[], polls=[];
+const rpc={declare(s){return async (...args)=>{calls.push([s.method,args]);return s.method==='status'?status:{ok:true};};}};
+function E(tag,attrs,children){if(Array.isArray(attrs)){children=attrs;attrs={};}return {tag,attrs:attrs||{},children:children||[],value:attrs?.value||'',disabled:false,style:{},getAttribute(k){return this.attrs[k];}};}
+const dom={content(n,c){n.children=Array.isArray(c)?c:[c];}};
+const page=new Function('view','rpc','ui','poll','dom','E','_','L',fs.readFileSync(process.argv[1],'utf8'))(
+ {extend:o=>o},rpc,{addNotification(){}},{add:f=>polls.push(f)},dom,E,x=>x,{url:()=>''});
+function all(n){return !n||typeof n!=='object'?[]:[n,...(n.children||[]).flatMap(all)];}
+(async()=>{
+ const tree=page.render(await page.load());
+ const nodes=all(tree), apply=nodes.find(n=>n.attrs['data-action']==='apply');
+ assert(JSON.stringify(tree).includes('WAN port'), 'wired setup identifies the agent WAN port');
+ assert(JSON.stringify(apply.children).includes('Join Mesh'), 'agent action identifies joining');
+ const backhaulRow=nodes.find(n=>n.children && n.children.some(c=>c && c.tag==='label' && c.attrs.for==='mesh-backhaul'));
+ assert.equal(backhaulRow.style.display, '', 'agent shows connection selector');
+ assert(!JSON.stringify(tree).includes('disable its LAN DHCP server'), 'no manual DHCP setup');
+ await apply.attrs.click();
+ assert.deepEqual(calls.find(x=>x[0]==='configure')[1], ['agent','wired']);
+ status={...status,enabled:true,running:true,phase:'connected',enrollment:{topology_valid:true,connected:true,peers:[{alid:'aa:bb:cc:dd:ee:ff'}]}};
+ await polls[0]();
+ let rendered=JSON.stringify(tree);
+ assert(rendered.includes('aa:bb:cc:dd:ee:ff'), 'known peer identity shown');
+ assert(rendered.includes('Address unknown'), 'missing address is not guessed');
+ status={...status,state:'disabling',phase:'ready',enabled:true,running:true}; await polls[0]();
+ assert(apply.disabled && nodes.find(n=>n.attrs['data-action']==='disable').disabled, 'operation state locks actions even when phase is stale');
+ status={...status,enabled:false,running:false,state:'disabled',phase:'disabled',recovery_pending:true}; await polls[0]();
+ const disable=nodes.find(n=>n.attrs['data-action']==='disable');
+ const role=nodes.find(n=>n.attrs.id==='mesh-role');
+ assert(apply.disabled && role.disabled, 'pending recovery blocks setup');
+ assert(!disable.disabled && JSON.stringify(disable.children).includes('Restore previous settings'), 'pending recovery offers retry');
+ status={...status,phase:'restored',error:'lease timed out'}; await polls[0]();
+ assert(JSON.stringify(tree).includes('lease timed out'), 'show actual error');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
         result = subprocess.run(['node', '-e', harness, str(VIEW)], capture_output=True, text=True, timeout=15)
