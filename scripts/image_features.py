@@ -153,7 +153,9 @@ def verify(profile, lock, installed, read_file, check_mode, source=None, native_
     for path, digest in policy['hashes'].items():
         actual = read_file(path, 2 * 1024**2)
         need(sha(actual) == digest, 'Actual image vendor feature hash differs: ' + path)
-        mode = 0o755 if path == 'lib/netifd/wireless/mtwifi.sh' else 0o644
+        # The pinned mtwifi recipe copies these executable source files verbatim.
+        mode = 0o755 if path in ('lib/netifd/wireless/mtwifi.sh',
+                                'usr/share/ucode/mtwifi/config.uc') else 0o644
         check_mode(path, mode)
         verified[path] = {'sha256': digest, 'size': len(actual), 'mode': f'{mode:04o}'}
     translations = []

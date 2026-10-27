@@ -21,6 +21,46 @@ from test_pbr_sources import archive
 
 
 class ImageFeatureTests(unittest.TestCase):
+    def test_vendor_hash_checks_preserve_exact_pinned_file_modes(self):
+        from test_verify_firmware import verify as native_verify
+
+        # mtwifi-cfg-ucode installs files with CP, preserving pinned git modes.
+        modes = {
+            'usr/share/ucode/mtwifi/config.uc': '-rwxr-xr-x',
+            'usr/share/ucode/mtwifi/converter.uc': '-rw-r--r--',
+            'usr/share/ucode/mtwifi/driver.uc': '-rw-r--r--',
+            'usr/share/schema/mtwifi/wireless.device.json': '-rw-r--r--',
+            'usr/share/luci-app-mtwifi-cfg/wireless-mtk.js': '-rw-r--r--',
+            'lib/netifd/wireless/mtwifi.sh': '-rwxr-xr-x',
+        }
+        files = {path: ('pinned payload ' + path).encode() for path in modes}
+        policy = {'files': {}, 'hashes': {path: hashlib.sha256(data).hexdigest()
+                                        for path, data in files.items()},
+                  'versions': {}, 'version_suffixes': {}}
+
+        def inspect():
+            listing = ''.join(f'{mode} 0/0 1 2026-10-27 00:00 squashfs-root/{path}\n'
+                              for path, mode in modes.items()).encode()
+            return features.verify({}, {}, {}, lambda path, cap: files[path],
+                                   lambda path, mode: native_verify.require_mode(listing, path, mode))
+
+        with patch.object(features, 'expected', return_value=policy):
+            checked = inspect()
+            self.assertEqual(checked['files']['usr/share/ucode/mtwifi/config.uc']['mode'], '0755')
+            self.assertEqual(checked['files']['usr/share/ucode/mtwifi/converter.uc']['mode'], '0644')
+            for path in modes:
+                original = modes[path]
+                for wrong in ('-rw-r--r--' if original == '-rwxr-xr-x' else '-rwxr-xr-x',
+                              '-rwxrwxrwx', 'lrwxrwxrwx'):
+                    with self.subTest(path=path, mode=wrong):
+                        modes[path] = wrong
+                        with self.assertRaisesRegex(ValueError, 'must be regular with mode'):
+                            inspect()
+                modes[path] = original
+            files['usr/share/ucode/mtwifi/config.uc'] += b'changed'
+            with self.assertRaisesRegex(ValueError, 'feature hash differs'):
+                inspect()
+
     def test_native_asu_metadata_identity_runtime_and_no_auto_manager_migration(self):
         for cohort, manager in [('66', 'opkg'), ('612-recommended', 'apk'), ('612-latest', 'apk')]:
             profile = {'package_manager': manager, 'asu': {'enabled': True, 'cohort': cohort,
