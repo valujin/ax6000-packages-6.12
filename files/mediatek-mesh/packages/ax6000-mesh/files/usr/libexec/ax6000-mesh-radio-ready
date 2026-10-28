@@ -16,4 +16,8 @@ while ! flock -n 8; do
   [ "$attempt" -lt 30 ] || exit 0
   sleep 1
 done
-/etc/init.d/ax6000-mesh restart 8>&- 9>&- >/dev/null 2>&1
+# Do not hold the radio lock while waiting for both BH bridge ports: a sibling
+# radio setup may still need this lock to create its port.
+flock -u 8
+exec 8>&-
+/etc/init.d/ax6000-mesh restart 9>&- >/dev/null 2>&1

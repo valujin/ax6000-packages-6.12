@@ -181,6 +181,11 @@ print(str(value).lower() if isinstance(value,bool) else value)
         applied = self.run_control('apply')
         self.assertEqual(applied.returncode, 0, applied.stderr)
         self.assertEqual(self.config('ax6000_mesh')['main.enabled'], '1')
+        wireless = self.config('wireless')
+        for section in ('ax6000_mesh_ap1', 'ax6000_mesh_ap2'):
+            self.assertEqual(wireless[section + '.multicast_to_unicast'], '0')
+        for section in ('a', 'b'):
+            self.assertNotIn(section + '.multicast_to_unicast', wireless)
         state = self.root / 'etc/ax6000-mesh'
         self.assertEqual((state / 'phase').read_text().strip(), 'committed')
         for name in ('network', 'dhcp', 'wireless', 'mesh'): self.assertTrue((state / ('original-' + name)).exists())
@@ -220,6 +225,11 @@ exec busybox ash "{self.helper}" "$@"
         applied = self.run_control('apply')
         self.assertEqual(applied.returncode, 0, applied.stderr)
         network, dhcp = self.config('network'), self.config('dhcp')
+        wireless = self.config('wireless')
+        for section in ('ax6000_mesh_ap1', 'ax6000_mesh_ap2'):
+            self.assertEqual(wireless[section + '.multicast_to_unicast'], '0')
+        for section in ('a', 'b'):
+            self.assertNotIn(section + '.multicast_to_unicast', wireless)
         self.assertEqual(network['lan.proto'], 'dhcp')
         self.assertIn('wan', network['brlan.ports'])
         for section in ('lan', 'extra'):

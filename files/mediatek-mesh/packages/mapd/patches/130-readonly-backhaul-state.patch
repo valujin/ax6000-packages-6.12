@@ -1,0 +1,40 @@
+--- a/mapd_interface/ctrl_iface.c
++++ b/mapd_interface/ctrl_iface.c
+@@ -498,6 +498,28 @@ static int mapd_ctrl_iface_set(struct mapd_global *global, char *cmd)
+ 	return ret;
+ }
+ 
++#ifdef SUPPORT_MULTI_AP
++/* Numeric diagnostics only: do not expose configuration or alter state. */
++static int mapd_get_bh_state(const struct mapd_global *global,
++		char *reply, size_t reply_size)
++{
++	int len;
++
++	len = os_snprintf(reply, reply_size,
++		"bh_state=%u ethernet_state=%u config_status=%u "
++		"configured_state=%u auto_switch=%u certification=%u\n",
++		(unsigned int)global->dev.current_bh_state,
++		(unsigned int)BH_STATE_ETHERNET_PLUGGED,
++		(unsigned int)global->dev.config_status,
++		(unsigned int)DEVICE_CONFIGURED,
++		(unsigned int)global->dev.auto_bh_switch,
++		(unsigned int)global->params.Certification);
++	if (os_snprintf_error(reply_size, len))
++		return -1;
++	return len;
++}
++#endif
++
+ char * mapd_global_ctrl_iface_process(struct mapd_global *global,
+ 		char *buf, size_t *resp_len)
+ {
+@@ -544,6 +566,8 @@ char * mapd_global_ctrl_iface_process(struct mapd_global *global,
+ 			*reply=(char)global->dev.device_role;
+ 			reply_len = 1;
+ 
++	} else if (os_strcmp(buf, "GET bh_state") == 0) {
++		reply_len = mapd_get_bh_state(global, reply, reply_size);
+ 	}else if (os_strncmp(buf, "SELECT BEST AP", 14) == 0){
+ 		wlanif_disconnect_apcli(global, NULL);
+ 		*reply=0;

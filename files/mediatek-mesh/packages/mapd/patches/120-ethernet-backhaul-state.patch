@@ -1,0 +1,15 @@
+--- a/src/topologySrv/wappEvent.c
++++ b/src/topologySrv/wappEvent.c
+@@ -667,8 +667,11 @@ void topo_srv_parse_wapp_bh_ready(struct mapd_global * global,
+ 	/* If ethernet start send directly to 1905 for onboarding */
+ 	if (bh_info->type == 0) {
+ 		err(AUTO_CONFIG_PREX"[eth case]receive WAPP_MAP_BH_READY!!!");
++		/* Match WAPP_SET_BH_TYPE for an automatically discovered Ethernet
++		 * backhaul, retaining its actual interface and the connection checks. */
++		if (!ctx->auto_bh_switch)
++			ctx->current_bh_state = BH_STATE_ETHERNET_PLUGGED;
+ 		map_1905_Set_Bh_Ready(_1905_ctrl, bh_info);
+-		//ctx->current_bh_state = BH_STATE_ETHERNET_PLUGGED;
+ 		/*Notify app for eth onboarding start */
+ 		mapd_send_onboardstatus_to_app((struct mapd_global *)ctx->back_ptr,
+ 						ETH_ONBOARDING_STATE_START, bh_info->type);

@@ -1,0 +1,83 @@
+Subject: [PATCH] DSA: preserve local and static bridge FDB entries
+
+Backhaul link changes must flush learned addresses without deleting the
+bridge own-MAC entry. Invoke the filtered kernel bulk flush per configured
+port and propagate failures; do not enumerate/delete every FDB row.
+
+--- a/ethernet/mediatek_DSA/eth_ops_dsa.c
++++ b/ethernet/mediatek_DSA/eth_ops_dsa.c
+@@ -760,51 +760,34 @@
+-int clear_table()
++int clear_table(void)
+ {
+-#define CLEAR_BRIDGE_FDB_SCRIPT "/tmp/clear_bridge_fdb_script.sh"
+-	int ret = ETH_SUCCESS;
+-	int i = 0;
+-	char cmd[1024] = {0};
+-	int res = 0;
+-	FILE *f = NULL;
++	int i;
+ 
+ 	for (i = 0; i < MAX_INF_NUM; i++) {
++		pid_t pid, waited;
++		int status;
++
+ 		if (!inf[i].valid)
+ 			continue;
+ 
+-		debug(DEBUG_TRACE, "[%d], i = %d, inf[i].if_name = %s\n", __LINE__, i, inf[i].if_name);
+-
+-		memset(cmd, 0, sizeof(cmd));
+-		res = snprintf(cmd, sizeof(cmd), "bridge fdb show dev %s"
+-			" | while read mac master br_name; do echo $mac; "
+-			"bridge fdb delete $mac dev %s master; done;", inf[i].if_name, inf[i].if_name);
+-		if (os_snprintf_error(sizeof(cmd), res))
+-			debug(DEBUG_ERROR, "[%d] snprintf fail!\n", __LINE__);
+-
+-		/* mode: w, overwriting each time */
+-		f = fopen(CLEAR_BRIDGE_FDB_SCRIPT, "w");
+-		if (f == NULL) {
+-			debug(DEBUG_ERROR, "open file %s fail\n", CLEAR_BRIDGE_FDB_SCRIPT);
+-			return -1;
++		/* Flush only learned master entries on this configured port.
++		 * Deleting local/permanent entries removes delivery to our own
++		 * bridge MAC and breaks LAN ARP, IPv4 and IPv6 reception.
++		 */
++		pid = fork();
++		if (pid < 0)
++			return ETH_ERROR_FAIL;
++		if (pid == 0) {
++			execlp("bridge", "bridge", "fdb", "flush", "dev",
++				inf[i].if_name, "master", "dynamic",
++				"noadded_by_user", "noextern_learn", (char *)NULL);
++			_exit(127);
+ 		}
+ 
+-		ret = fputs(cmd, f);
+-		if (ret == -1)
+-			debug(DEBUG_ERROR, "error fputs\n");
+-		ret = fflush(f);
+-		if (ret == -1)
+-			debug(DEBUG_ERROR, "error fflush\n");
+-
+-		/* run shell by execl */
+-		ret = execl_sh(CLEAR_BRIDGE_FDB_SCRIPT);
+-		if (ret == -1)
+-			debug(DEBUG_ERROR, "error execl \"sh\" %s\n", CLEAR_BRIDGE_FDB_SCRIPT);
+-		ret = fclose(f);
+-		if (ret == -1)
+-			debug(DEBUG_ERROR, "error fclose %s\n", CLEAR_BRIDGE_FDB_SCRIPT);
+-		ret = remove(CLEAR_BRIDGE_FDB_SCRIPT);
+-		if (ret == -1)
+-			debug(DEBUG_ERROR, "error remove %s\n", CLEAR_BRIDGE_FDB_SCRIPT);
++		do {
++			waited = waitpid(pid, &status, 0);
++		} while (waited < 0 && errno == EINTR);
++		if (waited < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
++			return ETH_ERROR_FAIL;
+ 	}
+ 
+-	ret = ETH_SUCCESS;
+-	return ret;
++	return ETH_SUCCESS;
+ }

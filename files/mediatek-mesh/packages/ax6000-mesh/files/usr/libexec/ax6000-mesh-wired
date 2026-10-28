@@ -1,0 +1,66 @@
+#!/bin/sh
+# Request vendor Ethernet onboarding only for the attached, live agent WAN.
+set -u
+LC_ALL=C; export LC_ALL
+state=/etc/ax6000-mesh
+get() { uci -q get "$1" 2>/dev/null || :; }
+ready() {
+  [ "$(get ax6000_mesh.main.enabled)" = 1 ] &&
+  [ "$(get ax6000_mesh.main.role)" = agent ] &&
+  [ "$(get ax6000_mesh.main.backhaul)" = wired ] || return 1
+  /usr/libexec/ax6000-mesh-transaction present >/dev/null 2>&1 || return 1
+  case "$(cat "$state/phase" 2>/dev/null)" in pending|committed) ;; *) return 1 ;; esac
+  [ "$(cat "$state/role" 2>/dev/null)" = agent ] &&
+  [ "$(cat "$state/backhaul" 2>/dev/null)" = wired ] || return 1
+  [ -d /sys/class/net/br-lan/brif/wan ] &&
+  [ "$(cat /sys/class/net/wan/carrier 2>/dev/null)" = 1 ] || return 1
+  mac=$(cat /sys/class/net/wan/address 2>/dev/null | tr A-F a-f)
+  printf '%s\n' "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 1
+  [ "$mac" != 00:00:00:00:00:00 ] || return 1
+  # A unicast address has the low bit of its first octet clear.
+  case "${mac#?}" in [02468ace]:*) ;; *) return 1 ;; esac
+  /usr/libexec/ax6000-mesh-health >/dev/null 2>&1 || return 1
+}
+trigger() {
+  ready || return 75
+  result=$(/usr/libexec/ax6000-mesh-vendor status 2>/dev/null) || return 75
+  connected=$(printf '%s\n' "$result" | jsonfilter -e '@.connected' 2>/dev/null) || return 75
+  case "$connected" in true) return 0 ;; false) ;; *) return 75 ;; esac
+  # State may change while the topology query is running.
+  ready || return 75
+  # This fixed vendor command acknowledges acceptance, not membership. The
+  # existing topology, backhaul and DHCP checks decide enrollment separately.
+  timeout 8 wappctrl ra0 map set_bh_type eth wan >/dev/null 2>&1
+}
+identity() {
+  for daemon in wapp p1905_managerd mapd; do
+    pid=$(pidof "$daemon" 2>/dev/null) || return 1
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    birth=$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')
+    case "$birth" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s:%s;' "$pid" "$birth"
+  done
+}
+monitor() {
+  last=
+  while [ "$(get ax6000_mesh.main.enabled)" = 1 ] &&
+        [ "$(get ax6000_mesh.main.role)" = agent ] &&
+        [ "$(get ax6000_mesh.main.backhaul)" = wired ]; do
+    if [ "$(cat /sys/class/net/wan/carrier 2>/dev/null)" != 1 ]; then
+      last=
+    else
+      signature=$(identity) || signature=
+      if [ -n "$signature" ] && [ "$signature" != "$last" ]; then
+        trigger; code=$?
+        # Retry readiness only. Once a request is sent (even if rejected), do
+        # not repeatedly reset vendor onboarding on this same link generation.
+        if [ "$code" != 75 ]; then
+          last=$signature
+          [ "$code" = 0 ] || logger -t ax6000-mesh 'Wired onboarding request failed.'
+        fi
+      fi
+    fi
+    sleep 2
+  done
+}
+case "${1:-}" in trigger) trigger ;; monitor) monitor ;; *) exit 1 ;; esac

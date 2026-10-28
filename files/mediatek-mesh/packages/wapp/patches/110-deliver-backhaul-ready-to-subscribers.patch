@@ -1,0 +1,13 @@
+--- a/wapp_usr_intf/wapp_usr_intf.c
++++ b/wapp_usr_intf/wapp_usr_intf.c
+@@ -624,6 +624,10 @@ void send_event_dispatch(struct wifi_app* wapp, struct msg* event, size_t event_len,
+ 			if(!os_memcmp(dst_daemon, dst->daemon_name, os_strlen(dst_daemon)))
+ 			{
+ 				wapp_socket_send(wapp, (char *)event, event_len, dst);
++				/* mapd also subscribes to BH readiness. Its state must not
++				 * depend on whether 1905 attached before or after mapd. */
++				if (event->type == WAPP_MAP_BH_READY)
++					continue;
+ 				break;
+ 			}
+ 		}

@@ -1,0 +1,39 @@
+#!/bin/sh
+# Disable reflection only on the two dedicated MediaTek Mesh backhaul APs.
+set -eu
+get() { uci -q get "$1" 2>/dev/null || :; }
+apply() {
+for pair in 'ax6000_mesh_ap1 2g ra1' 'ax6000_mesh_ap2 5g rax1'; do
+  set -- $pair
+  section=$1; band=$2; interface=$3
+  [ "$(get wireless.$section.mode)" = ap ] &&
+  [ "$(get wireless.$section.network)" = lan ] &&
+  [ "$(get wireless.$section.map_bss_type)" = 64 ] || return 1
+  device=$(get wireless.$section.device)
+  case "$device" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+  [ "$(get wireless.$device.band)" = "$band" ] || return 1
+  [ -d "/sys/class/net/br-lan/brif/$interface" ] || return 1
+  case "$(cat "/sys/class/net/br-lan/brif/$interface/hairpin_mode" 2>/dev/null)" in 0|1) ;; *) return 1 ;; esac
+done
+for interface in ra1 rax1; do
+  path="/sys/class/net/br-lan/brif/$interface/hairpin_mode"
+  if [ "$(cat "$path")" != 0 ]; then
+    timeout 5 bridge link set dev "$interface" hairpin off >/dev/null 2>&1 || return 1
+    [ "$(cat "$path")" = 0 ] || return 1
+  fi
+done
+}
+monitor() {
+  while [ "$(get ax6000_mesh.main.enabled)" = 1 ]; do
+    # Netifd can reattach a bridge port without a wireless setup callback.
+    # Only reapply if a BH port explicitly reports reflection enabled.
+    for interface in ra1 rax1; do
+      if [ "$(cat "/sys/class/net/br-lan/brif/$interface/hairpin_mode" 2>/dev/null || :)" = 1 ]; then
+        apply || :
+        break
+      fi
+    done
+    sleep 1
+  done
+}
+case "${1:-}" in apply) apply ;; monitor) monitor ;; *) exit 1 ;; esac

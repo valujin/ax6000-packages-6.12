@@ -344,6 +344,8 @@ apply_mesh() {
     uci -q set "wireless.$section.key=$bh_key"
     uci -q set "wireless.$section.encryption=psk2"
     uci -q set "wireless.$section.hidden=1"
+    # Driver A4 backhaul must not reflect multicast frames to its ingress.
+    uci -q set "wireless.$section.multicast_to_unicast=0"
     uci -q set "wireless.$section.map_bss_type=64"
     if [ "$role:$backhaul" = agent:wireless ]; then
       section="ax6000_mesh_bh$index"
