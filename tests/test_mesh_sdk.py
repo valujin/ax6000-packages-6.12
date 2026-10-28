@@ -87,7 +87,7 @@ class MeshSdkUapi(unittest.TestCase):
                         packed = next(line for line in runtime.stdout.splitlines() if line.startswith('PACKED='))
                         self.assertIn('kmod-mapfilter (=6.12.108.3.0.1.2-r1)', packed)
                         if name == 'ax6000-mesh':
-                            self.assertIn('wapp (>=3.0.2.0-r3)', packed)
+                            self.assertIn('wapp (>=3.0.2.0-r5)', packed)
                         self.assertNotIn('+kmod-mapfilter', runtime.stdout)
                 self.assertEqual('select PACKAGE_kmod-mapfilter' in config.stdout, native)
                 proof = os.environ.get('AX6000_METADATA_PROOF_DIR')

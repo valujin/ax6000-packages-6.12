@@ -216,12 +216,34 @@ seal() {
   current_digest > "$state/expected.new" || fail 'Cannot seal Mesh configuration.'
   mv "$state/expected.new" "$state/expected"; sync
 }
+# r3 rewrote an enrolled agent WTS file with this exact private placeholder
+# on service restart. Recognize only that deterministic result for recovery;
+# keep all other configuration and all other WTS contents under the seal.
+canonical_agent_wts() (
+  [ "$(cat "$state/role" 2>/dev/null)" = agent ] || exit 1
+  [ "$(phase)" = committed ] || exit 1
+  [ -f /etc/map/wts_bss_info_config ] && [ ! -L /etc/map/wts_bss_info_config ] || exit 1
+  [ -f "$state/backhaul-ssid" ] && [ -f "$state/backhaul-key" ] || exit 1
+  IFS= read -r bh_ssid < "$state/backhaul-ssid"
+  IFS= read -r bh_key < "$state/backhaul-key"
+  . /usr/share/ax6000-mesh/vendor.sh
+  tmp=$(mktemp /var/run/ax6000-mesh-wts.XXXXXX) || exit 1
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  mesh_write_bss "$tmp" AX6000-joining "$bh_key" sae-mixed AX6000-joining "$bh_key" sae-mixed "$bh_ssid" "$bh_key" || exit 1
+  cmp -s "$tmp" /etc/map/wts_bss_info_config
+)
 check() {
   require; [ -f "$state/expected" ] || fail 'The Mesh configuration has not been sealed.'
   no_pending_uci
   local current
   current=$(current_digest) || fail 'Cannot inspect current Mesh configuration.'
-  [ "$current" = "$(cat "$state/expected")" ] || fail 'Mesh configuration changed outside enrollment; restore those edits before disabling Mesh.'
+  expected=$(cat "$state/expected")
+  if [ "$current" != "$expected" ]; then
+    [ "$(printf '%s\n' "$current" | sed '/^wts /d')" = "$(printf '%s\n' "$expected" | sed '/^wts /d')" ] || fail 'Mesh configuration changed outside enrollment; restore those edits before disabling Mesh.'
+    current_wts=$(printf '%s\n' "$current" | sed -n '/^wts /p')
+    expected_wts=$(printf '%s\n' "$expected" | sed -n '/^wts /p')
+    [ "$(printf '%s\n' "$current_wts" | awk '{print $2}')" = "$(printf '%s\n' "$expected_wts" | awk '{print $2}')" ] && canonical_agent_wts || fail 'Mesh configuration changed outside enrollment; restore those edits before disabling Mesh.'
+  fi
 }
 commit() {
   [ "$(phase)" = pending ] || fail 'No pending Mesh transaction exists.'

@@ -155,6 +155,8 @@ print(str(value).lower() if isinstance(value,bool) else value)
         health.write_text('#!/bin/sh\n[ -f "$TEST_STARTED" ]\n'); health.chmod(0o755)
         vendor = self.root / 'usr/libexec/ax6000-mesh-vendor'
         vendor.write_text('#!/bin/sh\ncase "$1" in status) echo \'{"connected":true}\';; pair) echo \'{"ok":true}\';; esac\n'); vendor.chmod(0o755)
+        profile = self.root / 'usr/libexec/ax6000-mesh-profile'
+        profile.write_text('#!/bin/sh\nexit 0\n'); profile.chmod(0o755)
         helper = self.root / 'usr/libexec/ax6000-mesh-transaction'
         helper.write_text(f'#!/bin/sh\nexec busybox ash "{self.helper}" "$@"\n'); helper.chmod(0o755)
         prefixes = ('/etc', '/sys', '/tmp/sysinfo', '/usr/libexec', '/usr/share/ax6000-mesh', '/var', '/proc/uptime')
@@ -193,6 +195,39 @@ print(str(value).lower() if isinstance(value,bool) else value)
         self.assertEqual(disabled.returncode, 0, disabled.stderr)
         for name, content in self.original.items(): self.assertEqual((self.root / 'etc/config' / name).read_bytes(), content)
         self.assertFalse(state.exists())
+
+    def test_committed_vendor_wts_survives_service_prepare(self):
+        self.set_config('ax6000_mesh', **{'main.role': 'agent'})
+        self.assertEqual(self.run_control('apply').returncode, 0)
+        wts = self.root / 'etc/map/wts_bss_info_config'
+        wts.parent.mkdir(parents=True, exist_ok=True)
+        wts.write_text('vendor-enrolled-config\n')
+        result = self.run_control('prepare')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(wts.read_text(), 'vendor-enrolled-config\n')
+
+    def test_r3_regenerated_agent_wts_does_not_block_recovery(self):
+        self.set_config('ax6000_mesh', **{'main.role': 'agent'})
+        vendor = self.root / 'usr/libexec/ax6000-mesh-vendor'
+        vendor.write_text('''#!/bin/sh
+case "$1" in
+ status) mkdir -p "$TEST_ROOT/etc/map"; echo enrolled-vendor-profile > "$TEST_ROOT/etc/map/wts_bss_info_config"; chmod 600 "$TEST_ROOT/etc/map/wts_bss_info_config"; echo '{"connected":true}';;
+ pair) echo '{"ok":true}';;
+esac
+'''); vendor.chmod(0o755)
+        applied = self.run_control('apply'); self.assertEqual(applied.returncode, 0, applied.stderr)
+        state = self.root / 'etc/ax6000-mesh'
+        key = (state / 'backhaul-key').read_text().strip()
+        ssid = (state / 'backhaul-ssid').read_text().strip()
+        wts = self.root / 'etc/map/wts_bss_info_config'
+        lib = self.root / 'usr/share/ax6000-mesh/vendor.sh'
+        code = '. "$1"; mesh_write_bss "$2" AX6000-joining "$3" sae-mixed AX6000-joining "$3" sae-mixed "$4" "$3"'
+        self.assertEqual(subprocess.run(['sh', '-c', code, 'test', str(lib), str(wts), key, ssid]).returncode, 0)
+        result = subprocess.run(['busybox', 'ash', str(self.helper), 'check'], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wts.write_text('unrelated manual edit\n')
+        result = subprocess.run(['busybox', 'ash', str(self.helper), 'check'], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_signal_immediately_after_commit_does_not_roll_back(self):
         helper = self.root / 'usr/libexec/ax6000-mesh-transaction'
@@ -240,6 +275,41 @@ exec busybox ash "{self.helper}" "$@"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / 'etc/config/network').read_bytes(), self.original['network'])
         self.assertEqual((self.root / 'etc/config/dhcp').read_bytes(), self.original['dhcp'])
+
+    def test_wireless_agent_requires_durable_profile_before_commit(self):
+        self.set_config('ax6000_mesh', **{'main.role': 'agent', 'main.backhaul': 'wireless'})
+        helper = self.root / 'usr/libexec/ax6000-mesh-profile'
+        real = self.root / 'profile-real'
+        source = (ROOT / 'files/mediatek-mesh/packages/ax6000-mesh/files/usr/libexec/ax6000-mesh-profile').read_text()
+        real.write_text(source.replace('/etc/map/mapd_user.cfg', str(self.root / 'etc/map/mapd_user.cfg')))
+        real.chmod(0o755)
+        helper.write_text(f'#!/bin/sh\n[ "${{1:-}}" = reset ] && exec sh "{real}" reset\nexit "${{TEST_PROFILE_FAIL:-0}}"\n'); helper.chmod(0o755)
+        profile = self.root / 'etc/map/mapd_user.cfg'
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        old_profile = 'BhProfile0Valid=1\nBhProfile0Ssid=old-network\nBhProfile0WpaPsk=old-password\n'
+        profile.write_text(old_profile); profile.chmod(0o600)
+        vendor = self.root / 'usr/libexec/ax6000-mesh-vendor'
+        vendor.write_text('''#!/usr/bin/python3
+import os,sys
+from pathlib import Path
+r=Path(os.environ['TEST_ROOT']); p=r/'proc/uptime'
+if sys.argv[1]=='status':
+ if 'BhProfile0Valid=' in (r/'etc/map/mapd_user.cfg').read_text(): (r/'old-profile-present').touch()
+ now=float(p.read_text().split()[0]); p.write_text(str(now+45)+' 0.00\\n'); print('{"connected":true}')
+else: print('{"ok":true}')
+'''); vendor.chmod(0o755)
+        self.write_tool('sleep', '#!/bin/sh\nexit 0\n')
+        self.env['TEST_PROFILE_FAIL'] = '1'
+        result = self.run_control('apply')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'etc/ax6000-mesh').exists())
+        self.assertEqual(profile.read_text(), old_profile)
+        self.assertFalse((self.root / 'old-profile-present').exists())
+        for name in ('network', 'dhcp', 'wireless'):
+            self.assertEqual((self.root / 'etc/config' / name).read_bytes(), self.original[name])
+        self.env['TEST_PROFILE_FAIL'] = '0'
+        applied = self.run_control('apply'); self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertEqual((self.root / 'etc/ax6000-mesh/phase').read_text().strip(), 'committed')
 
     def test_slow_enrollment_status_respects_monotonic_deadline_and_rolls_back(self):
         self.set_config('ax6000_mesh', **{'main.role': 'agent'})

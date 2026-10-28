@@ -120,7 +120,11 @@ END
     # Initial placeholders are private and must not overwrite enrolled DATs.
     ssid24=AX6000-joining; ssid5=AX6000-joining; key24=$bh_key; key5=$bh_key; enc24=sae-mixed; enc5=sae-mixed
   fi
-  mesh_write_bss /etc/map/wts_bss_info_config "$ssid24" "$key24" "$enc24" "$ssid5" "$key5" "$enc5" "$bh_ssid" "$bh_key" || fail 'Cannot prepare client and backhaul profiles.'
+  if [ "$(cat "$state/phase" 2>/dev/null || :)" = committed ]; then
+    [ -f /etc/map/wts_bss_info_config ] && [ ! -L /etc/map/wts_bss_info_config ] || fail 'Committed Mesh profile is missing.'
+  else
+    mesh_write_bss /etc/map/wts_bss_info_config "$ssid24" "$key24" "$enc24" "$ssid5" "$key5" "$enc5" "$bh_ssid" "$bh_key" || fail 'Cannot prepare client and backhaul profiles.'
+  fi
   cp "$template/ethernet_cfg.txt" /etc/ethernet_cfg.txt
   # Native 1905 DSA reads interface names; VLAN IDs alone do not identify LAN.
   printf '\nlan=%s\nbr_lan=br-lan\n' "$lan_interfaces" >> /etc/ethernet_cfg.txt
@@ -314,6 +318,9 @@ apply_mesh() {
   success=0
   trap '[ "$success" = 1 ] || [ "$(cat "$state/phase" 2>/dev/null || :)" = committed ] || { if restore; then phase restored; else printf "%s\n" "Restore failed; recovery snapshot retained." >&2; fi; }' EXIT
   trap 'exit 1' HUP INT TERM
+  if [ "$role:$backhaul" = agent:wireless ]; then
+    /usr/libexec/ax6000-mesh-profile reset || fail 'Could not prepare a fresh wireless backhaul profile.'
+  fi
   if [ "$role" = agent ]; then /usr/libexec/ax6000-mesh-transaction prepare-agent || fail 'Could not prepare the additional node network.'; fi
   bh_random=$(head -c 32 /dev/urandom | sha256sum)
   bh_key=$(printf '%.32s' "${bh_random%% *}")
@@ -388,17 +395,25 @@ apply_mesh() {
   if [ "$role" = agent ]; then
     if [ "$backhaul" = wireless ]; then phase pairing; pair_mesh; else phase address; fi
     read -r mesh_now _ < /proc/uptime; mesh_now=${mesh_now%%.*}
-    mesh_join_deadline=$((mesh_now + 180)); mesh_joined=0
+    mesh_join_deadline=$((mesh_now + 180)); mesh_joined=0; mesh_profile_missing=0
     while [ "$mesh_now" -lt "$mesh_join_deadline" ]; do
       enrollment=$(/usr/libexec/ax6000-mesh-vendor status) || enrollment='{}'
       if [ "$(printf '%s' "$enrollment" | jsonfilter -e '@.connected')" = true ]; then
         phase address
-        if lease_ok; then mesh_joined=1; break; fi
+        if lease_ok; then
+          if [ "$backhaul" != wireless ] || /usr/libexec/ax6000-mesh-profile; then
+            mesh_joined=1; break
+          fi
+          mesh_profile_missing=1
+        fi
       fi
       sleep 1
       read -r mesh_now _ < /proc/uptime; mesh_now=${mesh_now%%.*}
     done
-    [ "$mesh_joined" = 1 ] || fail 'The node did not join a controller and receive an address.'
+    if [ "$mesh_joined" != 1 ]; then
+      [ "$mesh_profile_missing" = 0 ] || fail 'The wireless backhaul profile was not saved safely.'
+      fail 'The node did not join a controller and receive an address.'
+    fi
     phase connected
   else phase ready; fi
   /usr/libexec/ax6000-mesh-transaction commit || fail 'Could not commit the Mesh configuration.'

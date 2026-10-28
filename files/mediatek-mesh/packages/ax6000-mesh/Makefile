@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ax6000-mesh
 PKG_VERSION:=1
-PKG_RELEASE:=3
+PKG_RELEASE:=5
 
 ifneq ($(wildcard $(TOPDIR)/ax6000-baseline/manifest.json),)
 # Keep the authenticated native module at runtime without rebuilding it in SDKs.
@@ -18,7 +18,7 @@ define Package/ax6000-mesh
   CATEGORY:=Network
   TITLE:=AX6000 MediaTek EasyMesh service
   DEPENDS:=+mapd +datconf +wireless-tools +uci +rpcd +jshn +libubox $(MAPFILTER_DEPENDS) +coreutils-timeout +coreutils-stat +ip-full +ip-bridge +jsonfilter
-  EXTRA_DEPENDS:=wapp (>=3.0.2.0-r3)$(if $(MAPFILTER_EXTRA_DEPENDS),$(comma) $(MAPFILTER_EXTRA_DEPENDS))
+  EXTRA_DEPENDS:=wapp (>=3.0.2.0-r5)$(if $(MAPFILTER_EXTRA_DEPENDS),$(comma) $(MAPFILTER_EXTRA_DEPENDS))
 endef
 
 define Package/ax6000-mesh/conffiles

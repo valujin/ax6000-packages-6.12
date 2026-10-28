@@ -1,0 +1,40 @@
+--- a/common/main.c
++++ b/common/main.c
+@@ -100,7 +100,7 @@
+ #ifdef MAP_SUPPORT
+ int process_options(int argc, char *argv[], char *filename,
+ 					int *opmode, int *drv_mode, int *debug_level, int *version, char *iface
+-					,char *map_cfg, char *map_user_cfg
++					,char *map_cfg, size_t map_cfg_len, char *map_user_cfg, size_t map_user_cfg_len
+ 					, RTMP_IAPP *pCtrlBK
+ 					)
+ #else
+@@ -225,13 +225,17 @@
+ 		case 'F':
+ 			cvalue = optarg;
+ 			if (strlen(cvalue) != 0) {
+-				strncpy(map_cfg, cvalue,  sizeof(map_cfg)-1);
++				if (strlen(cvalue) >= map_cfg_len)
++					return -1;
++				os_memcpy(map_cfg, cvalue, strlen(cvalue) + 1);
+ 			}
+ 			break;
+ 		case 'u':
+ 			cvalue = optarg;
+ 			if (strlen(cvalue) != 0) {
+-				strncpy(map_user_cfg, cvalue, sizeof(map_user_cfg)-1);
++				if (strlen(cvalue) >= map_user_cfg_len)
++					return -1;
++				os_memcpy(map_user_cfg, cvalue, strlen(cvalue) + 1);
+ 			}
+ 			break;
+ #endif
+@@ -1244,7 +1248,7 @@
+ 	memset(&IAPP_Ctrl_Block,0,sizeof(struct _RTMP_IAPP));
+ 
+ #ifdef MAP_SUPPORT
+-	ret = process_options(argc, argv, filename, &opmode, &drv_mode, &debug_level, &version, &wapp_cfg.iface[0], map_cfg, map_user_cfg, &IAPP_Ctrl_Block);
++	ret = process_options(argc, argv, filename, &opmode, &drv_mode, &debug_level, &version, &wapp_cfg.iface[0], map_cfg, sizeof(map_cfg), map_user_cfg, sizeof(map_user_cfg), &IAPP_Ctrl_Block);
+ #else
+ 	ret = process_options(argc, argv, filename, &opmode, &drv_mode, &debug_level, &version, &wapp_cfg.iface[0],&IAPP_Ctrl_Block);
+ 

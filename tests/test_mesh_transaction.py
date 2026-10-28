@@ -130,7 +130,7 @@ esac
             (self.root / ('running-' + name)).touch()
         self.helper = self.root / 'transaction'
         text = HELPER.read_text()
-        prefixes = ('/etc', '/sys', '/var', '/usr/libexec', '/proc/uptime', '/proc/sys/kernel/random/boot_id')
+        prefixes = ('/etc', '/sys', '/var', '/usr/libexec', '/usr/share/ax6000-mesh', '/proc/uptime', '/proc/sys/kernel/random/boot_id')
         text = re.sub('|'.join(re.escape(p) for p in prefixes), lambda m: str(self.root) + m[0], text)
         # This host BusyBox enables standalone applets, which otherwise bypass PATH.
         for command in ('uci', 'pidof', 'ifdown', 'ip', 'cp', 'wifi', 'iwpriv', 'rmmod'):

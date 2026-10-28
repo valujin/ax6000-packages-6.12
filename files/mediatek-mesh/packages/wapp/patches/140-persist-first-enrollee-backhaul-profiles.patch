@@ -1,0 +1,61 @@
+--- a/common/wdev.c
++++ b/common/wdev.c
+@@ -2714,6 +2714,7 @@
+ {
+ 	struct wapp_dev *wdev = NULL;
+ 	int send_pkt_len = 0;
++	unsigned int i;
+ 	wsc_apcli_config_msg *apcli_config_msg;
+ 	char wsc_profile_buffer[512] = {0};
+ 	DBGPRINT(RT_DEBUG_OFF, "%s\n", __func__);
+@@ -2724,8 +2725,27 @@
+ 	if (!wdev)
+ 		return;
+ //	send oid here to fill up the wsc profile credentials from driver
+-	driver_wext_get_wsc_profiles(wapp->drv_data, wdev->ifname,wsc_profile_buffer,&send_pkt_len);
++	if (driver_wext_get_wsc_profiles(wapp->drv_data, wdev->ifname,
++			wsc_profile_buffer, &send_pkt_len) < 0 ||
++	    send_pkt_len < (int)sizeof(*apcli_config_msg) ||
++	    send_pkt_len > (int)sizeof(wsc_profile_buffer))
++		return;
+ 	apcli_config_msg = (wsc_apcli_config_msg *)wsc_profile_buffer;
++	if (apcli_config_msg->profile_count > MAX_NUM_OF_RADIO ||
++	    apcli_config_msg->profile_count >
++	    (send_pkt_len - sizeof(*apcli_config_msg)) / sizeof(wsc_apcli_config))
++		return;
++	/* The parameter store uses strings. Validate every received record before
++	 * saving any profile or passing the credentials to mapd. */
++	for (i = 0; i < apcli_config_msg->profile_count; i++) {
++		wsc_apcli_config *profile = &apcli_config_msg->apcli_config[i];
++
++		if (!profile->SsidLen || profile->SsidLen > MAX_LEN_OF_SSID ||
++		    strnlen(profile->ssid, sizeof(profile->ssid)) != profile->SsidLen ||
++		    profile->KeyLength >= sizeof(profile->Key) ||
++		    strnlen((char *)profile->Key, sizeof(profile->Key)) != profile->KeyLength)
++			return;
++	}
+ 	DBGPRINT(RT_DEBUG_ERROR, "In WAPP , profile count is %d ,send_pkt_len %d \n",apcli_config_msg->profile_count,send_pkt_len );
+ #ifdef MAP_R3
+ 	/* Storing the WSC profile count for decision regarding
+@@ -2743,11 +2763,18 @@
+ 		}
+ 	}
+ #endif /* MAP_R3 */
+-	if(wapp->wsc_save_bh_profile == TRUE) {
+-		write_configs(wapp, apcli_config_msg->apcli_config, 0, NULL);
++	/* First enrolment has no ready backhaul and never sets the legacy
++	 * save flag. Keep successful managed-agent credentials across reboot. */
++	if (apcli_config_msg->profile_count &&
++	    (wapp->wsc_save_bh_profile == TRUE ||
++	     (wapp->map && wapp->map->TurnKeyEnable &&
++	      wapp->map->my_map_dev_role == DEVICE_ROLE_AGENT &&
++	      (wdev->dev_type == WAPP_DEV_TYPE_STA || wdev->dev_type == WAPP_DEV_TYPE_APCLI)))) {
++		for (i = 0; i < apcli_config_msg->profile_count; i++)
++			write_configs(wapp, &apcli_config_msg->apcli_config[i], i, NULL);
+ 		wapp->wsc_save_bh_profile = FALSE;
+ 	}
+-	if(wapp->wps_on_controller_cli==1) {
++	if(wapp->wps_on_controller_cli==1 && apcli_config_msg->profile_count) {
+ 		write_configs(wapp,apcli_config_msg->apcli_config, 0, NULL);
+ 		wapp->wps_on_controller_cli=0;
+ 	}
