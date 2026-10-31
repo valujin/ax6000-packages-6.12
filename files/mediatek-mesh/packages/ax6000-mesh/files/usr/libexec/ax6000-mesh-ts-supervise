@@ -1,0 +1,167 @@
+#!/bin/sh
+# Separate process supervisor for the explicit TS activation worker. No init
+# enablement here. SIGKILL of this supervisor is handled on procd restart;
+# this is bounded failure recovery, never an atomic packet-isolation promise.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+state=/etc/ax6000-mesh
+dir=/var/run/ax6000-mesh-ts-supervisor
+record=$dir/worker
+cache=$dir/ownership.json
+approval=$state/ts-dataplane-approved
+runtime=/usr/libexec/ax6000-mesh-ts-runtime
+reconcile=/usr/libexec/ax6000-mesh-ts-reconcile
+owner=$state/ts-ownership.json
+worker=''; worker_start=''; ports=''; cleaning=0
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 10 ] && [ "$1" -gt 1 ]; }
+generation() { case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 32 ]; }
+private() {
+  local mode
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  mode=$(stat -c %a "$1") || return 1
+  [ "$(stat -c %u "$1")" = 0 ] && [ "$(stat -c %h "$1")" = 1 ] && [ "$((0$mode & 077))" = 0 ]
+}
+process_start() {
+  local line rest
+  uint "$1" || return 1
+  line=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  rest=${line##*) }; set -- $rest
+  [ "$#" -ge 20 ] && [ "$1" != Z ] || return 1
+  shift 19; uint "$1" || return 1
+  printf '%s' "$1"
+}
+load_ports() {
+  local source=$1 size entries entry ifname actual_bssid schema seen=' '
+  private "$source" || return 1
+  size=$(stat -c %s "$source") || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le 65535 ] || return 1
+  json_load_file "$source" >/dev/null 2>&1 || return 1
+  json_get_var schema schema; [ "$schema" = 2 ] || return 1
+  json_select guest_ports || return 1; json_get_keys entries
+  set -- $entries; [ "$#" -gt 0 ] && [ "$#" -le 4 ] || return 1
+  ports=''
+  for entry in $entries; do
+    json_select "$entry" || return 1
+    json_get_vars ifname actual_bssid; json_select ..
+    case "$ifname" in ra2|ra3|rax2|rax3) ;; *) return 1 ;; esac
+    case "$seen" in *" $ifname "*) return 1 ;; esac; seen="$seen$ifname "
+    printf '%s\n' "$actual_bssid" | grep -Eq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' || return 1
+    [ "$actual_bssid" != 00:00:00:00:00:00 ] || return 1
+    ports="$ports $ifname:$actual_bssid"
+  done
+}
+quarantine() {
+  local pair ifname expected actual failed=0
+  # Deliberately independent of the reconciler/runtime locks. A killed worker
+  # may have left either lock or a partial command sequence behind.
+  rm -f "$approval"
+  for pair in $ports; do
+    ifname=${pair%%:*}; expected=${pair#*:}
+    actual=$(cat "/sys/class/net/$ifname/address" 2>/dev/null) || { failed=1; continue; }
+    [ "$actual" = "$expected" ] || { failed=1; continue; }
+    /sbin/ip link set dev "$ifname" down >/dev/null 2>&1 || failed=1
+    if [ -e "/sys/class/net/$ifname/master" ]; then /sbin/ip link set dev "$ifname" nomaster >/dev/null 2>&1 || failed=1; fi
+    actual=$(cat "/sys/class/net/$ifname/flags" 2>/dev/null) || { failed=1; continue; }
+    case "$actual" in 0x[0-9a-fA-F]*|[0-9]*) ;; *) failed=1; continue ;; esac
+    [ "$((actual & 1))" = 0 ] && [ ! -e "/sys/class/net/$ifname/master" ] || failed=1
+  done
+  [ "$failed" = 0 ]
+}
+stop_group() {
+  local pid=$1 birth=$2 actual
+  uint "$pid" && uint "$birth" || return 1
+  actual=$(process_start "$pid") || actual=''
+  # A live different process is never a valid kill target. A surviving old
+  # process group retains its numeric PID allocation while descendants exist.
+  [ -z "$actual" ] || [ "$actual" = "$birth" ] || return 1
+  kill -TERM -- "-$pid" 2>/dev/null || :
+  sleep 0.1
+  kill -KILL -- "-$pid" 2>/dev/null || :
+}
+read_record() {
+  local extra
+  private "$record" || return 1
+  [ "$(stat -c %s "$record")" -le 160 ] || return 1
+  read -r saved_parent saved_parent_start saved_worker saved_worker_start saved_generation extra < "$record" || return 1
+  [ -z "$extra" ] && uint "$saved_parent" && uint "$saved_parent_start" && uint "$saved_worker" && uint "$saved_worker_start" && generation "$saved_generation"
+}
+cleanup() {
+  [ "$cleaning" = 0 ] || return 0; cleaning=1
+  trap - EXIT HUP INT TERM
+  [ -z "$worker" ] || { stop_group "$worker" "$worker_start" || :; wait "$worker" 2>/dev/null || :; }
+  quarantine || printf '%s\n' 'TS supervisor could not verify every guest quarantine.' >&2
+  rm -f "$record" "$dir/start"
+}
+
+[ "$(id -u)" = 0 ] || fail 'TS supervision requires root.'
+case "${1-}:$#" in run:2|stop:1|worker:5) ;; *) fail 'Invalid TS supervisor command.' ;; esac
+if [ "$1" = worker ]; then
+  generation "$2" && uint "$3" && uint "$4" && [ "$5" = "$dir/start" ] || fail 'Invalid TS worker identity.'
+  polls=0
+  while [ ! -f "$5" ]; do
+    [ "$(process_start "$3")" = "$4" ] || exit 1
+    polls=$((polls + 1)); [ "$polls" -le 100 ] || exit 1
+    sleep 0.1
+  done
+  private "$5" && [ "$(process_start "$3")" = "$4" ] || exit 1
+  exec "$runtime" monitor "$2"
+fi
+if [ ! -e "$dir" ]; then mkdir -m 700 "$dir" || fail 'Cannot create TS supervisor state.'; fi
+[ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(stat -c %u "$dir")" = 0 ] && [ "$(stat -c %a "$dir")" = 700 ] || fail 'Unsafe TS supervisor state directory.'
+if [ -e "$record" ] || [ -L "$record" ]; then
+  read_record || fail 'Invalid previous TS worker record.'
+  actual_parent=$(process_start "$saved_parent") || actual_parent=''
+  if [ "$1" = run ] && [ "$actual_parent" = "$saved_parent_start" ]; then fail 'Another TS supervisor is active.'; fi
+  load_ports "$cache" || fail 'Previous TS ownership snapshot is unavailable.'
+  if [ "$1" = stop ] && [ "$actual_parent" = "$saved_parent_start" ]; then
+    kill -TERM "$saved_parent" 2>/dev/null || :
+    polls=0
+    while [ "$(process_start "$saved_parent")" = "$saved_parent_start" ]; do
+      polls=$((polls + 1)); [ "$polls" -le 30 ] || break
+      sleep 0.1
+    done
+    [ "$(process_start "$saved_parent")" != "$saved_parent_start" ] || kill -KILL "$saved_parent" 2>/dev/null || :
+  fi
+  stop_group "$saved_worker" "$saved_worker_start" || fail 'Previous TS worker identity was reused.'
+  quarantine || fail 'Previous TS guests could not be quarantined.'
+  rm -f "$record" "$dir/start"
+fi
+if [ "$1" = stop ]; then
+  if [ -e "$cache" ] || [ -L "$cache" ]; then load_ports "$cache"
+  else load_ports "$owner"; fi || fail 'Private TS shutdown ownership is unavailable.'
+  quarantine || fail 'Cannot verify stopped TS guest state.'
+  exit 0
+fi
+generation "$2" || fail 'Invalid TS supervisor generation.'
+command -v setsid >/dev/null || fail 'TS supervision requires setsid.'
+[ -x "$runtime" ] && [ -x "$reconcile" ] || fail 'TS activation helpers are unavailable.'
+mkdir -p /var/lock
+exec 8>/var/lock/ax6000-mesh-ts-supervisor.lock
+flock -n 8 || fail 'Another TS supervisor is active.'
+load_ports "$owner" || fail 'Private TS ownership is unavailable.'
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+private "$approval" && [ "$(cat "$approval")" = "$2" ] || fail 'TS packet-test approval does not match.'
+json_load_file "$owner"; json_get_var current generation
+[ "$current" = "$2" ] || fail 'Staged TS generation changed.'
+"$reconcile" verify "$owner" /var/run/ax6000-mesh-ts.json >/dev/null || fail 'TS staging proof failed.'
+cp "$owner" "$cache.new"; chmod 600 "$cache.new"; mv -f "$cache.new" "$cache"
+rm -f "$dir/start"
+parent_start=$(process_start "$$") || fail 'Cannot identify TS supervisor process.'
+# Worker cannot execute monitor until its private PID/start record is durable.
+setsid /bin/sh "$0" worker "$2" "$$" "$parent_start" "$dir/start" > "$dir/worker.log" 2>&1 8>&- &
+worker=$!
+polls=0
+while ! worker_start=$(process_start "$worker"); do
+  polls=$((polls + 1)); [ "$polls" -le 30 ] || fail 'TS worker did not start.'
+  sleep 0.1
+done
+printf '%s %s %s %s %s\n' "$$" "$parent_start" "$worker" "$worker_start" "$2" > "$record.new"
+chmod 600 "$record.new"; mv -f "$record.new" "$record"
+: > "$dir/start"; chmod 600 "$dir/start"
+while [ "$(process_start "$worker")" = "$worker_start" ]; do sleep 1; done
+wait "$worker" 2>/dev/null || :
+fail 'TS activation worker exited; approval revoked and guests quarantined.'

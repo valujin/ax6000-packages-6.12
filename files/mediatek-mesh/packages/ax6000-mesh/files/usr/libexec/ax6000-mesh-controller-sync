@@ -1,0 +1,194 @@
+#!/bin/sh
+# Native WTS/M2 controller synchronization. Guest forwarding remains separately gated.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+state=/etc/ax6000-mesh
+base=$state/ts-generations
+capabilities=$state/ts-capabilities.json
+lib=/usr/libexec
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+get() { uci -q get "$1" 2>/dev/null || :; }
+nonce() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+valid_generation() { case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 32 ]; }
+private() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] && [ "$((0$(stat -c %a "$1") & 077))" = 0 ]; }
+managed() { [ "$(get ax6000_mesh.main.enabled)" = 1 ] && [ "$(get ax6000_mesh.main.linux_ts)" = 1 ] && [ "$(get ax6000_mesh.main.role)" = controller ]; }
+selected() {
+  local value
+  value=$(cat "$state/ts-sync-pending" 2>/dev/null || cat "$state/ts-sync-current" 2>/dev/null) || return 1
+  valid_generation "$value" && [ -d "$base/$value" ] && [ ! -L "$base/$value" ] || return 1
+  printf '%s' "$value"
+}
+validate_current() {
+  local generation path
+  managed && private "$capabilities" || return 1
+  generation=$(selected) || return 1; path=$base/$generation
+  private "$path/wts" && private "$path/materialized/wireless" && configs_match "$path" || return 1
+  cmp -s "$path/wts" /etc/map/wts_bss_info_config && cmp -s "$path/materialized/wireless" /etc/config/wireless || return 1
+  [ "$(sha256sum "$capabilities" | cut -d' ' -f1)" = "$(cat "$path/capabilities.sha256")" ]
+}
+status() {
+  local phase=$1 generation=$2 path=$base/$2 agent entries entry
+  json_init; json_add_int schema 1; json_add_string phase "$phase"
+  json_add_string desired_generation "$generation"
+  json_add_string applied_state pending_unverified
+  json_add_array agents
+  # Native renew acceptance is not remote Linux dataplane acknowledgement.
+  if [ -f "$path/normalized/enrolled_agents.json" ]; then
+    cp "$path/normalized/enrolled_agents.json" "$path/.status-agents"
+    # Build fixed safe records separately to preserve the root status object.
+    agents=$(jsonfilter -i "$path/.status-agents" -e '@.agents[*]') || return 1
+    rm -f "$path/.status-agents"
+    for agent in $agents; do
+      json_add_object; json_add_string al_mac "$agent"; json_add_string desired_generation "$generation"
+      json_add_string applied_state pending_unverified; json_add_null applied_generation; json_close_object
+    done
+  fi
+  json_close_array; json_dump > "$state/ts-sync-status.new"
+  mv "$state/ts-sync-status.new" "$state/ts-sync-status.json"
+}
+seed() {
+  local ssid key security quarantine_key quarantine_vid
+  private "$state/backhaul-ssid" && private "$state/backhaul-key" || fail 'Private enrolled backhaul credentials are unavailable.'
+  if [ -n "${2-}" ]; then
+    quarantine_key=$(nonce)
+  else
+    if [ ! -e "$state/ts-quarantine-key" ]; then nonce > "$state/ts-quarantine-key"; fi
+    private "$state/ts-quarantine-key" || fail 'Private quarantine key is invalid.'
+    quarantine_key=$(cat "$state/ts-quarantine-key")
+  fi
+  ssid=$(cat "$state/backhaul-ssid"); key=$(cat "$state/backhaul-key")
+  security=$(get ax6000_mesh.main.backhaul_security); security=${security:-psk2}
+  quarantine_vid=${2-}; [ -n "$quarantine_vid" ] || quarantine_vid=$(get ax6000_mesh.main.quarantine_vid)
+  case "$quarantine_vid" in ''|*[!0-9]*) fail 'Configure an explicit unused quarantine VID.' ;; esac
+  [ "${#quarantine_vid}" -le 4 ] && [ "$quarantine_vid" -gt 1 ] && [ "$quarantine_vid" -le 4094 ] || fail 'Invalid quarantine VID.'
+  json_init; json_add_int schema 1; json_add_string backhaul_ssid "$ssid"; json_add_string backhaul_key "$key"
+  json_add_string backhaul_security "$security"; json_add_string quarantine_key "$quarantine_key"; json_add_int quarantine_vid "$quarantine_vid"
+  json_dump > "$1"
+}
+renew() {
+  local generation=$1
+  if timeout 10 mapd_cli /tmp/mapd_ctrl renew 9>&- >/dev/null 2>&1; then
+    status renew_requested "$generation"
+  else status retry_pending "$generation"; return 1; fi
+}
+publish() {
+  local generation=$1 path=$base/$1 current
+  configs_match "$path" || fail 'Controller configuration changed after interrupted synchronization; pending generation retained.'
+  # A journal may be resumed only while UCI is the captured user input or the
+  # exact staged output. Never overwrite newer user edits after interruption.
+  cmp -s /etc/config/wireless "$path/source-wireless" || cmp -s /etc/config/wireless "$path/materialized/wireless" || fail 'Wireless configuration changed after interrupted synchronization; pending generation retained.'
+  "$lib/ax6000-mesh-ts-supervise" stop >/dev/null 2>&1 || :
+  /etc/init.d/ax6000-mesh stop 9>&- || fail 'Cannot stop native Mesh daemons safely.'
+  if [ -f "$state/ts-ownership.json" ]; then
+    "$lib/ax6000-mesh-ts-reconcile" prepare "$state/ts-ownership.json" >/dev/null || fail 'Cannot quarantine prior guest inventory.'
+    mv "$state/ts-ownership.json" "$state/ts-ownership.previous.json"
+  fi
+  "$lib/ax6000-mesh-control" quiesce-radios || fail 'Cannot quiesce the old driver topology; pending generation retained.'
+  cp "$path/materialized/wireless" /etc/config/wireless.mesh-sync-new
+  mv /etc/config/wireless.mesh-sync-new /etc/config/wireless
+  cp "$path/wts" /etc/map/wts_bss_info_config.mesh-sync-new
+  mv /etc/map/wts_bss_info_config.mesh-sync-new /etc/map/wts_bss_info_config
+  # Preserve daemon-selected ALIDs; modify only the exact owned priority field.
+  sed '/^bss_config_priority=/d' /etc/map/1905d.cfg > "$path/1905.new"
+  printf 'bss_config_priority=ra0;ra1;ra2;ra3;rax0;rax1;rax2;rax3;apcli0;apclix0\n' >> "$path/1905.new"
+  cp "$path/1905.new" /etc/map/1905d.cfg.mesh-sync-new
+  mv /etc/map/1905d.cfg.mesh-sync-new /etc/map/1905d.cfg
+  "$lib/ax6000-mesh-transaction" adopt-controller-sync "$path/materialized/user-wireless" || fail 'Cannot preserve accepted user configuration.'
+  "$lib/ax6000-mesh-control" restore-radios || fail 'Cannot start the staged driver topology; pending generation retained.'
+  "$lib/ax6000-mesh-transaction" adopt-controller-sync "$path/materialized/user-wireless" || fail 'Cannot seal generated driver configuration.'
+  /etc/init.d/ax6000-mesh start || fail 'Cannot start native managed Mesh; pending generation retained.'
+  "$lib/ax6000-mesh-transaction" adopt-controller-sync "$path/materialized/user-wireless" || fail 'Cannot seal native managed configuration.'
+  printf '%s\n' "$generation" > "$state/ts-sync-current.new"
+  mv "$state/ts-sync-current.new" "$state/ts-sync-current"
+  rm -f "$state/ts-sync-pending"
+  sync
+  renew "$generation" || :
+}
+snapshot_configs() {
+  local path=$1 config
+  cp /etc/config/wireless "$path/source-wireless"
+  for config in network dhcp firewall ax6000_mesh; do
+    cp "/etc/config/$config" "$path/source-$config" || fail 'Cannot snapshot controller UCI.'
+  done
+  cp "$capabilities" "$path/source-capabilities"
+  sha256sum "$path/source-capabilities" | cut -d' ' -f1 > "$path/capabilities.sha256"
+}
+configs_match() {
+  local path=$1 config
+  for config in network dhcp firewall ax6000_mesh; do
+    cmp -s "/etc/config/$config" "$path/source-$config" || return 1
+  done
+  cmp -s "$capabilities" "$path/source-capabilities"
+}
+same_configs() {
+  local left=$1 right=$2 config
+  for config in network dhcp firewall ax6000_mesh capabilities; do
+    cmp -s "$left/source-$config" "$right/source-$config" || return 1
+  done
+}
+stage_candidate() {
+  local path=$1 current=$2 ledger
+  "$lib/ax6000-mesh-normalize-networks" "$path/source-capabilities" "$path/seed" "$path/normalized" || { rm -rf "$path"; fail 'Controller network policy is unsupported; existing generation retained.'; }
+  if valid_generation "$current"; then ledger=$base/$current/ledger; else ledger=$path/empty-ledger; printf '{"schema":1,"slots":[]}\n' > "$ledger"; fi
+  "$lib/ax6000-mesh-allocate-slots" "$path/normalized/policy.json" "$ledger" > "$path/plan" || { rm -rf "$path"; fail 'Stable slot capacity is exhausted; existing generation retained.'; }
+  jsonfilter -i "$path/plan" -e '@.state' > "$path/ledger"
+  "$lib/ax6000-mesh-stage-wts" "$path/normalized/policy.json" "$ledger" "$path/normalized/credentials.json" "$(cat "$path/normalized/quarantine_vid")" "$path/wts" || { rm -rf "$path"; fail 'Cannot stage native WTS policy.'; }
+  "$lib/ax6000-mesh-materialize-networks" "$path/plan" "$path/normalized/credentials.json" "$path/source-wireless" "$path/materialized" "$state/original-wireless" || { rm -rf "$path"; fail 'Cannot stage stable driver slots.'; }
+  cmp -s "$path/source-wireless" /etc/config/wireless && configs_match "$path" || { rm -rf "$path"; fail 'Controller configuration changed during validation; retrying later.'; }
+}
+preflight() (
+  local path current
+  [ "$(get ax6000_mesh.main.enabled)" = 1 ] && [ "$(get ax6000_mesh.main.role)" = controller ] || fail 'Preflight requires an enabled controller.'
+  [ "$(cat "$state/phase" 2>/dev/null)" = committed ] || fail 'Preflight requires committed enrollment.'
+  private "$capabilities" || fail 'A private confirmed four-slot capability manifest is required.'
+  path=$(mktemp -d "$state/.preflight.XXXXXX") || fail 'Cannot create private preflight stage.'
+  trap 'rm -rf "$path"' EXIT HUP INT TERM
+  snapshot_configs "$path"
+  seed "$path/seed" "$1"
+  current=$(cat "$state/ts-sync-current" 2>/dev/null || :)
+  stage_candidate "$path" "$current"
+)
+sync_once() {
+  local generation path current ledger changed
+  managed || return 0
+  [ "$(cat "$state/phase" 2>/dev/null)" = committed ] || fail 'Managed synchronization requires committed enrollment.'
+  private "$capabilities" || fail 'A private confirmed four-slot capability manifest is required.'
+  [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null)" = 1 ] && [ "$(cat /sys/class/net/br-lan/bridge/default_pvid 2>/dev/null)" = 0 ] || fail 'Prepare explicit management-preserving bridge VLAN filtering and default PVID zero first.'
+  if [ -f "$state/ts-sync-pending" ]; then
+    generation=$(selected) || fail 'Interrupted managed generation is invalid.'
+    publish "$generation"; return
+  fi
+  generation=$(nonce); valid_generation "$generation" || fail 'Cannot create synchronization generation.'
+  mkdir -p "$base"; chmod 700 "$base"
+  path=$base/$generation; mkdir -m 700 "$path"
+  snapshot_configs "$path"
+  seed "$path/seed"
+  current=$(cat "$state/ts-sync-current" 2>/dev/null || :)
+  stage_candidate "$path" "$current"
+  if valid_generation "$current" && same_configs "$path" "$base/$current" && cmp -s "$path/wts" "$base/$current/wts" && cmp -s "$path/materialized/wireless" /etc/config/wireless && cmp -s "$path/normalized/cpu_guest_links.json" "$base/$current/normalized/cpu_guest_links.json" && cmp -s "$path/normalized/enrolled_agents.json" "$base/$current/normalized/enrolled_agents.json" && [ "$(sha256sum "$capabilities" | cut -d' ' -f1)" = "$(cat "$base/$current/capabilities.sha256")" ]; then
+    rm -rf "$path"; renew "$current" || :; return
+  fi
+  printf '%s\n' "$generation" > "$state/ts-sync-pending.new"
+  mv "$state/ts-sync-pending.new" "$state/ts-sync-pending"; sync
+  status staging "$generation"
+  publish "$generation"
+}
+case "${1-}" in
+  preflight)
+    [ "$#" = 2 ] && [ -n "$2" ] || fail 'Preflight requires an explicit quarantine VID.'
+    [ "$(id -u)" = 0 ] || fail 'Controller preflight requires root.'
+    preflight "$2" ;;
+  validate-current) validate_current; exit $? ;;
+  once)
+    [ "$(id -u)" = 0 ] || fail 'Controller synchronization requires root.'
+    exec 9>/var/lock/ax6000-mesh.lock; flock -n 9 || exit 0
+    sync_once ;;
+  monitor)
+    while managed; do
+      "$0" once || printf '%s\n' 'Controller network synchronization failed; pending or prior safe generation retained.' > /var/run/ax6000-mesh-sync-error
+      sleep 30
+    done ;;
+  *) fail 'Invalid controller synchronization operation.' ;;
+esac

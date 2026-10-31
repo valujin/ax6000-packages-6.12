@@ -11,7 +11,7 @@
  PKG_LICENSE:=GPL-2.0
  PKG_VERSION:=3
 -PKG_RELEASE:=1
-+PKG_RELEASE:=2
++PKG_RELEASE:=3
  
  include $(INCLUDE_DIR)/package.mk
  
@@ -1293,7 +1293,7 @@
 \ No newline at end of file
 --- a/package/mtk/applications/mtwifi-cfg-ucode/files/lib/netifd/wireless/mtwifi.sh
 +++ b/package/mtk/applications/mtwifi-cfg-ucode/files/lib/netifd/wireless/mtwifi.sh
-@@ -1,290 +1,294 @@
+@@ -1,290 +1,311 @@
  #!/usr/bin/ucode
  
  /*
@@ -1462,6 +1462,16 @@
      // replace the data.interfaces
      data.interfaces = complete_ifaces;
  
++    // Managed TS owns guest attachment; reject before the driver can raise APs.
++    cursor.load("ax6000_mesh");
++    let mesh_linux_ts = cursor.get("ax6000_mesh", "main", "linux_ts") == "1";
++    if (mesh_linux_ts && system("/usr/libexec/ax6000-mesh-ts-gate preflight") != 0) {
++        data.mesh_ts_failed = true;
++        netifd.setup_failed("Managed Mesh traffic separation preflight failed");
++        l1.close();
++        return;
++    }
++
      /*****      PREPARE PREFIXES AND COUNTINGS     *******/
  
      // MTWIFI_AP_IF_PREFIX <= ext_ifname
@@ -1544,6 +1554,13 @@
      /*****          SETUP VIFS        *******/
      // UCI => DAT, ifup, reload driver...
      cfg.setup(data, all_devs);
++    // cfg.setup raised interfaces; quarantine again before netifd attaches VIFs.
++    if (mesh_linux_ts && system("/usr/libexec/ax6000-mesh-ts-gate preattach") != 0) {
++        data.mesh_ts_failed = true;
++        netifd.setup_failed("Managed Mesh traffic separation attachment failed");
++        l1.close();
++        return;
++    }
      // notify netifd to setup
  	netifd.set_up();
  
@@ -1574,7 +1591,7 @@
                  handle_setup(data);
              }, LOCK_FILE, `${command} ${cur_devname}`);
 +            // Start after with_lock returns, so the child inherits no radio lock.
-+            if (!data.config.disabled && data.config.map_mode == 1 &&
++            if (!data.mesh_ts_failed && !data.config.disabled && data.config.map_mode == 1 &&
 +                fs.access("/usr/libexec/ax6000-mesh-radio-ready"))
 +                system("/usr/libexec/ax6000-mesh-radio-ready >/dev/null 2>&1 &");
  		} else {

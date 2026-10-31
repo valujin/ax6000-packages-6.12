@@ -18,3 +18,5 @@
 /etc/wapp_ap_rax0.conf
 /etc/wapp_ap.conf
 /etc/wapp_main_inf.conf
+/etc/wireless/mediatek/mt7981.dbdc.b0.dat
+/etc/wireless/mediatek/mt7981.dbdc.b1.dat

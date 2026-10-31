@@ -1,0 +1,33 @@
+#!/bin/sh
+# Apply the agent's selected backhaul bands to a private vendor configuration.
+set -eu
+umask 077
+LC_ALL=C; export LC_ALL
+[ "$#" = 1 ] || exit 1
+case "$1" in validate|apply) ;; *) exit 1 ;; esac
+band=$(uci -q get ax6000_mesh.main.backhaul_band 2>/dev/null) || band=auto
+case "$band" in
+  auto) priority2=3; priority5=1 ;;
+  5g) priority2=0; priority5=1 ;;
+  2g) priority2=1; priority5=0 ;;
+  *) printf '%s\n' 'Invalid wireless backhaul band.' >&2; exit 1 ;;
+esac
+[ "$1" = apply ] || exit 0
+config=/etc/map/mapd_cfg
+[ ! -L "$config" ] && [ -f "$config" ] && [ -w "$config" ] || exit 1
+[ -d "${config%/*}" ] && [ ! -L "${config%/*}" ] || exit 1
+if [ "$(datconf -f "$config" get BhPriority2G 2>/dev/null || :)" = "$priority2" ] &&
+   [ "$(datconf -f "$config" get BhPriority5GL 2>/dev/null || :)" = "$priority5" ] &&
+   [ "$(datconf -f "$config" get BhPriority5GH 2>/dev/null || :)" = "$priority5" ]; then
+  exit 0
+fi
+temporary=$(mktemp "${config}.XXXXXX") || exit 1
+trap 'rm -f "$temporary"' EXIT
+trap 'exit 1' HUP INT TERM
+cp -p "$config" "$temporary" || exit 1
+for assignment in "BhPriority2G=$priority2" "BhPriority5GL=$priority5" "BhPriority5GH=$priority5"; do
+  key=${assignment%%=*}; value=${assignment#*=}
+  datconf -f "$temporary" set "$key" "$value" >/dev/null 2>&1 || exit 1
+  [ "$(datconf -f "$temporary" get "$key" 2>/dev/null)" = "$value" ] || exit 1
+done
+mv -f "$temporary" "$config" || exit 1

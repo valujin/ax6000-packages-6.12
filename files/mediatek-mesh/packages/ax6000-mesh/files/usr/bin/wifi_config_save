@@ -1,5 +1,5 @@
 #!/bin/sh
-# Persist daemon-owned FH/BH BSS fields without replacing the other BSS slot.
+# Persist daemon-owned BSS fields without replacing adjacent slots.
 set -eu
 LC_ALL=C
 export LC_ALL
@@ -7,18 +7,19 @@ umask 077
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 [ "$#" = 3 ] || fail 'Expected interface, field and value.'
 case "$1" in
-  ra0|ra1) profile=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat ;;
-  rax0|rax1) profile=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat ;;
   apcli0|apclix0) exit 0 ;;
+  rax*) profile=$(/usr/libexec/ax6000-mesh-hardware dat1) || fail 'Unsupported board.'; index=${1#rax} ;;
+  ra*) profile=$(/usr/libexec/ax6000-mesh-hardware dat0) || fail 'Unsupported board.'; index=${1#ra} ;;
   *) fail 'Unsupported mesh interface.' ;;
 esac
-case "$1" in *0) slot=1 ;; *1) slot=2 ;; esac
+case "$index" in 0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15) ;; *) fail 'Unsupported mesh interface.' ;; esac
+slot=$((index + 1))
 field=$2
 value=$3
 case "$field" in
   SSID) [ "${#value}" -ge 1 ] && [ "${#value}" -le 32 ] || fail 'Invalid SSID length.'; field=SSID$slot ;;
   WPAPSK) [ "${#value}" -ge 8 ] && [ "${#value}" -le 63 ] || fail 'Invalid WPA key length.'; field=WPAPSK$slot ;;
-  AuthMode) case "$value" in WPA2PSK|WPA2PSKWPA3PSK) ;; *) fail 'Unsupported authentication mode.' ;; esac ;;
+  AuthMode) case "$value" in WPA2PSK|WPA2PSKWPA3PSK|WPA3PSK) ;; *) fail 'Unsupported authentication mode.' ;; esac ;;
   EncrypType) [ "$value" = AES ] || fail 'Unsupported encryption type.' ;;
   HideSSID) case "$value" in 0|1) ;; *) fail 'Invalid hidden SSID setting.' ;; esac ;;
   Channel) case "$value" in ''|*[!0-9]*) fail 'Invalid channel.' ;; esac; [ "$value" -ge 1 ] && [ "$value" -le 196 ] || fail 'Invalid channel.' ;;
@@ -33,23 +34,49 @@ while ! flock -n 9; do
   attempt=$((attempt + 1)); [ "$attempt" -lt 30 ] || fail 'Wireless configuration is busy.'; sleep 1
 done
 if [ "$field" = Channel ] && [ "$(datconf -f "$profile" get AutoChannelSelect 2>/dev/null || :)" = 3 ]; then exit 0; fi
-set_token() {
-  local name="$1" token="$2" previous tail
-  previous=$(datconf -f "$profile" get "$name" 2>/dev/null || :)
-  if [ "$slot" = 1 ]; then
-    case "$previous" in *';'*) token="$token;${previous#*;}" ;; esac
-  else
-    tail=
-    case "$previous" in *';'*) tail=${previous#*;}; case "$tail" in *';'*) tail=";${tail#*;}" ;; *) tail= ;; esac ;; esac
-    token="${previous%%;*};$token$tail"
-  fi
-  datconf -f "$profile" set "$name" "$token" >/dev/null 2>&1 || fail 'Could not persist the mesh wireless setting.'
+check_token() {
+  local previous remaining index
+  previous=$(datconf -f "$profile" get "$1" 2>/dev/null || :)
+  remaining=$previous; index=1
+  while [ "$index" -lt "$slot" ]; do
+    case "$remaining" in
+      *';'*) remaining=${remaining#*;} ;;
+      *) [ "$index" -eq "$((slot - 1))" ] || fail 'Wireless profile has a gap before the requested BSS slot.'; return ;;
+    esac
+    index=$((index + 1))
+  done
 }
+set_token() {
+  local name="$1" token="$2" remaining part result= index=1 more=1
+  remaining=$(datconf -f "$profile" get "$name" 2>/dev/null || :)
+  while :; do
+    case "$remaining" in
+      *';'*) part=${remaining%%;*}; remaining=${remaining#*;}; more=1 ;;
+      *) part=$remaining; more=0 ;;
+    esac
+    [ "$index" -ne "$slot" ] || part=$token
+    if [ "$index" -eq 1 ]; then result=$part; else result="$result;$part"; fi
+    if [ "$more" = 0 ]; then
+      if [ "$index" -lt "$slot" ]; then result="$result;$token"; fi
+      break
+    fi
+    index=$((index + 1))
+  done
+  datconf -f "$profile" set "$name" "$result" >/dev/null 2>&1 || fail 'Could not persist the mesh wireless setting.'
+}
+case "$field" in
+  AuthMode) for name in AuthMode PMFMFPC PMFMFPR PMFSHA256; do check_token "$name"; done ;;
+  EncrypType|HideSSID) check_token "$field" ;;
+esac
 case "$field" in
   AuthMode)
     set_token AuthMode "$value"
-    if [ "$value" = WPA2PSKWPA3PSK ]; then set_token PMFMFPC 1; else set_token PMFMFPC 0; fi
-    set_token PMFMFPR 0
+    # SDK ap_sec.c requires PMF for pure SAE; transition mode permits it.
+    case "$value" in
+      WPA3PSK) set_token PMFMFPC 1; set_token PMFMFPR 1 ;;
+      WPA2PSKWPA3PSK) set_token PMFMFPC 1; set_token PMFMFPR 0 ;;
+      *) set_token PMFMFPC 0; set_token PMFMFPR 0 ;;
+    esac
     set_token PMFSHA256 0
     ;;
   EncrypType|HideSSID) set_token "$field" "$value" ;;

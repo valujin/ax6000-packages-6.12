@@ -83,9 +83,30 @@ else:
         self.assertEqual(other['SSID2'], 'Mesh5')
         self.assertEqual(json.loads(self.profile.read_text())['SSID2'], 'Mesh')
 
-    def test_arbitrary_extra_interfaces_are_rejected(self):
-        result = subprocess.run(['sh', str(self.script), 'ra2', 'SSID', 'No'], env=self.env, capture_output=True, text=True)
+    def test_out_of_range_and_ambiguous_interfaces_are_rejected(self):
+        for interface in ('ra16', 'rax16', 'ra02', 'ra-1', 'ra2;reboot', 'wlan2'):
+            result = subprocess.run(['busybox', 'ash', str(self.script), interface, 'SSID', 'No'], env=self.env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, interface)
+
+    def test_later_slot_preserves_bh_and_other_slots(self):
+        data = json.loads(self.profile.read_text())
+        data.update({'AuthMode':'WPA2PSK;WPA3PSK;WPA2PSK;WPA2PSK',
+                     'PMFMFPC':'0;1;0;0', 'PMFMFPR':'0;1;0;0', 'PMFSHA256':'0;0;0;0'})
+        self.profile.write_text(json.dumps(data))
+        self.save('ra2', 'SSID', 'Guest')
+        result = subprocess.run(['busybox', 'ash', str(self.script), 'ra2', 'AuthMode', 'WPA2PSKWPA3PSK'], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(self.profile.read_text())
+        self.assertEqual(data['SSID3'], 'Guest')
+        self.assertEqual(data['AuthMode'], 'WPA2PSK;WPA3PSK;WPA2PSKWPA3PSK;WPA2PSK')
+        self.assertEqual(data['PMFMFPC'], '0;1;1;0')
+        self.assertEqual(data['PMFMFPR'], '0;1;0;0')
+
+    def test_slot_cannot_create_a_gap_in_token_list(self):
+        before = self.profile.read_bytes()
+        result = subprocess.run(['busybox', 'ash', str(self.script), 'ra4', 'HideSSID', '1'], env=self.env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.profile.read_bytes(), before)
 
 
 class VendorRendering(unittest.TestCase):

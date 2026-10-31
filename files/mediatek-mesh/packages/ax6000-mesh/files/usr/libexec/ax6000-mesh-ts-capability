@@ -1,0 +1,46 @@
+#!/bin/sh
+# Validate a release hardware-test attestation; never create hardware evidence.
+set -e
+. /usr/share/libubox/jshn.sh
+release=/etc/ax6000-mesh-dataplane-capability.json
+hash() { local result; result=$(sha256sum "$1") || return 1; printf '%s' "${result%% *}"; }
+[ "$#" = 0 ] || exit 1
+[ -f "$release" ] && [ ! -L "$release" ] && [ "$(stat -c %u "$release")" = 0 ] && [ "$(stat -c %h "$release")" = 1 ] || exit 1
+mode=$(stat -c %a "$release"); [ "$((0$mode & 022))" = 0 ] || exit 1
+[ "$(stat -c %s "$release")" -le 65536 ] || exit 1
+json_load_file "$release"
+for field in schema capacity24 capacity5 management_vid quarantine_vid; do json_get_type kind "$field"; [ "$kind" = int ] || exit 1; done
+json_get_type kind packet_tested; [ "$kind" = boolean ] || exit 1
+json_get_vars schema packet_tested platform topology capacity24 capacity5 management_vid quarantine_vid abi_sha256 driver_sha256 implementation_sha256 native_sha256
+[ "$schema:$packet_tested:$platform:$topology:$capacity24:$capacity5:$management_vid" = '2:1:xiaomi,redmi-router-ax6000:wireless-tagged-br-lan-v1:4:4:1' ] || exit 1
+[ "$quarantine_vid" -gt 1 ] && [ "$quarantine_vid" -le 4094 ] || exit 1
+case "$(cat /tmp/sysinfo/board_name)" in xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod) ;; *) exit 1;; esac
+for digest in "$abi_sha256" "$driver_sha256" "$implementation_sha256" "$native_sha256"; do
+ [ "${#digest}" = 64 ] || exit 1
+ case "$digest" in *[!0-9a-f]*) exit 1;; esac
+done
+[ "$abi_sha256" = "$(hash /etc/ax6000-mesh-abi.json)" ] || exit 1
+kernel=$(uname -r); case "$kernel" in ''|*[!a-zA-Z0-9._+-]*) exit 1;; esac
+[ "$driver_sha256" = "$(hash "/lib/modules/$kernel/mt_wifi.ko")" ] || exit 1
+# Every digest below has a trailing newline; names/order are release ABI.
+hashes=''
+for name in ts-capability ts-provision ts-declare ts-own ts-gate ts-runtime ts-reconcile ts-supervise ts-observe managed-bootstrap bootstrap-bridge controller-sync agent-sync normalize-networks allocate-slots stage-wts materialize-networks agent-slots control transaction vendor; do
+ digest=$(hash "/usr/libexec/ax6000-mesh-$name") || exit 1
+ hashes="${hashes}${digest}
+"
+done
+for file in /etc/init.d/ax6000-mesh /etc/init.d/ax6000-mesh-sync /etc/init.d/ax6000-mesh-managed /lib/netifd/wireless/mtwifi.sh /etc/hotplug.d/net/95-ax6000-mesh-managed /usr/bin/wifi_config_save /usr/share/ax6000-mesh/vendor.sh; do
+ digest=$(hash "$file") || exit 1
+ hashes="${hashes}${digest}
+"
+done
+actual=$(printf '%s' "$hashes" | sha256sum); actual=${actual%% *}
+[ "$implementation_sha256" = "$actual" ] || exit 1
+hashes=''
+for file in /usr/bin/wapp /usr/bin/mapd /usr/bin/p1905_managerd; do
+ digest=$(hash "$file") || exit 1
+ hashes="${hashes}${digest}
+"
+done
+actual=$(printf '%s' "$hashes" | sha256sum); actual=${actual%% *}
+[ "$native_sha256" = "$actual" ]

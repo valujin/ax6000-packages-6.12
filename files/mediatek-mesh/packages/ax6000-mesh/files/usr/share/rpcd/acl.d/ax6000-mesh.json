@@ -1,7 +1,7 @@
 {
   "ax6000-mesh": {
     "description": "Manage MediaTek EasyMesh",
-    "read": { "ubus": { "ax6000.mesh": [ "status" ] } },
+    "read": { "ubus": { "ax6000.mesh": [ "status", "clients" ] } },
     "write": { "ubus": { "ax6000.mesh": [ "configure", "apply", "pair", "disable" ] } }
   }
 }

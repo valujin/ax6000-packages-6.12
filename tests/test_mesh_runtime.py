@@ -30,13 +30,13 @@ class RuntimeValidation(unittest.TestCase):
     def test_configure_saves_only_allowlisted_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = Path(tmp) / 'uci'
-            fake.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$MESH_TEST_LOG"\n')
+            fake.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$MESH_TEST_LOG"\n[ "$2" != get ]\n')
             fake.chmod(0o755)
             log = Path(tmp) / 'log'
             env = {**os.environ, 'PATH': tmp + ':' + os.environ['PATH'], 'MESH_TEST_LOG': str(log)}
             result = subprocess.run(['sh', str(self.control), 'configure', 'agent', 'wireless'], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(log.read_text().splitlines(), ['-q get ax6000_mesh.main.enabled', '-q set ax6000_mesh.main=mesh', '-q set ax6000_mesh.main.role=agent', '-q set ax6000_mesh.main.backhaul=wireless', '-q commit ax6000_mesh'])
+            self.assertEqual(log.read_text().splitlines(), ['-q get ax6000_mesh.main.backhaul_security', '-q get ax6000_mesh.main.backhaul_band', '-q get ax6000_mesh.main.enabled', '-q set ax6000_mesh.main=mesh', '-q set ax6000_mesh.main.role=agent', '-q set ax6000_mesh.main.backhaul=wireless', '-q commit ax6000_mesh'])
 
     def test_invalid_backhaul_never_invokes_uci(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -68,9 +68,9 @@ class RuntimeLifecycle(unittest.TestCase):
         for radio in ('ra0', 'rax0'):
             (self.root / f'sys/class/net/{radio}/flags').write_text('0x1003\n')
         (self.root / 'tmp/sysinfo/board_name').write_text('xiaomi,redmi-router-ax6000-stock\n')
-        wireless = {'d1': 'wifi-device', 'd2': 'wifi-device', 'a': 'wifi-iface', 'b': 'wifi-iface', 'a.mode': 'ap', 'b.mode': 'ap',
-                    'a.device': 'd1', 'b.device': 'd2', 'd1.type': 'mtwifi', 'd2.type': 'mtwifi',
-                    'd1.band': '2g', 'd2.band': '5g', 'a.network': 'lan', 'b.network': 'lan',
+        wireless = {'MT7986_1_1': 'wifi-device', 'MT7986_1_2': 'wifi-device', 'a': 'wifi-iface', 'b': 'wifi-iface', 'a.mode': 'ap', 'b.mode': 'ap',
+                    'a.device': 'MT7986_1_1', 'b.device': 'MT7986_1_2', 'MT7986_1_1.type': 'mtwifi', 'MT7986_1_2.type': 'mtwifi',
+                    'MT7986_1_1.band': '2g', 'MT7986_1_2.band': '5g', 'a.network': 'lan', 'b.network': 'lan',
                     'a.encryption': 'psk2', 'b.encryption': 'sae-mixed', 'a.ssid': 'Example 2G',
                     'b.ssid': 'Example 5G', 'a.key': 'password123', 'b.key': 'password456'}
         (self.root / 'etc/config/wireless').write_text(json.dumps(wireless, sort_keys=True))
@@ -80,11 +80,26 @@ class RuntimeLifecycle(unittest.TestCase):
         (self.root / 'etc/ax6000-mesh-abi.json').write_text(json.dumps(marker, sort_keys=True, separators=(',', ':')) + '\n')
         package = ROOT / 'files/mediatek-mesh/packages/ax6000-mesh/files'
         (self.root / 'usr/share/ax6000-mesh/vendor.sh').write_text((package / 'usr/share/ax6000-mesh/vendor.sh').read_text())
+        band_helper = self.root / 'usr/libexec/ax6000-mesh-band'
+        band_helper.write_text((package / 'usr/libexec/ax6000-mesh-band').read_text().replace('/etc/map/mapd_cfg', str(self.root / 'etc/map/mapd_cfg')))
+        band_helper.chmod(0o755)
         template = self.root / 'usr/share/ax6000-mesh/vendor'; template.mkdir()
         for name in ('mapd_default.cfg', '1905d.cfg', 'mapd_user.cfg', 'ethernet_cfg.txt', 'wapp_ap_ra0.conf', 'wapp_ap_rax0.conf'):
             (template / name).write_text('Default\n')
-        for cmd in ('wapp', 'wappctrl', 'mapd', 'p1905_managerd', 'mapd_cli', 'datconf', 'wifi_config_save'):
+        for cmd in ('wapp', 'wappctrl', 'mapd', 'p1905_managerd', 'mapd_cli', 'wifi_config_save'):
             self.write_tool(cmd, '#!/bin/sh\nexit 0\n')
+        self.write_tool('datconf', '''#!/usr/bin/python3
+import sys
+from pathlib import Path
+a=sys.argv[1:]; p=Path(a[1]); op=a[2]; key=a[3]; lines=p.read_text().splitlines()
+if op=='get':
+    for line in lines:
+        if line.startswith(key+'='): print(line.split('=',1)[1]); break
+    else: sys.exit(1)
+elif op=='set':
+    lines=[line for line in lines if not line.startswith(key+'=')]; lines.append(key+'='+a[4]); p.write_text('\\n'.join(lines)+'\\n')
+else: sys.exit(1)
+''')
         self.write_tool('pidof', '#!/bin/sh\n[ -f "$TEST_ROOT/running-$1" ] && echo 123\n')
         self.write_tool('wifi', '''#!/usr/bin/python3
 import fcntl,os,sys
@@ -138,13 +153,13 @@ import json,os,sys
 from pathlib import Path
 if sys.argv[2]=='network.wireless':
     down=(Path(os.environ['TEST_ROOT'])/'radios-down').exists()
-    print(json.dumps({name:{'up':not down,'pending':(name=='d2' and (Path(os.environ['TEST_ROOT'])/'radio-pending').exists())} for name in ('d1','d2')}))
+    print(json.dumps({name:{'up':not down,'pending':(name=='MT7986_1_2' and (Path(os.environ['TEST_ROOT'])/'radio-pending').exists())} for name in ('MT7986_1_1','MT7986_1_2')}))
 else: print(json.dumps({'up':True,'proto':'dhcp','ipv4-address':[{'address':'192.168.1.42'}]}))
 ''')
         self.write_tool('jsonfilter', '''#!/usr/bin/python3
 import json,sys
 args=sys.argv[1:]; value=json.loads(args[args.index('-s')+1]) if '-s' in args else json.load(sys.stdin); key=args[-1]
-if key.startswith('@.d1.') or key.startswith('@.d2.'):
+if key.startswith('@.MT7986_1_1.') or key.startswith('@.MT7986_1_2.'):
     value=value[key.split('.')[1]][key.split('.')[2]]; print(str(value).lower()); sys.exit(0)
 for token in {'@.connected':['connected'], '@.ok':['ok'], '@.up':['up'], '@.proto':['proto'], '@["ipv4-address"][0].address':['ipv4-address',0,'address']}.get(key,[]): value=value[token]
 print(str(value).lower() if isinstance(value,bool) else value)
@@ -198,10 +213,16 @@ print(str(value).lower() if isinstance(value,bool) else value)
 
     def test_committed_vendor_wts_survives_service_prepare(self):
         self.set_config('ax6000_mesh', **{'main.role': 'agent'})
-        self.assertEqual(self.run_control('apply').returncode, 0)
+        # Model enrollment before commit; arbitrary post-commit edits must fail
+        # the ownership check rather than silently becoming the new baseline.
+        init = self.root / 'etc/init.d/ax6000-mesh'
+        init.write_text(init.read_text().replace('touch "$TEST_STARTED"',
+            '\n"$TEST_ROOT/usr/libexec/ax6000-mesh-control" prepare || exit 1\n'
+            'echo vendor-enrolled-config > "$TEST_ROOT/etc/map/wts_bss_info_config"\n'
+            'touch "$TEST_STARTED"'))
+        applied = self.run_control('apply')
+        self.assertEqual(applied.returncode, 0, applied.stderr)
         wts = self.root / 'etc/map/wts_bss_info_config'
-        wts.parent.mkdir(parents=True, exist_ok=True)
-        wts.write_text('vendor-enrolled-config\n')
         result = self.run_control('prepare')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(wts.read_text(), 'vendor-enrolled-config\n')
@@ -496,7 +517,7 @@ fail=Path(os.environ['TEST_FAIL_WIFI'])'''))
 
     def test_disabled_extra_ap_is_rejected_before_snapshot(self):
         self.set_config('wireless', **{'extra': 'wifi-iface', 'extra.mode': 'ap', 'extra.disabled': '1',
-                                       'extra.device': 'd1', 'extra.network': 'lan'})
+                                       'extra.device': 'MT7986_1_1', 'extra.network': 'lan'})
         result = self.run_control('apply')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('disabled', result.stderr.lower())

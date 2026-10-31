@@ -1,0 +1,12 @@
+--- a/common/wapp_cmm.c
++++ b/common/wapp_cmm.c
+@@ -1218,7 +1218,8 @@
+ 		bh_wsc_profile->Ssid, os_strlen((char *)bh_wsc_profile->Ssid));
+ 	COPY_MAC_ADDR(req.data.bh_wsc_profile.MacAddr, bh_wsc_profile->mac_addr);
+ #ifdef MAP_SUPPORT		/*Add WAP3 support with MAP_R1*/
+-	if ((bh_wsc_profile->AuthMode & WSC_AUTHTYPE_SAE)
++	/* Keep pure SAE in the driver's WPS backhaul credential. */
++	if (((bh_wsc_profile->AuthMode & WSC_AUTHTYPE_SAE) && bh_wsc_profile->AuthMode != WSC_AUTHTYPE_SAE)
+ #ifdef MAP_R3
+ 		|| (bh_wsc_profile->AuthMode & AUTH_DPP_ONLY)
+ #endif /* MAP_R3 */

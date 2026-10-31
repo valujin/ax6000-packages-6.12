@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "source_commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
+  "requires_country_postimage": "612",
+  "patch": "mtwifi-wireless-mesh.patch",
+  "package_version": "1-r3",
+  "runtime_copies": {
+    "usr/share/luci-app-mtwifi-cfg/wireless-mtk.js": "www/luci-static/resources/view/network/wireless.js"
+  },
+  "files": {
+    "package/mtk/applications/luci-app-mtwifi-cfg/root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js": {
+      "before_sha256": "b2088523d857e6a7e6229ddc3debdcdf9c5a9c52e51d1af776605695d755a20e",
+      "after_sha256": "221a0a7712fbc76b4dab8000dfd176ec25609a8dad13ad4e04656d053f9d0042",
+      "image_path": "usr/share/luci-app-mtwifi-cfg/wireless-mtk.js",
+      "mode": 420
+    },
+    "package/mtk/applications/luci-app-mtwifi-cfg/root/etc/uci-defaults/luci-app-mtwifi-cfg.default": {
+      "before_sha256": "32a37dffa2a846e515a644791f49916f0aa82838ddaa0c7d4b2f8d31adfadd30",
+      "after_sha256": "bc90cbc797531c6f9652c8afbaa4a3aeab47641ca341165471e70750c61e161e",
+      "image_path": "etc/uci-defaults/luci-app-mtwifi-cfg.default",
+      "mode": 420
+    },
+    "package/mtk/applications/luci-app-mtwifi-cfg/Makefile": {
+      "before_sha256": "5a7376f526a8f8d80f63bb194a61c9d5e9075d6c94ec2f019dc504aed81e2a12",
+      "after_sha256": "396f349c8a37834b0aac83d420ff5f977efcb4d1d937d06bb9e002a2c4237a35",
+      "image_path": null,
+      "mode": 420
+    }
+  },
+  "sha256": "a97c55c6903eadadcf23a8535a5c875c65217935cf91718fea1cba06ef7b283f"
+}

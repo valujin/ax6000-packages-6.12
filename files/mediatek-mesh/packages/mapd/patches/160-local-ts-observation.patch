@@ -1,0 +1,236 @@
+--- a/src/1905_if/1905_if.c
++++ b/src/1905_if/1905_if.c
+@@ -54,6 +54,9 @@
+ #include "mapd_user_iface.h"
+ #include "ctrl_iface.h"
+ #include "mapfilter_if.h"
++#ifdef MAP_R2
++#include "mesh_ts_export.h"
++#endif
+ 
+ 
+ 
+@@ -637,11 +640,17 @@
+ 			_1905_interface_parse_event(global, (unsigned char *)buf, len);
+ 		} else {
+ 			err("Could not read pending message.");
++#ifdef MAP_R2
++			mesh_ts_connection_invalidate();
++#endif
+ 			break;
+ 		}
+ 	}
+ 
+ 	if (map_1905_interface_ctrl_pending(ctrl, &tv) < 0) {
++#ifdef MAP_R2
++		mesh_ts_connection_invalidate();
++#endif
+ 		err("Connection to WAPP lost");
+ 	}
+ }
+@@ -670,6 +679,10 @@
+ */
+ int _1905_open_connection(const char *ctrl_path, struct mapd_global *global)
+ {
++#ifdef MAP_R2
++	/* Never reuse a previous daemon or connection's observation. */
++	mesh_ts_connection_invalidate();
++#endif
+ 	/* For Syncronous commapd-response */
+ 	global->_1905_ctrl = map_1905_Init(ctrl_path);	//Should do attach
+ 
+@@ -691,6 +704,10 @@
+ 	}
+ 
+ 	eloop_register_read_sock(global->_1905_ctrl->s, mapd_receive_from_1905, global, global->_1905_ctrl);
++#ifdef MAP_R2
++	if (mesh_ts_connection_opened() < 0)
++		mesh_ts_connection_invalidate();
++#endif
+ 
+ 	return 0;
+ }
+@@ -704,6 +721,9 @@
+ */
+ int _1905_close_connection(struct mapd_global *global)
+ {
++#ifdef MAP_R2
++	mesh_ts_connection_invalidate();
++#endif
+ 	if (global->_1905_ctrl ) {
+ 		err("free sock and deinit _1905_ctrl");
+ 		global->_1905_ctrl->default_own_recv_len = 0;
+@@ -1400,6 +1420,28 @@
+ 		break;
+ #endif
+ 	case _1905_SET_TRAFFIC_SEPARATION_SETTING_EVENT:
++#ifdef MAP_R2
++		if (mesh_linux_ts_managed()) {
++			struct _1905_map_device *controller = NULL;
++			const unsigned char *controller_alid = NULL;
++			if (global->device_role == DEVICE_ROLE_CONTROLLER ||
++			    global->device_role == DEVICE_ROLE_CONTRAGENT)
++				controller_alid = global->al_mac;
++			else {
++				controller = topo_srv_get_controller_device(global);
++				if (controller)
++					controller_alid = controller->_1905_info.al_mac_addr;
++			}
++			/* Linux owns forwarding; the observation is never a WAPP command. */
++			if (len < (int)sizeof(*_1905_event) ||
++			    _1905_event->length > (size_t)len - sizeof(*_1905_event) ||
++			    _1905_event->length < sizeof(struct ts_setting))
++				mesh_ts_export(NULL, 0, controller_alid);
++			else
++				mesh_ts_export(buf, _1905_event->length, controller_alid);
++			break;
++		}
++#endif
+ 		err("got ts settings  event%u", _1905_event->length);
+ 		map_store_local_ts_policy(global, buf, _1905_event->length);
+ 		status = wlanif_issue_wapp_command((struct mapd_global *)global->back_ptr,
+--- /dev/null
++++ b/src/1905_if/mesh_ts_export.h
+@@ -0,0 +1,142 @@
++/* Export a non-secret observation of the local MAP R2 policy. */
++#ifndef MESH_TS_EXPORT_H
++#define MESH_TS_EXPORT_H
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <errno.h>
++#include <limits.h>
++
++#ifndef MESH_TS_PATH
++#define MESH_TS_PATH "/var/run/ax6000-mesh-ts.json"
++#endif
++#ifndef MESH_TS_BOOT_ID
++#define MESH_TS_BOOT_ID "/proc/sys/kernel/random/boot_id"
++#endif
++#define MESH_TS_MAX_FH 48
++static inline int mesh_linux_ts_managed(void)
++{
++ const char *mode = getenv("AX6000_MESH_LINUX_TS");
++ return mode && strcmp(mode, "1") == 0;
++}
++
++static unsigned long mesh_ts_connection_generation;
++static int mesh_ts_connection_active;
++
++static void mesh_ts_connection_invalidate(void)
++{
++ mesh_ts_connection_active = 0;
++ unlink(MESH_TS_PATH);
++}
++
++static int mesh_ts_connection_opened(void)
++{
++ if (mesh_ts_connection_generation == ULONG_MAX) return -1;
++ mesh_ts_connection_generation++;
++ mesh_ts_connection_active = 1;
++ return 0;
++}
++
++/* /proc/self/stat field 22, counting from the state field after the final ')'. */
++static int mesh_ts_process_start(unsigned long long *start)
++{
++ FILE *f = fopen("/proc/self/stat", "r");
++ char line[4096], *p, *end;
++ unsigned int field;
++ if (!f) return -1;
++ if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
++ fclose(f);
++ p = strrchr(line, ')');
++ if (!p || p[1] != ' ') return -1;
++ p += 2;
++ for (field = 3; field < 22; field++) {
++  p = strchr(p, ' ');
++  if (!p) return -1;
++  while (*p == ' ') p++;
++ }
++ errno = 0;
++ *start = strtoull(p, &end, 10);
++ return errno || end == p || (*end != ' ' && *end != '\n') || !*start ? -1 : 0;
++}
++
++/* A local observation, not an acknowledgement that WAPP or the bridge applied it. */
++static int mesh_ts_export(const void *data, size_t len, const unsigned char *controller)
++{
++	static unsigned long sequence;
++	const struct ts_setting *setting = data;
++	const struct ts_fh_config *fh;
++	char boot[37], tmp[] = MESH_TS_PATH ".XXXXXX";
++	unsigned short vids[MAX_VLAN_NUM];
++	unsigned int i, j, n = 0, count;
++	unsigned long long process_start;
++	unsigned char controller_nonzero = 0;
++	struct timespec now;
++	FILE *bootfile = NULL, *out = NULL;
++	int fd = -1, written = 0, created = 0;
++
++	if (!mesh_ts_connection_active || !controller || !data || len < sizeof(*setting)) goto invalid;
++	for (i = 0; i < 6; i++) controller_nonzero |= controller[i];
++	if (!controller_nonzero || (controller[0] & 1) || mesh_ts_process_start(&process_start) < 0) goto invalid;
++	count = setting->fh_bss_setting.itf_num;
++	if (count > MESH_TS_MAX_FH || count > (len - sizeof(*setting)) / sizeof(*fh) ||
++	    setting->common_setting.policy_vid_num > MAX_VLAN_NUM ||
++	    !setting->common_setting.primary_vid || setting->common_setting.primary_vid >= 4095 ||
++	    setting->common_setting.primary_pcp > 7) goto invalid;
++	for (i = 0; i < setting->common_setting.policy_vid_num; i++) {
++		unsigned short vid = setting->common_setting.policy_vids[i];
++		if (!vid || vid >= 4095) goto invalid;
++		for (j = 0; j < n && vids[j] != vid; j++);
++		if (j == n) vids[n++] = vid;
++	}
++	fh = setting->fh_bss_setting.fh_configs;
++	for (i = 0; i < count; i++) {
++		int allowed = fh[i].vid == setting->common_setting.primary_vid;
++		unsigned char nonzero = 0;
++		for (j = 0; j < 6; j++) nonzero |= fh[i].itf_mac[j];
++		if (!nonzero || (fh[i].itf_mac[0] & 1) || !fh[i].vid || fh[i].vid >= 4095) goto invalid;
++		for (j = 0; j < n; j++) if (vids[j] == fh[i].vid) allowed = 1;
++		if (!allowed) goto invalid;
++		for (j = 0; j < i; j++) if (!memcmp(fh[i].itf_mac, fh[j].itf_mac, 6)) goto invalid;
++	}
++	bootfile = fopen(MESH_TS_BOOT_ID, "r");
++	if (!bootfile || fscanf(bootfile, "%36s", boot) != 1) goto invalid;
++	fclose(bootfile); bootfile = NULL;
++	if (strlen(boot) != 36) goto invalid;
++	for (i = 0; i < 36; i++) {
++		if (i == 8 || i == 13 || i == 18 || i == 23) { if (boot[i] != '-') goto invalid; }
++		else if (!((boot[i] >= '0' && boot[i] <= '9') || (boot[i] >= 'a' && boot[i] <= 'f'))) goto invalid;
++	}
++	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) goto invalid;
++	fd = mkstemp(tmp);
++	if (fd >= 0) created = 1;
++	if (fd < 0 || fchmod(fd, 0600) != 0 || !(out = fdopen(fd, "w"))) goto invalid;
++	fd = -1;
++	if (fprintf(out, "{\"schema\":2,\"boot_id\":\"%s\",\"producer_pid\":%ld,\"producer_start_ticks\":%llu,\"connection_generation\":%lu,\"controller_alid\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"monotonic_ms\":%llu,\"sequence\":%lu,\"primary_vid\":%u,\"primary_pcp\":%u,\"allowed_vids\":[",
++		boot, (long)getpid(), process_start, mesh_ts_connection_generation,
++		controller[0], controller[1], controller[2], controller[3], controller[4], controller[5],
++		(unsigned long long)now.tv_sec * 1000 + now.tv_nsec / 1000000,
++		sequence + 1, setting->common_setting.primary_vid, setting->common_setting.primary_pcp) < 0) goto invalid;
++	for (i = 0; i < n; i++) if (fprintf(out, "%s%u", i ? "," : "", vids[i]) < 0) goto invalid;
++	if (fprintf(out, "],\"fh\":[") < 0) goto invalid;
++	for (i = 0; i < count; i++)
++		if (fprintf(out, "%s{\"bssid\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"vid\":%u}",
++			i ? "," : "", fh[i].itf_mac[0], fh[i].itf_mac[1], fh[i].itf_mac[2],
++			fh[i].itf_mac[3], fh[i].itf_mac[4], fh[i].itf_mac[5], fh[i].vid) < 0) goto invalid;
++	if (fprintf(out, "]}\n") < 0 || fflush(out) != 0 || fsync(fileno(out)) != 0) goto invalid;
++	if (fclose(out) != 0) { out = NULL; goto invalid; }
++	out = NULL;
++	if (rename(tmp, MESH_TS_PATH) != 0) goto invalid;
++	sequence++; written = 1;
++invalid:
++	if (bootfile) fclose(bootfile);
++	if (out) fclose(out);
++	if (fd >= 0) close(fd);
++	if (!written) { if (created) unlink(tmp); unlink(MESH_TS_PATH); return -1; }
++	return 0;
++}
++#endif

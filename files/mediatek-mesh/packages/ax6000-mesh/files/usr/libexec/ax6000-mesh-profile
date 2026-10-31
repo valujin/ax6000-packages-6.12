@@ -15,7 +15,7 @@ if [ "${1:-}" = reset ]; then
   chmod 600 "$temporary" && mv -f "$temporary" "$profile" || exit 1
   exit 0
 fi
-[ "$#" = 0 ] || exit 1
+[ "$#" = 0 ] || { [ "$#" = 1 ] && [ "$1" = saved ]; } || exit 1
 [ -f "$profile" ] && [ ! -L "$profile" ] && [ -w "$profile" ] || exit 1
 mode=$(stat -c %a "$profile") || exit 1
 owner=$(stat -c %u "$profile") || exit 1
@@ -29,5 +29,20 @@ auth=$(value BhProfile0AuthMode) || exit 1
 enc=$(value BhProfile0EncrypType) || exit 1
 case "$ssid$key" in *[![:print:]]*) exit 1 ;; esac
 [ "${#ssid}" -ge 1 ] && [ "${#ssid}" -le 32 ] && [ "${#key}" -ge 8 ] && [ "${#key}" -le 63 ] || exit 1
-case "$auth" in WPA2PSK|WPA2PSKWPA3PSK) ;; *) exit 1 ;; esac
+case "$auth" in WPA2PSK|WPA2PSKWPA3PSK|WPA3PSK) ;; *) exit 1 ;; esac
 [ "$enc" = AES ] || exit 1
+# psk2 is legacy compatibility mode; SAE requires exact enrolled SAE plus
+# fresh negotiated peer evidence. The saved check is also used before WAPP
+# starts on a committed restart, when no active association exists yet.
+security=$(uci -q get ax6000_mesh.main.backhaul_security 2>/dev/null) || security=psk2
+case "$security" in
+  psk2) ;;
+  sae)
+    [ "$auth" = WPA3PSK ] || exit 1
+    if [ "${1:-}" != saved ]; then
+      link=$(timeout 3 mapd_cli /tmp/mapd_ctrl get bh_security 9>&- 2>/dev/null) || exit 1
+      [ "$link" = sae=1 ] || exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac

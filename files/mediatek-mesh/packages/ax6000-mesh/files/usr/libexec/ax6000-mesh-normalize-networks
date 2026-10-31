@@ -1,0 +1,279 @@
+#!/bin/sh
+# Read-only UCI normalization. CAPACITY_MANIFEST PRIVATE_SEED NEW_OUTPUT_DIR
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+. /usr/share/ax6000-mesh/vendor.sh
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+field_type() { local actual; json_get_type actual "$1"; [ "$actual" = "$2" ]; }
+name_ok() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1;; esac; [ "${#1}" -le 32 ]; }
+[ "$#" = 3 ] || fail 'Expected capacity manifest, private seed and new output directory.'
+[ "$(id -u)" = 0 ] || fail 'Controller normalization requires root.'
+capacity=$1; seed=$2; output=$3
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail 'Output already exists.'
+# All temporary and final writes are confined to a new private sibling directory.
+work=$(mktemp -d "${output}.tmp.XXXXXX") || fail 'Cannot create private output.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+private_json() {
+ local mode size clean
+ [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] || fail 'Input must be a root-owned regular file.'
+ mode=$(stat -c %a "$1"); [ "$((0$mode & 077))" = 0 ] || fail 'Input must be private.'
+ head -c 65537 "$1" > "$work/input"
+ size=$(wc -c < "$work/input"); clean=$(tr -d '\000' < "$work/input" | wc -c)
+ [ "$size" -le 65536 ] && [ "$size" = "$clean" ] || fail 'Invalid input size or NUL.'
+ ! grep -qiF '\u0000' "$work/input" || fail 'Invalid input NUL.'
+ jshn -R "$work/input" >/dev/null 2>&1 && json_load_file "$work/input" 2>/dev/null || fail 'Invalid input JSON.'
+}
+private_json "$capacity"
+for field in schema capacity24 capacity5; do field_type "$field" int || fail 'Invalid capacity schema.'; done
+field_type confirmed boolean || fail 'Invalid capacity confirmation.'
+json_get_vars schema confirmed capacity24 capacity5
+[ "$schema:$confirmed:$capacity24:$capacity5" = 1:1:4:4 ] || fail 'Confirmed four-slot capacity is required.'
+json_get_type typ enrolled_agents; [ "$typ" = array ] || fail 'Missing enrolled agent manifest.'
+json_select enrolled_agents; json_get_keys entries
+: > "$work/agents"
+for entry in $entries; do
+ json_get_type typ "$entry"; [ "$typ" = string ] || fail 'Invalid enrolled agent.'
+ json_get_var agent "$entry"
+ case "$agent" in [0-9a-f][02468ace]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;; *) fail 'Invalid enrolled agent.';; esac
+ [ "$agent" != 00:00:00:00:00:00 ] && ! grep -qxF "$agent" "$work/agents" || fail 'Invalid duplicate enrolled agent.'
+ printf '%s\n' "$agent" >> "$work/agents"
+done
+json_init; json_add_array agents
+while IFS= read -r agent; do json_add_string '' "$agent"; done < "$work/agents"
+json_close_array; json_dump > "$work/enrolled_agents.json"
+private_json "$seed"
+field_type schema int && field_type quarantine_vid int || fail 'Invalid seed schema.'
+for field in backhaul_ssid backhaul_key backhaul_security quarantine_key; do field_type "$field" string || fail 'Invalid seed credentials.'; done
+json_get_vars schema backhaul_ssid backhaul_key backhaul_security quarantine_key quarantine_vid
+[ "$schema" = 1 ] || fail 'Invalid seed schema.'
+case "$quarantine_vid" in ''|*[!0-9]*) fail 'Invalid quarantine VID.';; esac
+[ "${#quarantine_vid}" -le 4 ] && [ "$quarantine_vid" -gt 1 ] && [ "$quarantine_vid" -le 4094 ] || fail 'Invalid quarantine VID.'
+mesh_validate_credentials "$backhaul_ssid" "$backhaul_key" psk2 && mesh_validate_credentials Quarantine "$quarantine_key" psk2 && mesh_backhaul_auth_code "$backhaul_security" >/dev/null || fail 'Invalid seed credentials.'
+printf '%s\n' "$quarantine_vid" > "$work/quarantine_vid"
+# Preserve only explicitly supported fields; reject unsupported active client modes.
+mkdir "$work/bss" "$work/net" "$work/zone" "$work/dhcp" "$work/firewall"
+collect_bss() {
+ local section=$1 disabled mode device band network ssid key encryption isolate hidden value field
+ config_get disabled "$section" disabled 0; [ "$disabled" != 1 ] || return 0
+ config_get mode "$section" mode; config_get network "$section" network
+ [ -n "$network" ] || config_get network "$section" mesh_network
+ # Only the package's exact reserved identities may be excluded.
+ case "$section" in
+  ax6000_mesh_ap1|ax6000_mesh_ap2)
+   config_get value "$section" map_bss_type
+   [ "$mode:$value" != ap:64 ] || return 0 ;;
+  ax6000_mesh_slot24_2|ax6000_mesh_slot24_3|ax6000_mesh_slot5_2|ax6000_mesh_slot5_3)
+   config_get value "$section" mesh_placeholder
+   [ "$value" != 1 ] || return 0 ;;
+ esac
+ [ "$mode" = ap ] || fail 'Unsupported active wireless mode.'
+ name_ok "$section" && name_ok "$network" || fail 'Named single-network client sections are required.'
+ config_get device "$section" device; config_get band "$device" band
+ case "$band" in 2g|5g) ;; *) fail 'Unsupported or missing radio band.';; esac
+ config_get ssid "$section" ssid; config_get key "$section" key; config_get encryption "$section" encryption
+ config_get isolate "$section" isolate 0; config_get hidden "$section" hidden 0
+ mesh_validate_credentials "$ssid" "$key" "$encryption" || fail 'Unsupported client credentials.'
+ case "$isolate:$hidden" in 0:0|0:1|1:0|1:1) ;; *) fail 'Unsupported client flags.';; esac
+ case "$ssid" in AX6000-quarantine-*) fail 'Reserved client SSID.';; esac
+ [ "$ssid" != "$backhaul_ssid" ] || fail 'Backhaul and client SSIDs conflict.'
+ # Features with additional credential or attachment semantics require explicit support.
+ for field in vlan_file dynamic_vlan wds ieee80211r auth_server; do
+  config_get value "$section" "$field"; [ -z "$value" ] || [ "$value" = 0 ] || fail 'Unsupported wireless option.'
+ done
+ mkdir "$work/bss/$section"
+ for field in band network ssid key encryption isolate hidden; do eval 'value=$'"$field"; printf '%s' "$value" > "$work/bss/$section/$field"; done
+ printf '%s\n' "$section" >> "$work/order"
+}
+config_load wireless || fail 'Cannot read wireless UCI.'
+config_foreach collect_bss wifi-iface
+[ -s "$work/order" ] || fail 'No active client BSS.'
+collect_network() {
+ local section=$1 typ device vid value field
+ config_get typ "$section" TYPE
+ # Check quarantine against all network device references, including unused ones.
+ for field in device ifname name ports; do
+  config_get value "$section" "$field"
+  for device in $value; do
+   case "$device" in
+    *.*) vid=${device##*.}; vid=${vid%%:*}
+     case "$vid" in ''|*[!0-9]*) ;; *)
+      vid=$(printf '%s' "$vid" | sed 's/^0*//')
+      [ "$vid" != "$quarantine_vid" ] || fail 'Quarantine VID is already referenced.';; esac ;;
+   esac
+  done
+ done
+ for field in vlan vid; do
+  config_get value "$section" "$field"
+  case "$value" in ''|*[!0-9]*) ;; *)
+   vid=$(printf '%s' "$value" | sed 's/^0*//')
+   [ "$vid" != "$quarantine_vid" ] || fail 'Quarantine VID is already configured.';; esac
+ done
+ [ "$typ" = interface ] || return 0
+ name_ok "$section" || fail 'Unsupported network section identity.'
+ mkdir "$work/net/$section"
+ for field in device proto ipaddr netmask; do config_get value "$section" "$field"; printf '%s' "$value" > "$work/net/$section/$field"; done
+}
+config_load network || fail 'Cannot read network UCI.'
+for section in $CONFIG_SECTIONS; do collect_network "$section"; done
+collect_zone() {
+ local section=$1 networks input forward output network value zone field
+ config_get networks "$section" network
+ config_get zone "$section" name
+ name_ok "$zone" || fail 'Unsupported firewall zone identity.'
+ [ ! -e "$work/firewall/zone-$zone" ] || fail 'Duplicate firewall zone identity.'
+ printf '%s' "$networks" > "$work/firewall/zone-$zone"
+ for field in device subnet extra_src extra_dest; do
+  config_get value "$section" "$field"
+  [ -z "$value" ] || : > "$work/firewall/extra-$zone"
+ done
+ config_get input "$section" input; config_get forward "$section" forward; config_get output "$section" output
+ for network in $networks; do
+  name_ok "$network" || fail 'Invalid firewall network.'
+  [ ! -e "$work/zone/$network" ] || fail 'Ambiguous firewall ownership.'
+  printf '%s %s %s' "$input" "$forward" "$output" > "$work/zone/$network"
+  printf '%s' "$zone" > "$work/firewall/network-$network"
+ done
+}
+config_load firewall || fail 'Cannot read firewall UCI.'
+config_foreach collect_zone zone
+zone_selector() {
+ case "$1" in ''|'*') return 0;; esac
+ name_ok "$1" || fail 'Unsupported firewall zone selector.'
+}
+check_include() {
+ local enabled
+ config_get enabled "$1" enabled 1
+ [ "$enabled" = 0 ] || fail 'Active custom firewall includes require separate validation.'
+}
+check_forwarding() {
+ local section=$1 src dest enabled members
+ config_get enabled "$section" enabled 1; [ "$enabled" != 0 ] || return 0
+ config_get src "$section" src; config_get dest "$section" dest
+ zone_selector "$src"; zone_selector "$dest"
+ case "$src" in "$firewall_guest_zone"|'*')
+  # Only the conventional WAN-only zone is a supported guest egress.
+  [ "$src" = "$firewall_guest_zone" ] && [ "$dest" = wan ] || fail 'Unsupported guest forwarding override.'
+  members=$(cat "$work/firewall/zone-wan" 2>/dev/null) || fail 'Missing WAN egress zone.'
+  case "$members" in wan|wan6|'wan wan6'|'wan6 wan') ;; *) fail 'Guest egress zone includes non-WAN networks.';; esac
+  [ ! -e "$work/firewall/extra-wan" ] || fail 'Unsupported WAN zone membership.' ;;
+ esac
+ # Custom ingress to guests is outside this conservative isolation contract.
+ case "$dest" in "$firewall_guest_zone"|'*') fail 'Unsupported forwarding into guest zone.';; esac
+}
+check_rule() {
+ local section=$1 src dest target enabled port proto src_port field value family types icmp_type members seen_type
+ config_get enabled "$section" enabled 1; [ "$enabled" != 0 ] || return 0
+ config_get src "$section" src; config_get dest "$section" dest; config_get target "$section" target
+ zone_selector "$src"; zone_selector "$dest"
+ case "$target" in DROP|REJECT) return 0;; esac
+ # Preserve the stock WAN IPv6 error/echo forwarding rule. Its wildcard
+ # destination includes guests, but its exclusive WAN origin cannot authorize
+ # guest-to-management forwarding. Never broaden protocol, family or ICMP types.
+ if [ "$src:$dest:$target" = 'wan:*:ACCEPT' ]; then
+  config_get proto "$section" proto; config_get family "$section" family
+  config_get types "$section" icmp_type
+  [ "$proto:$family" = icmp:ipv6 ] && [ -n "$types" ] || fail 'Unsupported WAN guest-access rule.'
+  members=$(cat "$work/firewall/zone-wan" 2>/dev/null) || fail 'Missing WAN ingress zone.'
+  case "$members" in wan|wan6|'wan wan6'|'wan6 wan') ;; *) fail 'WAN ingress zone includes non-WAN networks.';; esac
+  [ ! -e "$work/firewall/extra-wan" ] || fail 'Unsupported WAN zone membership.'
+  case "$types" in *[!a-z[:space:]-]*) fail 'Unsupported WAN ICMPv6 type syntax.';; esac
+  seen_type=0
+  for icmp_type in $types; do
+   seen_type=1
+   case "$icmp_type" in echo-request|echo-reply|destination-unreachable|packet-too-big|time-exceeded|bad-header|unknown-header-type) ;; *) fail 'Unsupported WAN ICMPv6 type.';; esac
+  done
+  [ "$seen_type" = 1 ] || fail 'Missing WAN ICMPv6 types.'
+  for field in extra set_mark set_xmark set_helper helper; do
+   config_get value "$section" "$field"; [ -z "$value" ] || fail 'Unsupported WAN ICMPv6 rule extension.'
+  done
+  return 0
+ fi
+ case "$src:$dest" in "$firewall_guest_zone":*|\*:*|*:"$firewall_guest_zone"|*:\*)
+  # Explicit router DNS/DHCP service exceptions do not authorize forwarding.
+  [ "$src" = "$firewall_guest_zone" ] && [ -z "$dest" ] && [ "$target" = ACCEPT ] || fail 'Unsupported guest firewall rule.'
+  config_get port "$section" dest_port; config_get proto "$section" proto; config_get src_port "$section" src_port
+  case "$port:$proto:$src_port" in 53:udp:|53:tcp:|'53:tcp udp:'|'53:udp tcp:'|67:udp:68|67:udp:) ;; *) fail 'Unsupported guest router-access rule.';; esac
+  for field in extra set_mark set_xmark set_helper helper; do
+   config_get value "$section" "$field"; [ -z "$value" ] || fail 'Unsupported guest rule extension.'
+  done ;;
+ esac
+}
+check_redirect() {
+ local section=$1 src dest enabled
+ config_get enabled "$section" enabled 1; [ "$enabled" != 0 ] || return 0
+ config_get src "$section" src; config_get dest "$section" dest
+ zone_selector "$src"; zone_selector "$dest"
+ case "$src:$dest" in "$firewall_guest_zone":*|\*:*|*:"$firewall_guest_zone"|*:\*|:*) fail 'Unsupported guest redirect.';; esac
+}
+while IFS= read -r section; do
+ network=$(cat "$work/bss/$section/network"); [ "$network" != lan ] || continue
+ firewall_guest_zone=$(cat "$work/firewall/network-$network" 2>/dev/null) || fail 'Missing guest zone.'
+ [ "$(cat "$work/firewall/zone-$firewall_guest_zone")" = "$network" ] && [ ! -e "$work/firewall/extra-$firewall_guest_zone" ] || fail 'Guest zone must exclusively own its guest network.'
+ config_foreach check_forwarding forwarding
+ config_foreach check_rule rule
+ config_foreach check_redirect redirect
+ config_foreach check_include include
+done < "$work/order"
+collect_dhcp() {
+ local section=$1 network ignore start limit
+ config_get network "$section" interface; name_ok "$network" || return 0
+ config_get ignore "$section" ignore 0; [ "$ignore" = 0 ] || return 0
+ config_get start "$section" start; config_get limit "$section" limit
+ case "$start:$limit" in *[!0-9:]*|:*|*:) return 0;; esac
+ [ "$limit" -gt 0 ] || return 0
+ [ ! -e "$work/dhcp/$network" ] || fail 'Ambiguous DHCP ownership.'
+ : > "$work/dhcp/$network"
+}
+config_load dhcp || fail 'Cannot read DHCP UCI.'
+config_foreach collect_dhcp dhcp
+[ "$(cat "$work/net/lan/device" 2>/dev/null)" = br-lan ] && [ "$(cat "$work/net/lan/proto" 2>/dev/null)" = static ] || fail 'Primary network must be static br-lan.'
+json_init; json_add_int schema 1; json_add_string primary_network lan; json_add_int primary_vid 1; json_add_int primary_pcp 0
+json_add_int capacity24 4; json_add_int capacity5 4; json_add_array bsses
+while IFS= read -r section; do
+ for field in band network ssid key encryption isolate hidden; do value=$(cat "$work/bss/$section/$field"); eval "$field=\$value"; done
+ vid=1
+ if [ "$network" = lan ]; then
+  [ ! -e "$work/net/lan/primary-$band" ] || fail 'Only one primary-network client BSS per band is supported.'
+  : > "$work/net/lan/primary-$band"
+ fi
+ if [ "$network" != lan ]; then
+  device=$(cat "$work/net/$network/device" 2>/dev/null) || fail 'Missing guest interface.'
+  case "$device" in br-lan.*) vid=${device#br-lan.};; *) fail 'Guest requires explicit br-lan.VID.';; esac
+  case "$vid" in ''|0*|*[!0-9]*) fail 'Invalid guest VID.';; esac
+  [ "${#vid}" -le 4 ] && [ "$vid" -gt 1 ] && [ "$vid" -le 4094 ] && [ "$vid" != "$quarantine_vid" ] || fail 'Conflicting guest VID.'
+  [ "$(cat "$work/net/$network/proto")" = static ] && [ -s "$work/net/$network/ipaddr" ] && [ -s "$work/net/$network/netmask" ] || fail 'Guest requires existing static L3.'
+  [ "$isolate" = 1 ] && [ -f "$work/dhcp/$network" ] && [ -f "$work/zone/$network" ] || fail 'Guest requires existing isolation, firewall and DHCP.'
+  read -r input forward output_policy < "$work/zone/$network" || :
+  case "$input:$forward:$output_policy" in REJECT:REJECT:ACCEPT|DROP:REJECT:ACCEPT|REJECT:DROP:ACCEPT|DROP:DROP:ACCEPT) ;; *) fail 'Unsupported guest firewall policy.';; esac
+  printf '%s\n' "$vid" > "$work/net/$network/used"
+ fi
+ for old in "$work"/bss/*; do
+  [ "$old" = "$work/bss/$section" ] && continue
+  if [ "$(cat "$old/ssid")" = "$ssid" ]; then
+   [ "$(cat "$old/key")" = "$key" ] || fail 'Cross-band SSID credentials differ.'
+  fi
+ done
+ json_add_object; json_add_string id "$section"; json_add_string ssid "$ssid"; json_add_string network "$network"; json_add_string band "$band"; json_add_string security "$encryption"
+ json_add_int vid "$vid"; json_add_boolean isolate "$isolate"; json_add_boolean hidden "$hidden"; json_close_object
+done < "$work/order"
+json_close_array; json_dump > "$work/policy.json"
+/usr/libexec/ax6000-mesh-plan-networks < "$work/policy.json" > "$work/validation" 2>/dev/null || fail 'Unsupported normalized network policy.'
+json_init; json_add_int schema 1
+for field in backhaul_ssid backhaul_key backhaul_security quarantine_key; do eval 'value=$'"$field"; json_add_string "$field" "$value"; done
+json_add_array keys
+while IFS= read -r section; do json_add_object; json_add_string id "$section"; json_add_string key "$(cat "$work/bss/$section/key")"; json_close_object; done < "$work/order"
+json_close_array; json_dump > "$work/credentials.json"
+json_init; json_add_array links
+for file in "$work"/net/*/used; do
+ [ -f "$file" ] || continue
+ network=${file%/used}; network=${network##*/}; vid=$(cat "$file")
+ json_add_object; json_add_string ifname "br-lan.$vid"; json_add_string network "$network"; json_add_int vid "$vid"; json_close_object
+done
+json_close_array; json_dump > "$work/cpu_guest_links.json"
+rm -rf "$work/firewall" "$work/bss" "$work/net" "$work/zone" "$work/dhcp" "$work/input" "$work/agents" "$work/order" "$work/validation"
+# Caller serializes output creation; never overwrite an existing candidate.
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail 'Output appeared during normalization.'
+mv -T "$work" "$output"

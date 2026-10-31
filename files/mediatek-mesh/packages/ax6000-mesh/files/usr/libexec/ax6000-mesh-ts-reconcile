@@ -1,0 +1,343 @@
+#!/usr/bin/ucode
+// Unhooked foundation: no bridge-filtering activation or lifecycle monitor.
+// The event is evidence of policy reception, never dataplane acknowledgement.
+import { readfile, lstat, popen, open, rename, unlink, mkdir, rmdir } from 'fs';
+
+const LOCK = '/var/run/ax6000-mesh-ts-reconcile.lock';
+const RECEIPT = '/var/run/ax6000-mesh-ts-reconcile.json';
+const TMP = RECEIPT + '.new';
+const APPROVAL = '/etc/ax6000-mesh/ts-dataplane-approved';
+const MAX = 9007199254740991;
+let owned = [], locked = false;
+
+function need(ok, why) { if (!ok) die(why); }
+function integer(n, low, high) { return type(n) == 'int' && n >= low && n <= high; }
+function list(a, cap) { need(type(a) == 'array' && length(a) <= cap, 'Invalid bounded array.'); return a; }
+function mac(s) { return type(s) == 'string' && match(s, /^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$/) && s != '00:00:00:00:00:00'; }
+function uuid(s) { return type(s) == 'string' && match(s, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/); }
+function iface(s) { return type(s) == 'string' && match(s, /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$/); }
+function same(a, b) { return sprintf('%J', a) == sprintf('%J', b); }
+function includes(a, v) { return index(a, v) >= 0; }
+function fields(obj, names) {
+	need(type(obj) == 'object', 'Invalid object.');
+	need(same(sort(keys(obj)), sort(names)), 'Missing or unexpected fields.');
+}
+function private_text(path) {
+	let s = lstat(path);
+	need(s && s.type == 'file' && s.uid == 0 && s.nlink == 1 &&
+	     (s.mode & 077) == 0 && s.size > 0 && s.size <= 65535, 'Private root-owned JSON required.');
+	let f = open(path, 'r'); need(f, 'Cannot read private JSON.');
+	let data = f.read(65536); f.close();
+	let after = lstat(path);
+	need(after && after.inode == s.inode && after.uid == 0 && after.mode == s.mode &&
+	     after.size == s.size && length(data) == s.size, 'Private JSON changed while reading.');
+	return data;
+}
+function private_json(path) {
+	let data = private_text(path);
+	return { raw: data, value: json(data) };
+}
+function command(args) {
+	// Arguments are generated only from validated fixed interface names/integers.
+	let p = popen('timeout 5 ' + args + ' 2>/dev/null', 'r');
+	need(p, 'Cannot execute network command.');
+	let data = p.read(262145), rc = p.close();
+	need(rc == 0 && type(data) == 'string' && length(data) <= 262144, 'Network command failed or exceeded bounds.');
+	return data;
+}
+function inventory() {
+	let links = {}, vlans = {};
+	for (let p in list(json(command('/sbin/ip -j -d link show')), 256)) {
+		need(type(p) == 'object' && iface(p.ifname) && !links[p.ifname] &&
+		     integer(p.ifindex, 1, 2147483647) && type(p.flags) == 'array', 'Invalid link inventory.');
+		links[p.ifname] = p;
+	}
+	for (let p in list(json(command('/usr/sbin/bridge -j vlan show')), 256)) {
+		need(type(p) == 'object' && iface(p.ifname) && !vlans[p.ifname], 'Invalid VLAN inventory.');
+		let v = [], seen = {};
+		for (let e in list(p.vlans, 256)) {
+			need(type(e) == 'object' && integer(e.vlan, 1, 4094) &&
+			     (e.vlanEnd == null || e.vlanEnd == e.vlan) && !seen[e.vlan], 'Ambiguous or ranged VLAN inventory.');
+			let flags = list(e.flags ?? [], 4);
+			for (let flag in flags) need(flag == 'PVID' || flag == 'Egress Untagged', 'Unsupported VLAN flag.');
+			push(v, { vid: e.vlan, pvid: includes(flags, 'PVID'), untagged: includes(flags, 'Egress Untagged') });
+			seen[e.vlan] = true;
+		}
+		vlans[p.ifname] = sort(v, (a,b) => a.vid - b.vid);
+	}
+	return { links: links, vlans: vlans };
+}
+function owner_validate(o) {
+	fields(o, ['schema','boot_id','generation','bridge','management_vid','quarantine_vid','management_ifnames','controller_alid','cpu_guest_links',
+	           'trunk_ifnames','guest_ports','daemons','observation']);
+	need(o.schema == 2 && uuid(o.boot_id) && type(o.generation) == 'string' &&
+	     match(o.generation, /^[a-f0-9]{32}$/) && o.bridge == 'br-lan' &&
+	     integer(o.management_vid,1,4094) && integer(o.quarantine_vid,1,4094) &&
+	     o.quarantine_vid != o.management_vid && mac(o.controller_alid), 'Invalid ownership identity.');
+	let seen = {};
+	need(length(list(o.management_ifnames,32)) > 0 && length(list(o.trunk_ifnames,5)) > 0 &&
+	     length(list(o.guest_ports,4)) > 0, 'Empty ownership inventory.');
+	for (let n in o.management_ifnames) { need(iface(n) && !seen[n], 'Invalid management interface.'); seen[n] = true; }
+	seen = {};
+	for (let n in o.trunk_ifnames) {
+		need(includes(['wan','ra1','rax1','apcli0','apclix0'],n) && !seen[n], 'Invalid trunk ownership.'); seen[n] = true;
+	}
+	let bssids = {};
+	for (let p in o.guest_ports) {
+		fields(p, ['ifname','actual_bssid','vid','enabled']);
+		need(includes(['ra2','ra3','rax2','rax3'],p.ifname) && !seen[p.ifname] &&
+		     !includes(o.management_ifnames,p.ifname) && mac(p.actual_bssid) && !bssids[p.actual_bssid] &&
+		     integer(p.vid,1,4094) && p.vid != o.management_vid && p.vid != o.quarantine_vid && type(p.enabled) == 'bool', 'Invalid guest ownership.');
+		seen[p.ifname] = bssids[p.actual_bssid] = true;
+	}
+	let cpuvids = {}, networks = {};
+	for (let p in list(o.cpu_guest_links,4)) {
+		fields(p,['ifname','network','vid']);
+		need(integer(p.vid,1,4094) && p.vid != o.management_vid && p.vid != o.quarantine_vid &&
+		     p.ifname == 'br-lan.' + p.vid && iface(p.ifname) && !cpuvids[p.vid] &&
+		     type(p.network) == 'string' && match(p.network,/^[A-Za-z_][A-Za-z0-9_]{0,31}$/) &&
+		     !includes(['lan','wan','wan6','loopback'],p.network) && !networks[p.network], 'Invalid controller CPU VLAN declaration.');
+		let used = false; for (let g in o.guest_ports) if (g.vid == p.vid) used = true;
+		need(used,'Controller CPU VID is not an owned guest policy VID.');
+		cpuvids[p.vid] = networks[p.network] = true;
+	}
+	fields(o.daemons, ['mapd','ieee1905']);
+	for (let name in ['mapd','ieee1905']) {
+		fields(o.daemons[name], ['pid','starttime']);
+		need(integer(o.daemons[name].pid,1,2147483647) && integer(o.daemons[name].starttime,1,MAX), 'Invalid daemon identity.');
+	}
+	need(o.daemons.mapd.pid != o.daemons.ieee1905.pid, 'Overlapping daemon identity.');
+	fields(o.observation, ['connection_generation','sequence']);
+	need(integer(o.observation.connection_generation,1,MAX) && integer(o.observation.sequence,1,MAX), 'Invalid observation identity.');
+}
+function isguest(o,n) { for (let p in o.guest_ports) if (p.ifname == n) return true; return false; }
+function cpu_binding(o,state) {
+	let result = {};
+	let config = length(o.cpu_guest_links) ? split(command('/sbin/uci -q -X show network'),'\n') : [];
+	for (let c in o.cpu_guest_links) {
+		let p = state.links[c.ifname], data = p?.linkinfo?.info_data;
+		let parent = p && ((p.link == o.bridge && (p.link_index == null || p.link_index == state.links[o.bridge].ifindex)) ||
+		                   (p.link == null && p.link_index == state.links[o.bridge].ifindex));
+		need(p && p.master == null && p.linkinfo?.info_kind == 'vlan' &&
+		     parent && data?.id === c.vid &&
+		     data.protocol == '802.1Q' && includes(p.flags,'UP'), 'Controller CPU VLAN link does not match its declaration.');
+		need(trim(command('/sbin/uci -q get network.' + c.network)) == 'interface' &&
+		     trim(command('/sbin/uci -q get network.' + c.network + '.proto')) == 'static' &&
+		     trim(command('/sbin/uci -q get network.' + c.network + '.device')) == c.ifname, 'Controller CPU network assignment changed.');
+		// Reject competing interface/alias bindings as well as a wrong declaration.
+		// Only inspect canonical UCI device/ifname tokens; never return this private
+		// configuration (which may contain unrelated WAN credentials) to callers.
+		for (let line in config) {
+			let entry = match(line,/^network\.([A-Za-z0-9_]+)\.(device|ifname|disabled)=(.*)$/);
+			if (!entry) continue;
+			let tokens = split(replace(entry[3],/'/g,''),' ');
+			if (entry[1] == c.network) {
+				if (entry[2] == 'disabled') need(!includes(tokens,'1'),'Controller guest network is disabled.');
+				continue;
+			}
+			if (entry[2] != 'disabled') need(!includes(tokens,c.ifname) && !includes(tokens,'@' + c.network), 'Controller CPU device is assigned to another network.');
+		}
+		result[c.ifname] = { ifindex:p.ifindex,address:p.address,up:true,parent:state.links[o.bridge].ifindex,vid:data.id,network:c.network };
+	}
+	return result;
+}
+function approved(o) {
+	let text = private_text(APPROVAL);
+	need(text == o.generation || text == o.generation + '\n','This exact generation lacks root-owned packet-test approval.');
+}
+function identities(o, state) {
+	let bridge = state.links[o.bridge];
+	need(bridge && bridge.linkinfo?.info_kind == 'bridge', 'Owned bridge missing.');
+	let names = [o.bridge, ...o.management_ifnames, ...o.trunk_ifnames];
+	for (let p in o.guest_ports) push(names,p.ifname);
+	let result = {};
+	for (let n in names) {
+		let p = state.links[n];
+		need(p && (n == o.bridge || p.master == o.bridge || (isguest(o,n) && p.master == null)), 'Owned port has a foreign bridge.');
+		result[n] = { ifindex:p.ifindex, address:p.address };
+		if (!isguest(o,n)) { result[n].up = includes(p.flags,'UP'); result[n].master = p.master ?? null; }
+	}
+	for (let p in o.guest_ports) need(state.links[p.ifname].address == p.actual_bssid, 'Guest BSSID changed.');
+	for (let n,v in cpu_binding(o,state)) result[n] = v;
+	return result;
+}
+function quarantine() {
+	let ok = true;
+	for (let p in owned) {
+		try { command('/sbin/ip link set dev ' + p.ifname + ' down'); }
+		catch (e) { ok = false; }
+	}
+	return ok;
+}
+function guestvids(o) { let vids = []; for (let p in o.guest_ports) if (!includes(vids,p.vid)) push(vids,p.vid); return sort(vids); }
+function baseline(o,s) {
+	let result = {};
+	for (let n in sort(keys(s.vlans))) {
+		if (isguest(o,n)) continue;
+		result[n] = [];
+		for (let v in s.vlans[n]) {
+			if (includes(o.trunk_ifnames,n) && includes(guestvids(o),v.vid)) continue;
+			push(result[n],v);
+		}
+	}
+	return result;
+}
+function management(o,s) {
+	need(s.links[o.bridge].linkinfo?.info_data?.vlan_filtering == 1 && includes(s.links[o.bridge].flags,'UP'),
+	     'Bridge VLAN filtering must already be enabled with management intact.');
+	for (let n in [o.bridge, ...o.management_ifnames]) {
+		let good = false;
+		for (let v in s.vlans[n] ?? []) if (v.vid == o.management_vid && v.pvid && v.untagged) good = true;
+		need(good, 'Explicit untagged management membership missing.');
+	}
+	for (let n,vlans in s.vlans) {
+		for (let v in vlans) need(v.vid != o.quarantine_vid, 'Quarantine VID must have no bridge membership anywhere.');
+		if (!isguest(o,n) && !includes(o.trunk_ifnames,n))
+			for (let v in vlans) {
+				if (!includes(guestvids(o),v.vid)) continue;
+				let cpu = false;
+				for (let c in o.cpu_guest_links) if (n == o.bridge && c.vid == v.vid && !v.pvid && !v.untagged) cpu = true;
+				need(cpu,'Guest VID exists on an unowned port or undeclared CPU VLAN.');
+			}
+	}
+	for (let c in o.cpu_guest_links) {
+		let present = false;
+		for (let v in s.vlans[o.bridge] ?? []) if (v.vid == c.vid && !v.pvid && !v.untagged) present = true;
+		need(present,'Declared controller CPU VID must already exist tagged.');
+	}
+}
+function daemon(d,name) {
+	let stat = readfile('/proc/' + d.pid + '/stat'), comm = readfile('/proc/' + d.pid + '/comm');
+	need(type(stat) == 'string' && comm == name + '\n', 'Owned daemon is absent.');
+	let parts = match(stat, /^[0-9]+ \(.*\) (.*)$/);
+	need(parts && int(split(parts[1],' ')[19]) == d.starttime, 'Daemon process identity changed.');
+}
+function observation(o,path) {
+	let input = private_json(path), v = input.value;
+	fields(v,['schema','boot_id','producer_pid','producer_start_ticks','connection_generation','controller_alid',
+	          'monotonic_ms','sequence','primary_vid','primary_pcp','allowed_vids','fh']);
+	need(v.schema == 2 && v.boot_id == o.boot_id && readfile('/proc/sys/kernel/random/boot_id') == o.boot_id + '\n', 'Boot identity changed.');
+	daemon(o.daemons.mapd,'mapd'); daemon(o.daemons.ieee1905,'p1905_managerd');
+	need(v.producer_pid === o.daemons.mapd.pid && v.producer_start_ticks === o.daemons.mapd.starttime &&
+	     v.connection_generation === o.observation.connection_generation && v.sequence === o.observation.sequence &&
+	     v.controller_alid === o.controller_alid && v.primary_vid === o.management_vid && integer(v.primary_pcp,0,7), 'Policy lifecycle or controller mismatch.');
+	let uptime = readfile('/proc/uptime'), now = type(uptime) == 'string' ? +split(uptime,' ')[0] * 1000 : -1;
+	// Policy is event-driven, not a heartbeat. A live, unchanged file can stay
+	// valid for this exact daemon/connection lifetime; the caller must monitor
+	// disappearance or replacement and re-run verify/quarantine on lifecycle loss.
+	need(integer(v.monotonic_ms,0,MAX) && now >= v.monotonic_ms, 'Observation is from the future.');
+	let allowed = {}, seen = {}, found = {}, vids = guestvids(o);
+	for (let vid in list(v.allowed_vids,48)) {
+		need(integer(vid,1,4094) && !allowed[vid] && (vid == o.management_vid || vid == o.quarantine_vid || includes(vids,vid)), 'Unowned or duplicate allowed VID.');
+		allowed[vid] = true;
+	}
+	for (let fh in list(v.fh,48)) {
+		fields(fh,['bssid','vid']);
+		need(mac(fh.bssid) && !seen[fh.bssid] && integer(fh.vid,1,4094) &&
+		     (fh.vid == o.management_vid || allowed[fh.vid]), 'Invalid fronthaul observation.');
+		seen[fh.bssid] = true;
+		// management() independently proves this placeholder VID has no CPU,
+		// trunk, guest or unrelated-port membership. It never becomes forwarding.
+		if (fh.vid == o.management_vid || fh.vid == o.quarantine_vid) continue;
+		let known = false;
+		for (let p in o.guest_ports) if (p.actual_bssid == fh.bssid && p.vid == fh.vid) { known = true; found[p.ifname] = true; }
+		need(known, 'Unowned guest BSSID in observation.');
+	}
+	for (let p in o.guest_ports) need(found[p.ifname], 'Owned guest BSSID missing from observation.');
+	return input.raw;
+}
+function signature(o) {
+	// Desired UP/DOWN may change only after a successful disabled staging pass.
+	let guest = []; for (let p in o.guest_ports) push(guest,{ifname:p.ifname,actual_bssid:p.actual_bssid,vid:p.vid});
+	return {generation:o.generation,boot_id:o.boot_id,bridge:o.bridge,management_vid:o.management_vid,quarantine_vid:o.quarantine_vid,
+	        cpu_guest_links:o.cpu_guest_links,
+	        management_ifnames:o.management_ifnames,trunk_ifnames:o.trunk_ifnames,guest_ports:guest,
+	        controller_alid:o.controller_alid,daemons:o.daemons,observation:o.observation};
+}
+function save(receipt) {
+	need(!lstat(TMP), 'Receipt temporary path exists.');
+	let data = sprintf('%J\n',receipt), f = open(TMP,'wx',0600);
+	need(f,'Cannot create private receipt.');
+	let n = f.write(data), flushed = f.flush(), closed = f.close();
+	need(n == length(data) && flushed && closed && rename(TMP,RECEIPT),'Cannot publish private receipt.');
+}
+function proof(o,s,r,requested) {
+	need(same(identities(o,s),r.identities) && same(baseline(o,s),r.baseline), 'Interface or management/unowned VLAN state changed.');
+	management(o,s);
+	if (requested) for (let p in o.guest_ports) if (p.enabled) { approved(o); break; }
+	for (let p in o.guest_ports) {
+		need(same(s.vlans[p.ifname], [{vid:p.vid,pvid:true,untagged:true}]), 'Guest PVID readback failed.');
+		need(includes(s.links[p.ifname].flags,'UP') == (requested && p.enabled), 'Guest link readback failed.');
+	}
+	for (let n in o.trunk_ifnames) {
+		let actual = []; for (let v in s.vlans[n] ?? []) if (includes(guestvids(o),v.vid)) push(actual,v);
+		let expected = []; for (let vid in guestvids(o)) push(expected,{vid:vid,pvid:false,untagged:false});
+		need(same(actual,expected),'Tagged trunk readback failed.');
+	}
+}
+
+let rc = 1;
+try {
+	need((ARGV[0] == 'prepare' && length(ARGV) == 2) ||
+	     (includes(['apply','verify'],ARGV[0]) && length(ARGV) == 3),'Expected prepare OWNERSHIP or apply/verify OWNERSHIP OBSERVATION.');
+	let input = private_json(ARGV[1]), o = input.value;
+	owner_validate(o);
+	need(mkdir(LOCK,0700),'Another reconciliation is active or lock is unavailable.'); locked = true;
+	let state = inventory();
+	// A failed CPU/trunk proof must still stop every guest whose current local
+	// BSSID and bridge ownership remain verified. Never touch a reused stranger.
+	for (let p in o.guest_ports) {
+		let live = state.links[p.ifname];
+		if (live && live.address == p.actual_bssid && (live.master == null || live.master == o.bridge)) push(owned,p);
+	}
+	let identity = identities(o,state);
+	if (ARGV[0] == 'prepare') {
+		need(quarantine(),'Cannot quarantine every guest.');
+		for (let p in owned) if (state.links[p.ifname].master == o.bridge) command('/sbin/ip link set dev ' + p.ifname + ' nomaster');
+		let after = inventory();
+		need(same(identities(o,after),identity) && same(baseline(o,state),baseline(o,after)),'Inventory changed during quarantine.');
+		for (let p in owned) need(!includes(after.links[p.ifname].flags,'UP') && after.links[p.ifname].master == null,'Guest quarantine readback failed.');
+		save({schema:2,ownership:signature(o),identities:identity,baseline:baseline(o,after),staged:false});
+	}
+	else {
+		// Even an absent/changed receipt or observation cannot retain guest UP.
+		if (ARGV[0] == 'apply') need(quarantine(),'Cannot quarantine every guest.');
+		let receipt = private_json(RECEIPT).value;
+		need(receipt.schema == 2 && same(receipt.ownership,signature(o)) && same(receipt.identities,identity),'Prepared ownership does not match.');
+		need(same(receipt.baseline,baseline(o,state)),'Unowned VLAN state changed.');
+		management(o,state);
+		for (let p in owned) need(state.links[p.ifname].master == o.bridge,'Guest must be staged on the exact filtered bridge while DOWN.');
+		let raw = observation(o,ARGV[2]);
+		if (ARGV[0] == 'apply') {
+			let wants_up = false; for (let p in owned) if (p.enabled) wants_up = true;
+			need(!wants_up || receipt.staged === true,'A verified disabled staging pass is required before enabling guests.');
+			if (wants_up) approved(o);
+			for (let p in owned) {
+				for (let v in state.vlans[p.ifname] ?? []) command('/usr/sbin/bridge vlan del dev ' + p.ifname + ' vid ' + v.vid);
+				command('/usr/sbin/bridge vlan add dev ' + p.ifname + ' vid ' + p.vid + ' pvid untagged');
+			}
+			for (let n in o.trunk_ifnames) for (let vid in guestvids(o)) {
+				for (let v in state.vlans[n] ?? []) if (v.vid == vid) command('/usr/sbin/bridge vlan del dev ' + n + ' vid ' + vid);
+				command('/usr/sbin/bridge vlan add dev ' + n + ' vid ' + vid);
+			}
+			proof(o,inventory(),receipt,false);
+			need(private_json(ARGV[1]).raw == input.raw && observation(o,ARGV[2]) == raw,'Policy changed during staging.');
+			for (let p in owned) if (p.enabled) command('/sbin/ip link set dev ' + p.ifname + ' up');
+			proof(o,inventory(),receipt,true);
+			need(observation(o,ARGV[2]) == raw && private_json(ARGV[1]).raw == input.raw,'Policy changed during enable.');
+			receipt.staged = true; save(receipt);
+		}
+		else {
+			proof(o,state,receipt,true);
+			need(observation(o,ARGV[2]) == raw && private_json(ARGV[1]).raw == input.raw,'Policy changed during verification.');
+		}
+	}
+	print('{"ok":true}\n'); rc = 0;
+}
+catch (e) {
+	if (length(owned)) quarantine();
+	// Never print input values, raw kernel output, or exception details.
+	warn('Mesh VLAN reconciliation failed; guest forwarding is not authorized.\n');
+}
+if (locked) { unlink(TMP); rmdir(LOCK); }
+exit(rc);

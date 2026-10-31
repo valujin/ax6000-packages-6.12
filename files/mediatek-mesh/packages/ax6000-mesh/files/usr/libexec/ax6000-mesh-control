@@ -21,12 +21,26 @@ phase() {
 
 preflight() {
   . /usr/share/ax6000-mesh/vendor.sh
-  board=$(cat /tmp/sysinfo/board_name 2>/dev/null || :)
-  case "$board" in xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod) ;; *) fail 'This device is not a supported Redmi AX6000.' ;; esac
+  # Missing policy is an existing WPA2 installation, never an implicit migration.
+  bh_security=$(get ax6000_mesh.main.backhaul_security); bh_security=${bh_security:-psk2}
+  mesh_backhaul_auth_code "$bh_security" >/dev/null || fail 'Invalid backhaul security.'
+  case "$bh_security" in sae) bh_driver_auth=WPA3PSK; bh_pmf=2 ;; psk2) bh_driver_auth=WPA2PSK; bh_pmf=0 ;; esac
+  /usr/libexec/ax6000-mesh-band validate || fail 'Invalid wireless backhaul band.'
+  /usr/libexec/ax6000-mesh-hardware supported || fail 'This device is not supported by Mesh.'
   abi_ok || fail 'This firmware does not contain the matching MediaTek mesh driver ABI.'
   for binary in wapp wappctrl mapd p1905_managerd mapd_cli; do command -v "$binary" >/dev/null || fail "Required daemon $binary is missing."; done
   [ -d /sys/class/net/br-lan ] || fail 'The br-lan bridge is required.'
-  [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null || :)" = 0 ] || fail 'Mesh requires a LAN bridge without VLAN filtering.'
+  managed_ts=$(get ax6000_mesh.main.linux_ts)
+  if [ "$managed_ts" = 1 ]; then
+    [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null || :)" = 1 ] || fail 'Managed Mesh requires prepared VLAN filtering.'
+    case "$(get ax6000_mesh.main.role)" in
+      controller) /usr/libexec/ax6000-mesh-controller-sync validate-current || fail 'Controller managed generation is not prepared.' ;;
+      agent) /usr/libexec/ax6000-mesh-agent-sync validate-current || fail 'Agent managed slots are not prepared.' ;;
+      *) fail 'Invalid managed role.' ;;
+    esac
+  else
+    [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null || :)" = 0 ] || fail 'Mesh requires a LAN bridge without VLAN filtering.'
+  fi
   [ -d /sys/class/net/ra0 ] && [ -d /sys/class/net/rax0 ] || fail 'Both MediaTek AP radios must be active.'
   role=$(get ax6000_mesh.main.role); backhaul=$(get ax6000_mesh.main.backhaul)
   case "$role" in controller|agent) ;; *) fail 'Invalid mesh role.' ;; esac
@@ -44,6 +58,11 @@ preflight() {
     [ "$mode" != sta ] || fail 'An existing wireless uplink must be removed before enabling Mesh.'
     [ "$mode" = ap ] || continue
     [ "$(get wireless.$ap.disabled)" != 1 ] || fail 'Remove disabled extra AP sections before enabling Mesh.'
+    if [ "$managed_ts" = 1 ] && [ -z "$(get wireless.$ap.network)" ] && [ "$(get wireless.$ap.map_bss_type)" = 32 ]; then
+      # Exact private staged UCI was validated above; guests stay unbridged until
+      # native TS observation and Linux reconciliation verify their identities.
+      continue
+    fi
     [ "$(get wireless.$ap.network)" = lan ] || fail 'Client APs must belong only to LAN.'
     dev=$(get wireless.$ap.device)
     case "$dev" in ''|*[!A-Za-z0-9_]*) fail 'Invalid wireless device name.' ;; esac
@@ -51,13 +70,13 @@ preflight() {
     [ "$(get wireless.$ap.ieee80211r)" != 1 ] || fail 'Disable separate 802.11r settings before enabling Mesh.'
     band=$(get wireless.$dev.band)
     case "$band" in
-      2g) [ -z "$ap1" ] || fail 'Use one client AP on each radio.'; ap1=$ap; dev1=$dev ;;
-      5g) [ -z "$ap2" ] || fail 'Use one client AP on each radio.'; ap2=$ap; dev2=$dev ;;
+      2g) [ "$dev" = "$(/usr/libexec/ax6000-mesh-hardware radio0)" ] || fail 'Wireless radio does not match this board.'; [ -z "$ap1" ] || fail 'Use one client AP on each radio.'; ap1=$ap; dev1=$dev ;;
+      5g) [ "$dev" = "$(/usr/libexec/ax6000-mesh-hardware radio1)" ] || fail 'Wireless radio does not match this board.'; [ -z "$ap2" ] || fail 'Use one client AP on each radio.'; ap2=$ap; dev2=$dev ;;
       *) fail 'Expected 2.4 GHz and 5 GHz MediaTek radios.' ;;
     esac
     ap_ssid=$(get wireless.$ap.ssid); ap_key=$(get wireless.$ap.key); ap_enc=$(get wireless.$ap.encryption)
     if [ "$role" = controller ]; then
-      [ "$(get wireless.$ap.hidden)" != 1 ] || fail 'Client SSIDs must be visible for Mesh pairing.'
+      [ "$managed_ts" = 1 ] || [ "$(get wireless.$ap.hidden)" != 1 ] || fail 'Client SSIDs must be visible for Mesh pairing.'
       mesh_validate_credentials "$ap_ssid" "$ap_key" "$ap_enc" || fail 'Client SSID or Wi-Fi password is invalid.'
       mesh_auth_code "$ap_enc" >/dev/null || fail 'Client APs must use WPA2-PSK or WPA2/WPA3 mixed mode.'
     fi
@@ -69,6 +88,14 @@ preflight() {
 }
 
 prepare() {
+  prepare_committed=0
+  if [ "$(cat "$state/phase" 2>/dev/null || :)" = committed ]; then
+    # Verify ownership before changing any runtime or vendor configuration.
+    /usr/libexec/ax6000-mesh-transaction adopt-radio-tuning || fail 'Mesh restart requires unchanged configuration or verified MU-MIMO tuning.'
+    /usr/libexec/ax6000-mesh-transaction check || fail 'Mesh configuration changed outside enrollment; restore those edits before restarting Mesh.'
+    [ -f /etc/map/1905d.cfg ] && [ ! -L /etc/map/1905d.cfg ] || fail 'Committed 1905 configuration is missing.'
+    prepare_committed=1
+  fi
   if [ ! -d /sys/module/mapfilter ]; then : > "$state/owns-mapfilter"; fi
   modprobe mapfilter >/dev/null 2>&1 || fail 'The MediaTek mapfilter kernel module is unavailable.'
   # The vendor driver keeps MAP R2/R3 and traffic separation as chip-wide flags.
@@ -86,20 +113,29 @@ prepare() {
   while IFS='=' read -r name value; do
     case "$name" in BhProfile[0-9]Valid|BhProfile[0-9]Ssid|BhProfile[0-9]AuthMode|BhProfile[0-9]EncrypType|BhProfile[0-9]WpaPsk|BhProfile[0-9]RaID) datconf -f /etc/map/mapd_cfg set "$name" "$value" >/dev/null 2>&1 || fail 'Cannot restore mesh backhaul profile.' ;; esac
   done < /etc/map/mapd_user.cfg
+  # Reapply after each template/profile merge, including committed restarts.
+  # This selects the uplink band without changing either fronthaul radio.
+  if [ "$role:$backhaul" = agent:wireless ]; then
+    /usr/libexec/ax6000-mesh-band apply || fail 'Cannot prepare wireless backhaul band priorities.'
+  fi
   if [ "$role" = controller ]; then device_role=1; agent=0; root=1; else device_role=2; agent=1; root=0; fi
   lan_interfaces="lan2 lan3 lan4"
   [ "$role:$backhaul" != agent:wired ] || lan_interfaces="$lan_interfaces wan"
   bss_priority="ra0;ra1;rax0;rax1;apcli0;apclix0"
+  [ "$managed_ts" != 1 ] || bss_priority="ra0;ra1;ra2;ra3;rax0;rax1;rax2;rax3;apcli0;apclix0"
   for entry in "bss_config_priority=$bss_priority" "DeviceRole=$device_role" "lan_interface=$lan_interfaces" 'wan_interface=' 'DhcpCtl=0' 'ChPlanningEnable=0' 'ChPlanningEnableR2=0' 'NetworkOptimizationEnabled=0' 'AutoBHSwitching=0'; do
     datconf -f /etc/map/mapd_cfg set "${entry%%=*}" "${entry#*=}" >/dev/null 2>&1 || fail 'Cannot prepare mesh settings.'
   done
-  bh_type=eth
-  if [ "$role" = agent ] && [ "$backhaul" = wireless ]; then bh_type=wifi; fi
-  mac=$(cat /sys/class/net/br-lan/address)
-  case "$mac" in ??\:??\:??\:??\:??\:??) ;; *) fail 'Invalid LAN bridge address.' ;; esac
-  # Keep vendor defaults: missing gtk_rekey_interval creates a zero-delay rekey loop.
-  sed -E '/^(map_controller_alid|map_agent_alid|map_agent|map_root|bh_type|br_inf|lan|map_ver|bss_config_priority)=/d' "$template/1905d.cfg" > /etc/map/1905d.cfg
-  cat >> /etc/map/1905d.cfg <<END
+  # 1905 persists its selected local ALID during enrollment. Replacing it
+  # with br-lan on restart changes the sealed identity and blocks rollback.
+  if [ "$prepare_committed" != 1 ]; then
+    bh_type=eth
+    if [ "$role" = agent ] && [ "$backhaul" = wireless ]; then bh_type=wifi; fi
+    mac=$(cat /sys/class/net/br-lan/address)
+    case "$mac" in ??\:??\:??\:??\:??\:??) ;; *) fail 'Invalid LAN bridge address.' ;; esac
+    # Keep vendor defaults: missing gtk_rekey_interval creates a zero-delay rekey loop.
+    sed -E '/^(map_controller_alid|map_agent_alid|map_agent|map_root|bh_type|br_inf|lan|map_ver|bss_config_priority)=/d' "$template/1905d.cfg" > /etc/map/1905d.cfg
+    cat >> /etc/map/1905d.cfg <<END
 map_controller_alid=$mac
 map_agent_alid=$mac
 map_agent=$agent
@@ -112,7 +148,8 @@ lan=lan4
 map_ver=R2
 bss_config_priority=$bss_priority
 END
-  [ "$role:$backhaul" != agent:wired ] || printf 'lan=wan\n' >> /etc/map/1905d.cfg
+    [ "$role:$backhaul" != agent:wired ] || printf 'lan=wan\n' >> /etc/map/1905d.cfg
+  fi
   read -r bh_ssid < "$state/backhaul-ssid"
   read -r bh_key < "$state/backhaul-key"
   if [ "$role" = agent ]; then
@@ -123,7 +160,7 @@ END
   if [ "$(cat "$state/phase" 2>/dev/null || :)" = committed ]; then
     [ -f /etc/map/wts_bss_info_config ] && [ ! -L /etc/map/wts_bss_info_config ] || fail 'Committed Mesh profile is missing.'
   else
-    mesh_write_bss /etc/map/wts_bss_info_config "$ssid24" "$key24" "$enc24" "$ssid5" "$key5" "$enc5" "$bh_ssid" "$bh_key" || fail 'Cannot prepare client and backhaul profiles.'
+    mesh_write_bss /etc/map/wts_bss_info_config "$ssid24" "$key24" "$enc24" "$ssid5" "$key5" "$enc5" "$bh_ssid" "$bh_key" "$bh_security" || fail 'Cannot prepare client and backhaul profiles.'
   fi
   cp "$template/ethernet_cfg.txt" /etc/ethernet_cfg.txt
   # Native 1905 DSA reads interface names; VLAN IDs alone do not identify LAN.
@@ -311,8 +348,8 @@ pair_mesh() {
 
 apply_mesh() {
   [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Mesh is already enabled; disable it before changing its role.'
-  phase preparing
   preflight
+  phase preparing
   for binary in wapp mapd p1905_managerd; do ! pidof "$binary" >/dev/null || fail "A $binary process is already running."; done
   /usr/libexec/ax6000-mesh-transaction begin "$role" "$backhaul" || fail 'Could not save a complete recovery snapshot.'
   success=0
@@ -349,7 +386,8 @@ apply_mesh() {
     uci -q set "wireless.$section.network=lan"
     uci -q set "wireless.$section.ssid=$bh_ssid"
     uci -q set "wireless.$section.key=$bh_key"
-    uci -q set "wireless.$section.encryption=psk2"
+    uci -q set "wireless.$section.encryption=$bh_security"
+    uci -q set "wireless.$section.ieee80211w=$bh_pmf"
     uci -q set "wireless.$section.hidden=1"
     # Driver A4 backhaul must not reflect multicast frames to its ingress.
     uci -q set "wireless.$section.multicast_to_unicast=0"
@@ -371,7 +409,7 @@ apply_mesh() {
     # Seed both new BSS slots securely before its first ownership handover.
     for radio in ra0 rax0 ra1 rax1; do
       case "$radio" in *0) mesh_seed_ssid=AX6000-joining; mesh_seed_auth=WPA2PSKWPA3PSK; mesh_seed_hidden=0 ;;
-        *) mesh_seed_ssid=$bh_ssid; mesh_seed_auth=WPA2PSK; mesh_seed_hidden=1 ;; esac
+        *) mesh_seed_ssid=$bh_ssid; mesh_seed_auth=$bh_driver_auth; mesh_seed_hidden=1 ;; esac
       wifi_config_save "$radio" SSID "$mesh_seed_ssid"
       wifi_config_save "$radio" WPAPSK "$bh_key"
       wifi_config_save "$radio" AuthMode "$mesh_seed_auth"
@@ -438,14 +476,22 @@ case "${1:-}" in
 esac
 case "${1:-}" in
  configure)
-  [ "$#" -eq 3 ] || fail 'Expected a role and backhaul.'
+  [ "$#" -ge 3 ] && [ "$#" -le 5 ] || fail 'Expected role, backhaul, and optional security and band.'
   case "$2" in controller|agent) ;; *) fail 'Invalid mesh role.' ;; esac
   case "$3" in wired|wireless) ;; *) fail 'Invalid backhaul.' ;; esac
+  configure_security=$(get ax6000_mesh.main.backhaul_security); configure_security=${configure_security:-psk2}
+  configure_band=$(uci -q get ax6000_mesh.main.backhaul_band 2>/dev/null) || configure_band=auto
+  configure_security=${4-$configure_security}; configure_band=${5-$configure_band}
+  case "$configure_security" in sae|psk2) ;; *) fail 'Invalid backhaul security.' ;; esac
+  case "$configure_band" in auto|5g|2g) ;; *) fail 'Invalid wireless backhaul band.' ;; esac
   [ "$(get ax6000_mesh.main.enabled)" != 1 ] || fail 'Disable mesh before changing its role or backhaul.'
   if [ "$(cat "$state/phase" 2>/dev/null || :)" = pending ] && /usr/libexec/ax6000-mesh-transaction present; then fail 'Restore the previous settings before configuring Mesh.'; fi
   uci -q set ax6000_mesh.main=mesh
   uci -q set "ax6000_mesh.main.role=$2"
   uci -q set "ax6000_mesh.main.backhaul=$3"
+  # Legacy callers preserve the saved policy, including absent legacy fields.
+  [ "$#" -lt 4 ] || uci -q set "ax6000_mesh.main.backhaul_security=$4"
+  [ "$#" -lt 5 ] || uci -q set "ax6000_mesh.main.backhaul_band=$5"
   uci -q commit ax6000_mesh
   ;;
  apply) apply_mesh ;;

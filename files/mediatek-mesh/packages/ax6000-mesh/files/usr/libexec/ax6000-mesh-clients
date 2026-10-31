@@ -1,0 +1,37 @@
+#!/usr/bin/ucode
+import { popen } from 'fs';
+import { connect } from 'ubus';
+import { normalize } from '/usr/share/ax6000-mesh/clients.uc';
+
+let result;
+try {
+	// Fixed command and bounded output; neither filenames nor arguments come from RPC.
+	let pipe = popen('timeout 3 mapd_cli /tmp/mapd_ctrl get mesh_clients 2>/dev/null', 'r');
+	if (!pipe) die('Mesh client service is unavailable.');
+	let data = pipe.read(65537), status = pipe.close();
+	if (status != 0 || type(data) != 'string' || length(data) > 65535)
+		die('Mesh client service returned an incomplete response.');
+	let bus = connect(null, 1);
+	if (!bus) die('Address information is unavailable.');
+	let leases = bus.call('luci-rpc', 'getDHCPLeases', { family: 4 });
+	if (type(leases) != 'object') { bus.disconnect(); die('DHCP information is unavailable.'); }
+	let hints;
+	try { hints = bus.call('luci-rpc', 'getHostHints', {}); } catch (e) { hints = {}; }
+	let local_stations = [];
+	// Fixed managed AP names, with optional iwinfo enrichment. Missing PHY data
+	// stays unknown; association ownership still comes from the snapshot.
+	for (let iface in ['ra0', 'rax0', 'ra1', 'rax1']) {
+		let info;
+		try { info = bus.call('iwinfo', 'assoclist', { device: iface }); }
+		catch (e) { continue; }
+		if (type(info?.results) == 'array' && length(info.results) <= 1024)
+			for (let entry in info.results) push(local_stations, entry);
+	}
+	bus.disconnect();
+	result = normalize(json(data), leases, hints, local_stations);
+}
+catch (e) {
+	// Never echo daemon output or exception text, which may contain untrusted data.
+	result = { ok: false, error: 'Mesh client information is unavailable.', nodes: [], clients: [] };
+}
+print(sprintf('%J\n', result));

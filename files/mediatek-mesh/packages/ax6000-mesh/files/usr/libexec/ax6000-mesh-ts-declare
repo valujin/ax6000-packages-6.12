@@ -1,0 +1,32 @@
+#!/usr/bin/ucode
+// Turn native policy and a separately owned transport contract into a declaration.
+import { readfile, lstat, open } from 'fs';
+function need(ok, why) { if (!ok) die(why + '\n'); }
+function load(path) {
+ let s = lstat(path);
+ need(s && s.type == 'file' && s.uid == 0 && s.nlink == 1 && !(s.mode & 077) && s.size <= 65535, 'Private root-owned JSON required.');
+ return json(readfile(path));
+}
+need(length(ARGV) == 4, 'Expected transport, observation, CPU links and new declaration.');
+let transport = load(ARGV[0]), obs = load(ARGV[1]), cpu = load(ARGV[2]);
+need(transport.schema == 2 && transport.bridge == 'br-lan' && type(transport.guest_ports) == 'array' && !length(transport.guest_ports) && type(transport.cpu_guest_links) == 'array' && !length(transport.cpu_guest_links), 'Transport authority must not embed dynamic guest ownership.');
+need(obs.schema == 2 && obs.primary_vid == transport.management_vid && obs.controller_alid == transport.controller_alid && type(obs.fh) == 'array', 'Native policy does not match transport authority.');
+need(type(cpu.links) == 'array', 'CPU guest links required.');
+let ports = [], seen = {};
+for (let row in obs.fh) {
+ need(type(row.bssid) == 'string' && type(row.vid) == 'int', 'Invalid native BSS policy.');
+ need(!seen[row.bssid], 'Duplicate native BSSID.'); seen[row.bssid] = true;
+ if (row.vid == transport.management_vid || row.vid == transport.quarantine_vid) continue;
+ let matched = null;
+ for (let name in ['ra2', 'ra3', 'rax2', 'rax3']) {
+  let address = readfile('/sys/class/net/' + name + '/address');
+  if (address && trim(address) == row.bssid) matched = name;
+ }
+ need(matched, 'Native guest policy cannot be bound to the verified local slot pool.');
+ push(ports, { ifname: matched, actual_bssid: row.bssid, vid: row.vid, enabled: false });
+}
+need(length(ports) > 0 && length(ports) <= 4, 'No bounded local guest policy available.');
+transport.guest_ports = ports; transport.cpu_guest_links = cpu.links;
+need(!lstat(ARGV[3]), 'Declaration output already exists.');
+let f = open(ARGV[3], 'w', 0600); need(f, 'Cannot write declaration.');
+f.write(sprintf('%J\n', transport)); f.close();

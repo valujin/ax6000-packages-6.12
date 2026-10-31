@@ -1,0 +1,134 @@
+--- a/feeds/luci/modules/luci-mod-network/root/usr/share/rpcd/acl.d/luci-mod-network.json
++++ b/feeds/luci/modules/luci-mod-network/root/usr/share/rpcd/acl.d/luci-mod-network.json
+@@ -1,86 +1,87 @@
+ {
+ 	"luci-mod-network-config": {
+ 		"description": "Grant access to network configuration",
+ 		"read": {
+ 			"cgi-io": [ "exec" ],
+ 			"file": {
+ 				"/etc/iproute2/rt_tables": [ "read" ],
+ 				"/proc/sys/net/ipv6/conf/*/mtu": [ "read" ],
+ 				"/proc/sys/net/ipv6/conf/*/hop_limit": [ "read" ],
+ 				"/usr/libexec/luci-peeraddr": [ "exec" ],
+ 				"/proc/sys/net/ipv[46]/conf/*": [ "read" ],
+ 				"/sys/class/net/*/brport/*": [ "read" ]
+ 			},
+ 			"ubus": {
++				"ax6000.mesh": [ "clients" ],
+ 				"file": [ "exec" ],
+ 				"iwinfo": [ "assoclist", "countrylist", "freqlist", "txpowerlist" ],
+ 				"luci": [ "getSwconfigFeatures", "getSwconfigPortState" ]
+ 			},
+-			"uci": [ "dhcp", "firewall", "network", "wireless", "system" ]
++			"uci": [ "dhcp", "firewall", "network", "wireless", "system", "ax6000_mesh" ]
+ 		},
+ 		"write": {
+ 			"cgi-io": [ "exec" ],
+ 			"file": {
+ 				"/sbin/ifup": [ "exec" ],
+ 				"/sbin/ifdown": [ "exec" ],
+ 				"/sbin/wifi": [ "exec" ]
+ 			},
+ 			"ubus": {
+ 				"file": [ "exec" ],
+ 				"hostapd.*": [ "del_client" ],
+ 				"iwinfo": [ "scan" ]
+ 			},
+ 			"uci": [ "dhcp", "firewall", "network", "wireless" ]
+ 		}
+ 	},
+ 
+ 	"luci-mod-network-dns": {
+ 		"description": "Grant access to DNS configuration",
+ 		"read": {
+ 			"ubus": {
+ 				"luci-rpc": [ "getHostHints" ]
+ 			},
+ 			"uci": [ "dhcp" ]
+ 		},
+ 		"write": {
+ 			"uci": [ "dhcp" ]
+ 		}
+ 	},
+ 
+ 	"luci-mod-network-dhcp": {
+ 		"description": "Grant access to DHCP configuration",
+ 		"read": {
+ 			"ubus": {
+ 				"luci-rpc": [ "getDHCPLeases", "getDUIDHints", "getHostHints", "getNetworkDevices" ],
+ 				"fingerprint": [ "fingerprint" ],
+ 				"service": [ "list" ]
+ 			},
+ 			"uci": [ "dhcp" ]
+ 		},
+ 		"write": {
+ 			"uci": [ "dhcp" ]
+ 		}
+ 	},
+ 
+ 	"luci-mod-network-diagnostics": {
+ 		"description": "Grant access to network diagnostic tools",
+ 		"read": {
+ 			"file": {
+ 				"/bin/ping": [ "exec" ],
+ 				"/bin/ping6": [ "exec", "list" ],
+ 				"/bin/traceroute": [ "exec" ],
+ 				"/bin/traceroute6": [ "exec", "list" ],
+ 				"/usr/bin/nslookup": [ "exec" ],
+ 				"/usr/bin/ping": [ "exec" ],
+ 				"/usr/bin/ping6": [ "exec", "list" ],
+ 				"/usr/bin/traceroute": [ "exec" ],
+ 				"/usr/bin/traceroute6": [ "exec", "list" ],
+ 				"/usr/bin/arp-scan": [ "exec", "list" ]
+ 			},
+ 			"ubus": {
+ 				"file": [ "exec", "stat" ]
+ 			},
+ 			"uci": [ "luci" ]
+ 		}
+ 	}
+ }
+--- a/feeds/luci/modules/luci-mod-network/Makefile
++++ b/feeds/luci/modules/luci-mod-network/Makefile
+@@ -1,17 +1,20 @@
+ #
+ # Copyright (C) 2008-2014 The LuCI Team <luci@lists.subsignal.org>
+ #
+ # This is free software, licensed under the Apache License, Version 2.0 .
+ #
+ 
+ include $(TOPDIR)/rules.mk
+ 
+ LUCI_TITLE:=LuCI Network Administration
+ LUCI_DEPENDS:=+luci-base +rpcd-mod-iwinfo +luci-lib-uqr
+ 
++PKG_VERSION:=26.249.28459~d6167ea
++PKG_RELEASE:=2
++
+ PKG_LICENSE:=Apache-2.0
+ 
+ include ../../luci.mk
+ 
+ # call BuildPackage - OpenWrt buildroot signature
+ 
+diff --git a/feeds/luci/modules/luci-mod-network/root/etc/uci-defaults/95-ax6000-mesh-wireless-vendor b/feeds/luci/modules/luci-mod-network/root/etc/uci-defaults/95-ax6000-mesh-wireless-vendor
+new file mode 100644
+--- /dev/null
++++ b/feeds/luci/modules/luci-mod-network/root/etc/uci-defaults/95-ax6000-mesh-wireless-vendor
+@@ -0,0 +1,15 @@
++#!/bin/sh
++# Reapply the installed vendor implementation after a core package update.
++mesh_vendor=/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js
++mesh_active=/www/luci-static/resources/view/network/wireless.js
++[ -e "$mesh_vendor" ] || { [ ! -L "$mesh_vendor" ] && exit 0; exit 1; }
++[ -f "$mesh_vendor" ] && [ ! -L "$mesh_vendor" ] || exit 1
++[ "$(readlink -f "$mesh_vendor")" = "$mesh_vendor" ] || exit 1
++[ "$(stat -c %u:%g:%a "$mesh_vendor")" = 0:0:644 ] || exit 1
++mesh_directory=${mesh_active%/*}
++[ -d "$mesh_directory" ] && [ "$(readlink -f "$mesh_directory")" = "$mesh_directory" ] || exit 1
++[ "$(stat -c %u "$mesh_directory")" = 0 ] && [ ! -L "$mesh_active" ] || exit 1
++mesh_temporary=$(mktemp "$mesh_directory/.wireless-mtk.XXXXXX") || exit 1
++trap 'rm -f "$mesh_temporary"' EXIT HUP INT TERM
++cp -p "$mesh_vendor" "$mesh_temporary" && mv -f "$mesh_temporary" "$mesh_active" || exit 1
++exit 0

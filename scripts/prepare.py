@@ -346,11 +346,14 @@ $(eval $(call BuildPackage,tailscale))
 def apply_overrides(lock, sdk, profile):
     """Copy a pinned recipe, never rewrite the feed or global Go compiler."""
     asu_policy = validate_package_hooks(profile)
+    # The Mesh vendor UI is authenticated as a layer over the DB country UI.
+    if profile.get('mediatek_mesh') and profile.get('vendor_country_db') is True:
+        optional_package_module('vendor_country').apply_vendor_country_patch(sdk)
     if profile.get('mediatek_mesh'):
         optional_package_module('mediatek_mesh').configure(profile, sdk, native=(sdk / '.git').exists())
     if 'pbr_source' in profile or 'pbr' in lock:
         pbr_source_module().apply(profile, lock, sdk)
-    if profile.get('vendor_country_db') is True:
+    if profile.get('vendor_country_db') is True and not profile.get('mediatek_mesh'):
         optional_package_module('vendor_country').apply_vendor_country_patch(sdk)
     if asu_policy is not None:
         optional_package_module('asu_client').apply(profile, sdk)

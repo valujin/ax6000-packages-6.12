@@ -1,0 +1,133 @@
+#!/usr/bin/ucode
+// Management-only bridge transition. No capability or guest forwarding proof.
+import { lstat, open, popen } from 'fs';
+function need(ok, why) { if (!ok) die(why + '\n'); }
+function same(a,b) { return sprintf('%J',a) == sprintf('%J',b); }
+function has(a,b) { return index(a,b) >= 0; }
+function list(a,max) { need(type(a) == 'array' && length(a) <= max,'Invalid bounded inventory.'); return a; }
+function iface(n) { return type(n) == 'string' && match(n,/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$/); }
+function load(path) {
+ let s=lstat(path);
+ need(s && s.type == 'file' && s.uid == 0 && s.nlink == 1 && !(s.mode & 077) && s.size > 0 && s.size <= 262144,'Private root-owned input required.');
+ let f=open(path,'r'); need(f,'Cannot open input.'); let data=f.read(262145); f.close();
+ need(length(data) == s.size,'Input changed while reading.'); return json(data);
+}
+function command(args) {
+ let f=popen('timeout 3 ' + args + ' 2>/dev/null','r'); need(f,'Cannot run bridge command.');
+ let data=f.read(262145), rc=f.close(); need(rc == 0 && length(data) <= 262144,'Bridge command failed.'); return data;
+}
+function snapshot() {
+ let links={},vlans={};
+ for(let row in list(json(command('/sbin/ip -j -d link show')),256)) {
+  need(iface(row.ifname) && !links[row.ifname] && type(row.ifindex)=='int','Invalid link inventory.'); links[row.ifname]=row;
+ }
+ for(let row in list(json(command('/usr/sbin/bridge -j vlan show')),256)) {
+  need(iface(row.ifname) && !vlans[row.ifname],'Invalid VLAN inventory.'); let seen={},rows=[];
+  for(let v in list(row.vlans,256)) {
+   need(type(v.vlan)=='int' && v.vlan>=1 && v.vlan<=4094 && (v.vlanEnd==null || v.vlanEnd==v.vlan) && !seen[v.vlan],'Ambiguous VLAN inventory.');
+   let flags=sort(list(v.flags ?? [],2));
+   for(let flag in flags) need(has(['PVID','Egress Untagged'],flag),'Unsupported VLAN flag.');
+   push(rows,{vlan:v.vlan,flags:flags});seen[v.vlan]=true;
+  }
+  vlans[row.ifname]=sort(rows,(a,b)=>a.vlan-b.vlan);
+ }
+ return {links:links,vlans:vlans};
+}
+function authority(t) {
+ need(t.schema===2 && t.bridge=='br-lan' && t.management_vid===1 && type(t.quarantine_vid)=='int' && t.quarantine_vid>1 && t.quarantine_vid<=4094,'Unsupported management transport.');
+ need(type(t.controller_alid)=='string' && match(t.controller_alid,/^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$/) && t.controller_alid!='00:00:00:00:00:00','Invalid controller identity.');
+ need(!length(list(t.guest_ports,0)) && !length(list(t.cpu_guest_links,0)),'Transport embeds dynamic guest ownership.');
+ let seen={};need(length(list(t.management_ifnames,32)) && length(list(t.trunk_ifnames,5)),'Empty transport ownership.');
+ for(let n in t.management_ifnames) { need(iface(n) && n!='br-lan' && !seen[n] && !has(['ra2','ra3','rax2','rax3'],n),'Invalid management ownership.');seen[n]=true; }
+ seen={};for(let n in t.trunk_ifnames) { need(has(['wan','ra1','rax1','apcli0','apclix0'],n) && !seen[n],'Invalid trunk ownership.');seen[n]=true; }
+}
+function inspect(t,s,recovery) {
+ authority(t);
+ let b=s.links['br-lan'], d=b?.linkinfo?.info_data;
+ need(b?.linkinfo?.info_kind=='bridge' && has(b.flags,'UP') && has([0,1],d?.vlan_filtering) && has([0,1],d?.vlan_default_pvid),'Unsupported bridge mode.');
+ let allowed=[...t.management_ifnames,...t.trunk_ifnames], members=[];
+ // A filter-off interval is allowed only with no live or attached guest VIF.
+ for(let n in ['ra2','ra3','rax2','rax3']) {
+  let p=s.links[n];need(!p || (!has(p.flags,'UP') && p.master==null),'Guest must be down and unbridged before bridge transition.');
+ }
+ for(let n,p in s.links) if(p.master=='br-lan') { need(has(allowed,n),'Unknown bridge member.');push(members,n); }
+ for(let n in t.management_ifnames) need(has(members,n) || (recovery && has(['ra0','rax0','ra1','rax1','apcli0','apclix0'],n) && !s.links[n]),'Management member is absent.');
+ for(let n in t.trunk_ifnames) need(has(members,n) || (recovery && n!='wan' && !s.links[n]),'Backhaul trunk is absent.');
+ for(let n,rows in s.vlans) for(let v in rows) need(v.vlan!=t.quarantine_vid,'Quarantine VID is already forwarding.');
+ let ids={};for(let n in ['br-lan',...sort(members)]) { let p=s.links[n];ids[n]={ifindex:p.ifindex,address:p.address,master:p.master ?? null}; }
+ return ids;
+}
+function membership(t,s,recovery) {
+ for(let n in ['br-lan',...t.management_ifnames,...t.trunk_ifnames]) {
+  if(recovery && !s.links[n] && has(['ra0','rax0','ra1','rax1','apcli0','apclix0'],n)) continue;
+  need(s.links[n] && (n=='br-lan' || s.links[n].master=='br-lan'),'Management port is absent or foreign.');
+  let found=false;for(let v in s.vlans[n] ?? []) if(v.vlan==1 && same(v.flags,['Egress Untagged','PVID'])) found=true;
+  need(found,'Explicit untagged management membership is absent.');
+ }
+}
+function unchanged(p,s) { need(same(inspect(p.transport,s,p.recovery),p.identities),'Bridge identity changed.'); }
+function mode(s) { return s.links['br-lan'].linkinfo.info_data; }
+function write(path,obj) {
+ need(!lstat(path),'Plan already exists.');let f=open(path,'w',0600);need(f,'Cannot create bridge plan.');
+ need(f.write(sprintf('%J\n',obj))>0 && f.close(),'Cannot persist bridge plan.');
+}
+function restore(p) {
+ let s=snapshot(), target=p.rollback_vlans ?? p.vlans;unchanged(p,s);
+ // Guests were independently required DOWN/unbridged before this filter change.
+ command('/sbin/ip link set dev br-lan type bridge vlan_filtering 0');
+ command('/sbin/ip link set dev br-lan type bridge vlan_default_pvid ' + p.before.default_pvid);
+ let current=snapshot();
+ for(let n in keys(p.identities)) {
+  // The bounded transition only removes/replaces management VID 1.
+  let old=target[n] ?? [],v=null;for(let row in old) if(row.vlan==1) v=row;
+  if(v) command('/usr/sbin/bridge vlan add dev '+n+' vid 1'+(has(v.flags,'PVID')?' pvid':'')+(has(v.flags,'Egress Untagged')?' untagged':'')+(n=='br-lan'?' self':' master'));
+  else { let present=false;for(let row in current.vlans[n] ?? []) if(row.vlan==1) present=true;
+   if(present) command('/usr/sbin/bridge vlan del dev '+n+' vid 1'+(n=='br-lan'?' self':' master')); }
+ }
+ if(p.before.filtering) command('/sbin/ip link set dev br-lan type bridge vlan_filtering 1');
+ s=snapshot();unchanged(p,s);let d=mode(s);
+ need(d.vlan_filtering==p.before.filtering && d.vlan_default_pvid==p.before.default_pvid,'Bridge rollback readback failed.');
+ for(let n in keys(p.identities)) need(same(s.vlans[n] ?? [],target[n] ?? []),'VLAN rollback readback failed.');
+}
+need(length(ARGV)>=2,'Expected bridge operation and input.');let op=ARGV[0];
+if(op=='health') {
+ need(length(ARGV)==2,'Expected transport.');let t=load(ARGV[1]),s=snapshot();authority(t);
+ let d=mode(s);need(d?.vlan_filtering==1 && d?.vlan_default_pvid==0,'Managed bridge mode changed.');
+ // Read-only health is not permission to activate guest forwarding.
+ for(let n,p in s.links) if(p.master=='br-lan') need(has([...t.management_ifnames,...t.trunk_ifnames,'ra2','ra3','rax2','rax3'],n),'Unknown bridge member.');
+ membership(t,s,true);
+} else if(op=='plan' || op=='plan-recover') {
+ need(length(ARGV)==3,'Expected transport and new plan.');let t=load(ARGV[1]),s=snapshot(),recovery=op=='plan-recover',ids=inspect(t,s,recovery),d=mode(s);
+ // Existing management membership must already be explicit, never guessed.
+ // An unfiltered bridge carries working management without VLAN membership.
+ // Re-enrollment after disable can retain default_pvid0 and no VID1 entries.
+ if(!recovery && d.vlan_filtering==1) membership(t,s,false);
+ // Netifd restores bridge-self VLANs as tagged-only. Recovery authority already
+ // names management VID1: a failed repair must still restore untagged CPU/LAN
+ // reachability, rather than restore that broken tagged-only preimage.
+ let rollback={};
+ for(let n,rows in s.vlans) rollback[n]=rows;
+ if(recovery) for(let n in keys(ids)) {
+  let rows=[];for(let row in s.vlans[n] ?? []) if(row.vlan!=1) push(rows,row);
+  push(rows,{vlan:1,flags:['Egress Untagged','PVID']});rollback[n]=sort(rows,(a,b)=>a.vlan-b.vlan);
+ }
+ write(ARGV[2],{schema:1,recovery:recovery,transport:t,identities:ids,before:{filtering:d.vlan_filtering,default_pvid:d.vlan_default_pvid},vlans:s.vlans,rollback_vlans:rollback});
+} else {
+ need(length(ARGV)==2 && has(['apply','verify','rollback'],op),'Invalid bridge operation.');let p=load(ARGV[1]);
+ need(p.schema===1 && type(p.identities)=='object' && type(p.vlans)=='object' && has([0,1],p.before?.filtering) && has([0,1],p.before?.default_pvid),'Invalid bridge plan.');
+ let s=snapshot();unchanged(p,s);
+ if(op=='rollback') restore(p);
+ else if(op=='verify') { membership(p.transport,s,p.recovery);need(mode(s).vlan_filtering==1 && mode(s).vlan_default_pvid==0,'Managed bridge mode changed.'); }
+ else {
+  need(mode(s).vlan_filtering==p.before.filtering && mode(s).vlan_default_pvid==p.before.default_pvid,'Bridge mode changed before transition.');
+  for(let n in keys(p.identities)) need(same(s.vlans[n] ?? [],p.vlans[n] ?? []),'VLAN state changed before transition.');
+  try {
+   command('/sbin/ip link set dev br-lan type bridge vlan_filtering 0');
+   command('/sbin/ip link set dev br-lan type bridge vlan_default_pvid 0');
+   for(let n in keys(p.identities)) command('/usr/sbin/bridge vlan add dev '+n+' vid 1 pvid untagged'+(n=='br-lan'?' self':' master'));
+   s=snapshot();unchanged(p,s);membership(p.transport,s,p.recovery);need(mode(s).vlan_default_pvid==0,'Default PVID command did not apply.');
+   command('/sbin/ip link set dev br-lan type bridge vlan_filtering 1');
+   s=snapshot();unchanged(p,s);membership(p.transport,s,p.recovery);need(mode(s).vlan_filtering==1 && mode(s).vlan_default_pvid==0,'Filtering command did not apply.');
+  } catch(e) { try { restore(p); } catch(recovery) { die('Bridge transition and rollback failed; management requires recovery.\n'); } die('Bridge transition failed; original mode restored.\n'); }
+ }
+}

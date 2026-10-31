@@ -1,0 +1,141 @@
+#!/bin/sh
+# Bind externally validated release evidence to the existing native LAN domain.
+# This does not test packets, change bridge membership, or assert peer authentication.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+state=/etc/ax6000-mesh
+proof=/etc/ax6000-mesh-dataplane-capability.json
+lib=/usr/libexec
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+get() { uci -q get "$1" 2>/dev/null || :; }
+private() {
+ [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] && [ "$(stat -c %h "$1")" = 1 ] || return 1
+ local mode; mode=$(stat -c %a "$1"); [ "$((0$mode & 077))" = 0 ]
+}
+hash() { local value; value=$(sha256sum "$1"); printf '%s' "${value%% *}"; }
+mac() { case "$1" in [0-9a-f][02468ace]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) [ "$1" != 00:00:00:00:00:00 ];; *) return 1;; esac; }
+load() {
+ [ "$(wc -c < "$1")" -le 65536 ] && [ "$(wc -c < "$1")" = "$(tr -d '\000' < "$1" | wc -c)" ] || fail 'Invalid JSON size or NUL.'
+ ! grep -qiF '\u0000' "$1" || fail 'Invalid JSON NUL.'
+ jshn -R "$1" >/dev/null 2>&1 && json_load_file "$1" 2>/dev/null || fail 'Invalid JSON.'
+}
+type_is() { local actual; json_get_type actual "$1"; [ "$actual" = "$2" ]; }
+[ "$#" = 1 ] && [ "$1" = bootstrap ] || fail 'Expected bootstrap.'
+"$lib/ax6000-mesh-ts-capability" || fail 'Validated release dataplane proof is required.'
+[ "$(id -u)" = 0 ] || fail 'Root is required.'
+[ "$(cat "$state/phase" 2>/dev/null)" = committed ] && [ "$(get ax6000_mesh.main.enabled)" = 1 ] || fail 'Committed native enrollment is required.'
+role=$(get ax6000_mesh.main.role); case "$role" in controller|agent) ;; *) fail 'Unsupported native role.';; esac
+[ "$(cat "$state/role" 2>/dev/null)" = "$role" ] && [ "$(cat "$state/backhaul" 2>/dev/null)" = wireless ] && [ "$(get ax6000_mesh.main.backhaul)" = wireless ] || fail 'Matching wireless native enrollment is required.'
+# Release attestations are public evidence; only derived local contracts carry
+# private enrollment authority. Match the capability validator's write policy.
+[ -f "$proof" ] && [ ! -L "$proof" ] && [ "$(stat -c %u "$proof")" = 0 ] && [ "$(stat -c %h "$proof")" = 1 ] || fail 'Root-owned regular release proof required.'
+proof_mode=$(stat -c %a "$proof"); [ "$((0$proof_mode & 022))" = 0 ] || fail 'Release proof must not be writable by other users.'
+work=$(mktemp -d "$state/.ts-provision.XXXXXX") || fail 'Cannot stage transport binding.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cp "$proof" "$work/proof"; proof_hash=$(hash "$work/proof")
+load "$work/proof"; type_is quarantine_vid int || fail 'Release proof must reserve a quarantine VID.'
+json_get_var quarantine_vid quarantine_vid
+case "$quarantine_vid" in ''|*[!0-9]*) fail 'Invalid quarantine VID.';; esac
+[ "$quarantine_vid" -ge 2 ] && [ "$quarantine_vid" -le 4094 ] || fail 'Invalid quarantine VID.'
+# A previously bound private authority survives reboot and radio recovery. This
+# permits only management foundation provisioning; guest activation still needs
+# a fresh native observation matching the bound controller and current boot.
+if [ -e "$state/ts-provision-binding.json" ] || [ -L "$state/ts-provision-binding.json" ]; then
+ for bound in ts-provision-binding.json ts-transport.json ts-capabilities.json; do
+  private "$state/$bound" || fail 'Incomplete private provisioning binding.'
+ done
+ load "$state/ts-provision-binding.json"
+ type_is schema int || fail 'Invalid provisioning binding.'
+ json_get_vars schema release_proof_sha256 transport_sha256 capacities_sha256 controller_alid local_alid
+ json_get_var bound_role role
+ [ "$schema" = 1 ] && [ "$bound_role" = "$role" ] && mac "$controller_alid" && mac "$local_alid" || fail 'Provisioning binding enrollment differs.'
+ [ "$release_proof_sha256" = "$proof_hash" ] && [ "$transport_sha256" = "$(hash "$state/ts-transport.json")" ] && [ "$capacities_sha256" = "$(hash "$state/ts-capabilities.json")" ] || fail 'Provisioning binding hashes differ.'
+ if [ "$role" = controller ]; then [ "$controller_alid" = "$local_alid" ] || fail 'Bound controller identity differs.'
+ else [ "$controller_alid" != "$local_alid" ] || fail 'Bound agent identity differs.'; fi
+ bound_controller=$controller_alid
+ load "$state/ts-transport.json"; json_get_var controller_alid controller_alid; json_get_var bound_vid quarantine_vid
+ [ "$controller_alid" = "$bound_controller" ] && [ "$bound_vid" = "$quarantine_vid" ] || fail 'Bound transport identity differs.'
+ [ "$(hash "$proof")" = "$proof_hash" ] && "$lib/ax6000-mesh-ts-capability" || fail 'Release proof changed during binding validation.'
+ exit 0
+fi
+"$lib/ax6000-mesh-vendor" status > "$work/status" || fail 'Native topology unavailable.'
+load "$work/status"
+type_is topology_valid boolean && type_is connected boolean || fail 'Invalid native topology status.'
+json_get_vars topology_valid connected controller_alid local_alid
+[ "$topology_valid:$connected" = 1:1 ] && mac "$controller_alid" && mac "$local_alid" || fail 'Connected genuine native topology required.'
+if [ "$role" = controller ]; then [ "$controller_alid" = "$local_alid" ] || fail 'Controller identity mismatch.'
+else [ "$controller_alid" != "$local_alid" ] || fail 'Agent identity mismatch.'; fi
+controller=$controller_alid; local_identity=$local_alid
+: > "$work/members"; : > "$work/trunks"
+for path in /sys/class/net/br-lan/brif/*; do
+ [ -e "$path" ] || continue
+ member=${path##*/}
+ case "$member" in lan2|lan3|lan4|ra0|rax0|ra1|rax1|apcli0|apclix0) ;; *) fail 'Unknown existing LAN member.';; esac
+ printf '%s\n' "$member" >> "$work/members"
+ case "$role:$member" in controller:ra1|controller:rax1|agent:apcli0|agent:apclix0) printf '%s\n' "$member" >> "$work/trunks";; esac
+done
+[ -s "$work/members" ] && [ -s "$work/trunks" ] || fail 'Existing native wireless trunk is required.'
+# Check both kernel VLAN ranges and UCI network device references before binding.
+bridge -j vlan show > "$work/vlans" || fail 'Cannot inspect current VLAN inventory.'
+{ printf '{"inventory":'; cat "$work/vlans"; printf '}\n'; } > "$work/vlans-object"
+load "$work/vlans-object"; type_is inventory array || fail 'Invalid VLAN inventory.'; json_select inventory; json_get_keys entries
+for entry in $entries; do
+ type_is "$entry" object || fail 'Invalid VLAN inventory.'
+ json_select "$entry"; type_is vlans array || fail 'Invalid VLAN inventory.'
+ json_select vlans; json_get_keys rows
+ for row in $rows; do
+  json_select "$row"; type_is vlan int || fail 'Invalid VLAN VID.'
+  json_get_var start vlan; json_get_var end vlanEnd "$start"
+  case "$start:$end" in *[!0-9:]*) fail 'Invalid VLAN range.';; esac
+  [ "$quarantine_vid" -lt "$start" ] || [ "$quarantine_vid" -gt "$end" ] || fail 'Reserved quarantine VID is already used.'
+  json_select ..
+ done
+ json_select ..; json_select ..
+done
+uci -q -X show network > "$work/network" || fail 'Cannot inspect network configuration.'
+if grep -Eq "(^|[^A-Za-z0-9_.])br-lan\\.$quarantine_vid([^0-9]|$)" "$work/network"; then fail 'Reserved quarantine network already exists.'; fi
+json_init; json_add_int schema 2; json_add_string bridge br-lan; json_add_int management_vid 1; json_add_int quarantine_vid "$quarantine_vid"
+json_add_string controller_alid "$controller"
+json_add_array management_ifnames; while IFS= read -r member; do json_add_string '' "$member"; done < "$work/members"; json_close_array
+json_add_array trunk_ifnames; while IFS= read -r member; do json_add_string '' "$member"; done < "$work/trunks"; json_close_array
+json_add_array guest_ports; json_close_array; json_add_array cpu_guest_links; json_close_array; json_dump > "$work/transport"
+if [ -e "$state/ts-transport.json" ] || [ -L "$state/ts-transport.json" ]; then
+ private "$state/ts-transport.json" || fail 'Existing transport must be private.'
+ load "$state/ts-transport.json"; json_get_keys fields
+ for field in $fields; do case "$field" in schema|bridge|management_vid|quarantine_vid|controller_alid|management_ifnames|trunk_ifnames|guest_ports|cpu_guest_links) ;; *) fail 'Unexpected transport field.';; esac; done
+ for field in schema management_vid quarantine_vid; do type_is "$field" int || fail 'Invalid existing transport fields.'; done
+ json_get_vars schema bridge management_vid controller_alid
+ json_get_var existing_vid quarantine_vid
+ [ "$schema:$bridge:$management_vid:$existing_vid:$controller_alid" = "2:br-lan:1:$quarantine_vid:$controller" ] || fail 'Existing transport identity differs.'
+ for pair in management_ifnames:members trunk_ifnames:trunks guest_ports:empty cpu_guest_links:empty; do
+  field=${pair%:*}; inventory=${pair#*:}; type_is "$field" array || fail 'Invalid transport inventory.'
+  json_select "$field"; json_get_keys keys; : > "$work/existing"
+  for key in $keys; do type_is "$key" string || fail 'Invalid transport member.'; json_get_var member "$key"; printf '%s\n' "$member" >> "$work/existing"; done
+  json_select ..
+  if [ "$inventory" = empty ]; then [ ! -s "$work/existing" ] || fail 'Transport embeds dynamic ownership.'
+  else sort "$work/existing" > "$work/existing.sorted"; sort "$work/$inventory" > "$work/inventory.sorted"; cmp -s "$work/existing.sorted" "$work/inventory.sorted" || fail 'Existing transport inventory differs.'; fi
+ done
+fi
+json_init; json_add_int schema 1; json_add_boolean confirmed 1; json_add_int capacity24 4; json_add_int capacity5 4; json_add_array enrolled_agents; json_close_array; json_dump > "$work/capacity"
+if [ -e "$state/ts-capabilities.json" ] || [ -L "$state/ts-capabilities.json" ]; then
+ private "$state/ts-capabilities.json" || fail 'Existing capacity must be private.'
+ load "$state/ts-capabilities.json"
+ for field in schema capacity24 capacity5; do type_is "$field" int || fail 'Invalid existing capacity.'; done
+ type_is confirmed boolean && type_is enrolled_agents array || fail 'Invalid existing capacity.'
+ json_get_vars schema confirmed capacity24 capacity5
+ [ "$schema:$confirmed:$capacity24:$capacity5" = 1:1:4:4 ] || fail 'Existing capacity differs.'
+ json_select enrolled_agents; json_get_keys keys
+ for key in $keys; do type_is "$key" string || fail 'Invalid enrolled identity.'; json_get_var member "$key"; mac "$member" || fail 'Invalid enrolled identity.'; done
+fi
+boot=$(cat /proc/sys/kernel/random/boot_id)
+case "$boot" in ????????-????-????-????-????????????) ;; *) fail 'Invalid boot identity.';; esac
+# Recheck proof after discovery; binding is bookkeeping, never packet-test evidence.
+[ "$(hash "$proof")" = "$proof_hash" ] && "$lib/ax6000-mesh-ts-capability" || fail 'Release proof changed during bootstrap.'
+[ -e "$state/ts-transport.json" ] || mv "$work/transport" "$state/ts-transport.json"
+[ -e "$state/ts-capabilities.json" ] || mv "$work/capacity" "$state/ts-capabilities.json"
+json_init; json_add_int schema 1; json_add_string release_proof_sha256 "$proof_hash"; json_add_string boot_id "$boot"
+json_add_string controller_alid "$controller"; json_add_string local_alid "$local_identity"; json_add_string role "$role"
+json_add_string transport_sha256 "$(hash "$state/ts-transport.json")"; json_add_string capacities_sha256 "$(hash "$state/ts-capabilities.json")"
+json_dump > "$work/binding"; mv "$work/binding" "$state/ts-provision-binding.json"

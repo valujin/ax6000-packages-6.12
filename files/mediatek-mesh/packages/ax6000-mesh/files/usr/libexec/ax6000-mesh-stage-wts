@@ -1,0 +1,104 @@
+#!/bin/sh
+# Stage a dense WTS candidate only. Never publishes, renews, or attaches ports.
+# POLICY STATE PRIVATE_CREDENTIALS QUARANTINE_VID NEW_OUTPUT
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+. /usr/share/ax6000-mesh/vendor.sh
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+field_type() { local actual; json_get_type actual "$1"; [ "$actual" = "$2" ]; }
+[ "$#" -eq 5 ] || fail 'Expected policy, ledger, private credentials, quarantine VID and new output.'
+policy=$1; ledger=$2; credentials=$3; quarantine_vid=$4; output=$5
+case "$quarantine_vid" in ''|*[!0-9]*) fail 'Invalid quarantine VID.' ;; esac
+[ "${#quarantine_vid}" -le 4 ] && [ "$quarantine_vid" -ge 1 ] && [ "$quarantine_vid" -le 4094 ] || fail 'Invalid quarantine VID.'
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail 'Staging output already exists.'
+[ -f "$credentials" ] && [ ! -L "$credentials" ] || fail 'Missing private credentials.'
+mode=$(stat -c %a "$credentials")
+[ "$(stat -c %u "$credentials")" = "$(id -u)" ] && [ "$((0$mode & 077))" = 0 ] || fail 'Credentials must be private and owned by the caller.'
+work=$(mktemp -d /tmp/ax6000-wts.XXXXXX) || fail 'Cannot stage WTS.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+# Retain the exact policy used by validation for subsequent capacity reads.
+head -c 65537 "$policy" > "$work/policy" || fail 'Cannot read policy.'
+policy=$work/policy
+/usr/libexec/ax6000-mesh-allocate-slots "$policy" "$ledger" > "$work/plan" || fail 'Stable allocation failed.'
+# Snapshot secrets once, bounded, and reject shell-unrepresentable NULs.
+head -c 65537 "$credentials" > "$work/credentials"
+size=$(wc -c < "$work/credentials"); clean=$(tr -d '\000' < "$work/credentials" | wc -c)
+[ "$size" -le 65536 ] && [ "$size" -eq "$clean" ] || fail 'Invalid credentials size or NUL.'
+if grep -qiF '\u0000' "$work/credentials"; then fail 'Invalid credentials NUL.'; fi
+jshn -R "$work/credentials" >/dev/null 2>&1 || fail 'Invalid credentials JSON.'
+json_load_file "$work/credentials" 2>/dev/null || fail 'Invalid credentials JSON.'
+json_get_keys fields
+for field in $fields; do case "$field" in schema|backhaul_ssid|backhaul_key|backhaul_security|quarantine_key|keys) ;; *) fail 'Unexpected credentials field.' ;; esac; done
+field_type schema int && field_type keys array || fail 'Invalid credentials schema.'
+json_get_var schema schema; [ "$schema" = 1 ] || fail 'Unsupported credentials schema.'
+for field in backhaul_ssid backhaul_key backhaul_security quarantine_key; do field_type "$field" string || fail 'Missing credentials field.'; done
+json_get_vars backhaul_ssid backhaul_key backhaul_security quarantine_key
+mesh_validate_credentials "$backhaul_ssid" "$backhaul_key" psk2 && mesh_validate_credentials Quarantine "$quarantine_key" psk2 || fail 'Invalid private credentials.'
+case "$backhaul_ssid" in AX6000-quarantine-*) fail 'Backhaul SSID uses the quarantine namespace.' ;; esac
+backhaul_auth=$(mesh_backhaul_auth_code "$backhaul_security") || fail 'Unsupported backhaul security.'
+json_select keys; json_get_keys entries
+count=0
+for entry in $entries; do
+  count=$((count + 1)); [ "$count" -le 6 ] || fail 'Too many credential entries.'
+  field_type "$entry" object || fail 'Invalid credential entry.'
+  json_select "$entry"; json_get_keys fields
+  for field in $fields; do case "$field" in id|key) ;; *) fail 'Unexpected credential entry field.' ;; esac; done
+  field_type id string && field_type key string || fail 'Invalid credential entry fields.'
+  json_get_vars id key
+  case "$id" in ''|*[!A-Za-z0-9_]*) fail 'Invalid credential identity.' ;; esac
+  [ "${#id}" -le 32 ] && [ ! -e "$work/key-$id" ] || fail 'Invalid or duplicate credential identity.'
+  mesh_validate_credentials Key "$key" psk2 || fail 'Invalid client key.'
+  printf '%s' "$key" > "$work/key-$id"
+  json_select ..
+done
+json_load "$(cat "$work/plan")"; json_get_vars primary_vid primary_pcp primary_network
+[ "$quarantine_vid" -ne "$primary_vid" ] || fail 'Quarantine VID conflicts with primary.'
+json_select bsses; json_get_keys entries
+for entry in $entries; do
+  json_select "$entry"; json_get_vars id ssid band slot vid network security hidden isolate
+  [ "$vid" -ne "$quarantine_vid" ] || fail 'Quarantine VID conflicts with a client network.'
+  [ "$network" = "$primary_network" ] || [ "$isolate" = 1 ] || fail 'Guest client isolation is required.'
+  [ "$ssid" != "$backhaul_ssid" ] || fail 'Client SSID conflicts with backhaul.'
+  case "$ssid" in AX6000-quarantine-*) fail 'Client SSID uses the quarantine namespace.' ;; esac
+  [ -f "$work/key-$id" ] || fail 'Missing client key.'
+  key=$(cat "$work/key-$id"); : > "$work/used-$id"
+  mkdir "$work/bss-$band-$slot"
+  auth=$(mesh_auth_code "$security") || fail 'Unsupported client security.'
+  for field in ssid key vid hidden auth; do eval 'value=$'"$field"; printf '%s' "$value" > "$work/bss-$band-$slot/$field"; done
+  json_select ..
+done
+for file in "$work"/key-*; do
+  [ -e "$file" ] || continue
+  id=${file##*/key-}; [ -e "$work/used-$id" ] || fail 'Credential identity is not active.'
+done
+[ -d "$work/bss-2g-0" ] && [ -d "$work/bss-5g-0" ] || fail 'Both primary bands are required.'
+# Dense four-slot profiles require four actual advertised BSS slots on every node.
+json_load "$(cat "$policy")"; json_get_vars capacity24 capacity5
+[ "$capacity24:$capacity5" = 4:4 ] || fail 'Dense WTS requires verified four-slot capacity on both bands.'
+escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/ /\\ /g'; }
+printf '#ucc_bss_info\n' > "$work/wts"
+index=1
+for opclass in 8x 11x 12x; do
+  band=5g; [ "$opclass" != 8x ] || band=2g
+  for slot in 0 1 2 3; do
+    bh=0; fh=1; hidden=Y; suffix='N/A N/A'
+    if [ "$slot" = 1 ]; then
+      ssid=$backhaul_ssid; key=$backhaul_key; auth=$backhaul_auth; vid=$primary_vid; bh=1; fh=0
+    elif [ -d "$work/bss-$band-$slot" ]; then
+      for field in ssid key auth vid hidden; do value=$(cat "$work/bss-$band-$slot/$field"); eval "$field=\$value"; done
+      if [ "$hidden" = 1 ]; then hidden=Y; else hidden=N; fi
+    else
+      ssid="AX6000-quarantine-$band-$slot"; key=$quarantine_key; auth=0x0020; vid=$quarantine_vid
+    fi
+    [ "$slot" != 0 ] || suffix="pvid $primary_pcp"
+    escaped_ssid=$(escape "$ssid"); escaped_key=$(escape "$key")
+    printf '%s,ff:ff:ff:ff:ff:ff %s %s %s 0x0008 %s %s %s hidden-%s %s %s\n' "$index" "$opclass" "$escaped_ssid" "$auth" "$escaped_key" "$bh" "$fh" "$hidden" "$vid" "$suffix" >> "$work/wts"
+    index=$((index + 1))
+  done
+done
+# Candidate path only; caller owns transaction publication into /etc/map.
+# noclobber prevents racing another staging operation's candidate.
+(set -C; cat "$work/wts" > "$output") 2>/dev/null || fail 'Cannot write new WTS candidate.'
+chmod 600 "$output" || fail 'Cannot protect WTS candidate.'

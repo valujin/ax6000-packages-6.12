@@ -1,0 +1,690 @@
+--- a/src/multi_ap.c
++++ b/src/multi_ap.c
+@@ -45,6 +45,7 @@
+ #include <pthread.h>
+ #include <regex.h>
+ #include <sys/ioctl.h>
++#include "linux_ts_managed.h"
+ #include "p1905_database.h"
+ #include "multi_ap.h"
+ #include "cmdu_message.h"
+@@ -1781,13 +1782,26 @@
+ 	tlv_temp_buf += length;
+ 
+ #ifdef MAP_R2
+-	if (ctx->MAP_Cer) {
++	if (ctx->MAP_Cer || mesh_linux_ts_managed()) {
+ 		/* append default 8021Q setting tlv and ts policy tlv */
+ 		length = append_default_8021Q_tlv(ctx, tlv_temp_buf, al_mac,ctx->bss_config_num, ctx->bss_config);
++		if (!length && mesh_linux_ts_managed() && !ctx->map_policy.tpolicy.SSID_num &&
++		    ctx->map_policy.setting.primary_vid == VLAN_N_VID) {
++			/* Explicit managed clear; absence alone leaves non-cert agents stale. */
++			tlv_temp_buf[0] = DEFAULT_8021Q_SETTING_TYPE;
++			tlv_temp_buf[1] = 0; tlv_temp_buf[2] = 3;
++			tlv_temp_buf[3] = 0x0f; tlv_temp_buf[4] = 0xff;
++			tlv_temp_buf[5] = 0; length = 6;
++		}
+ 		total_tlvs_length += length;
+ 		tlv_temp_buf += length;
+ 
+ 		length = append_traffic_separation_tlv(ctx, tlv_temp_buf, al_mac,ctx->bss_config_num, ctx->bss_config);
++		if (!length && mesh_linux_ts_managed() && !ctx->map_policy.tpolicy.SSID_num) {
++			tlv_temp_buf[0] = TRAFFIC_SEPARATION_POLICY_TYPE;
++			tlv_temp_buf[1] = 0; tlv_temp_buf[2] = 1; tlv_temp_buf[3] = 0;
++			length = 4;
++		}
+ 		total_tlvs_length += length;
+ 		tlv_temp_buf += length;
+ 	}
+@@ -4517,6 +4531,8 @@
+ 		}
+ 		/* Zero or one Traffic Separation Policy TLV */
+ 		else if (*type == TRAFFIC_SEPARATION_POLICY_TYPE) {
++			if (integrity & (1 << 4))
++				goto fail;
+ 			ret = parse_traffic_separation_policy_tlv(&tpolicy, len, val);
+ 			if (ret < 0) {
+ 				debug(DEBUG_ERROR, "error trffic separation policy tlv\n");
+@@ -11833,35 +11849,36 @@
+ {
+ 	unsigned char *temp_buf = pkt;
+ 	unsigned short total_length = 0;
+-	unsigned char i = 0, ssid_num = 0;
+-
+-	debug(DEBUG_TRACE, "al_mac "MACSTR"\n", PRINT_MAC(al_mac));
++	unsigned char i = 0, j, ssid_num = 0;
++	unsigned char selected[MAX_VLAN_NUM];
+ 
+-	temp_buf += 3;
+-
+-	/* skip ssid num 1 byte */
+-	temp_buf ++;
+-
+-	for (i = 0; i < ctx->bss_config_num; i++) {
+-		if (ctx->MAP_Cer) {
+-			if (memcmp(al_mac, bss_info[i].mac, ETH_ALEN))
+-				continue;
+-		}
++	/* Validate and deduplicate before writing any bytes to the output. */
++	for (i = 0; i < bss_num; i++) {
++		if (ctx->MAP_Cer && memcmp(al_mac, bss_info[i].mac, ETH_ALEN))
++			continue;
+ 		if (bss_info[i].vid == INVALID_VLAN_ID)
+ 			continue;
+-		debug(DEBUG_OFF, "bss[%d] mac "MACSTR", vid %d, ssid %s, ssid_len %d\n"
+-			, i, PRINT_MAC(bss_info[i].mac), bss_info[i].vid, bss_info[i].ssid, bss_info[i].ssid_len);
+-
+-		ssid_num ++;
+-
+-		/* ssid len 1 byte */
++		if (!bss_info[i].ssid_len || bss_info[i].ssid_len > SSID_MAX_LEN ||
++		    !bss_info[i].vid || bss_info[i].vid >= VLAN_N_VID)
++			return 0;
++		for (j = 0; j < ssid_num; j++) {
++			unsigned char old = selected[j];
++			if (bss_info[old].ssid_len == bss_info[i].ssid_len &&
++			    !memcmp(bss_info[old].ssid, bss_info[i].ssid, bss_info[i].ssid_len)) {
++				if (bss_info[old].vid != bss_info[i].vid) return 0;
++				break;
++			}
++		}
++		if (j != ssid_num) continue;
++		if (ssid_num >= MAX_VLAN_NUM) return 0;
++		selected[ssid_num++] = i;
++	}
++	temp_buf += 4; /* type, length and SSID count */
++	for (j = 0; j < ssid_num; j++) {
++		i = selected[j];
+ 		*temp_buf++ = bss_info[i].ssid_len;
+-
+-		/* ssid */
+ 		memcpy(temp_buf, bss_info[i].ssid, bss_info[i].ssid_len);
+ 		temp_buf += bss_info[i].ssid_len;
+-
+-		/* vlan id */
+ 		*(unsigned short *)temp_buf = host_to_be16(bss_info[i].vid);
+ 		temp_buf += 2;
+ 	}
+@@ -13327,7 +13344,8 @@
+ {
+ 	unsigned char *temp_buf = val;
+ 	unsigned short i = 0;
+-	struct traffic_separation_db *tpolicy_db = NULL;
++	struct traffic_separation_db *tpolicy_db = NULL, *existing = NULL;
++	unsigned char input_count;
+ 	unsigned char ssidbuf[SSID_MAX_LEN + 1] = {0};
+ 	int left = len;
+ 
+@@ -13336,11 +13354,17 @@
+ 		goto err0;
+ 	}
+ 
+-	tpolicy->SSID_num = *temp_buf++;
++	/* A parser invocation owns a fresh policy; callers reject repeated TLVs. */
++	if (!SLIST_EMPTY(&tpolicy->policy_head) || tpolicy->SSID_num)
++		goto err0;
++	input_count = *temp_buf++;
++	if (input_count > MAX_VLAN_NUM)
++		goto err0;
++	tpolicy->SSID_num = 0;
+ 	debug(DEBUG_ERROR, "SSID_num(%d)\n", tpolicy->SSID_num);
+ 	left -= 1;
+ 
+-	for (i = 0; i < tpolicy->SSID_num; i++) {
++	for (i = 0; i < input_count; i++) {
+ 		if (left - 1 < 0) {
+ 			debug(DEBUG_ERROR, "pre length check for ssid len fail\n");
+ 			goto err0;
+@@ -13351,7 +13375,7 @@
+ 			goto err0;
+ 		}
+ 		tpolicy_db->SSID_len = *temp_buf++;
+-		if (tpolicy_db->SSID_len > SSID_MAX_LEN) {
++		if (!tpolicy_db->SSID_len || tpolicy_db->SSID_len > SSID_MAX_LEN) {
+ 			debug(DEBUG_ERROR, "SSID_len(%d) is large than 32 bytes\n", tpolicy_db->SSID_len);
+ 			goto err1;
+ 		}
+@@ -13383,6 +13407,22 @@
+ 		temp_buf += 2;
+ 		debug(DEBUG_ERROR, "parse:%s, %d\n", ssidbuf, tpolicy_db->vid);
+ 		left -= 2;
++		if (!tpolicy_db->vid || tpolicy_db->vid >= VLAN_N_VID)
++			goto err1;
++		SLIST_FOREACH(existing, &tpolicy->policy_head, policy_entry) {
++			if (existing->SSID_len == tpolicy_db->SSID_len &&
++			    !os_memcmp(existing->SSID, tpolicy_db->SSID, tpolicy_db->SSID_len))
++				break;
++		}
++		if (existing) {
++			if (existing->vid != tpolicy_db->vid)
++				goto err1;
++			os_free(tpolicy_db->SSID);
++			os_free(tpolicy_db);
++			tpolicy_db = NULL;
++			continue;
++		}
++		tpolicy->SSID_num++;
+ 		SLIST_INSERT_HEAD(&tpolicy->policy_head, tpolicy_db, policy_entry);
+ 	}
+ 
+@@ -13499,8 +13539,10 @@
+ 		debug(DEBUG_ERROR, "pre length check for default 802_1q fail\n");
+ 		return -1;
+ 	}
+-	memcpy(setting, temp_buf, sizeof(*setting));
++	memcpy(setting, temp_buf, sizeof(*setting) - 1);
+ 	setting->primary_vid = be_to_host16(setting->primary_vid);
++	if (!setting->primary_vid || setting->primary_vid > VLAN_N_VID)
++		return -1;
+ 	debug(DEBUG_ERROR, "primary_vid:%d pcp:%d, length=%d\n",
+ 				setting->primary_vid, setting->dft.PCP, len);
+ 
+@@ -13678,6 +13720,16 @@
+ }
+ #endif
+ 
++/* Repeat the current native policy after mapd subscribes or reconnects. */
++void mesh_ts_republish_after_attach(void *eloop_ctx, void *timeout_ctx)
++{
++ struct p1905_managerd_ctx *ctx = eloop_ctx;
++ (void)timeout_ctx;
++ if (!mesh_linux_ts_managed()) return;
++ ctx->map_policy.tpolicy.updated = 1;
++ map_r2_notify_ts_config(ctx, NULL);
++}
++
+ void map_r2_notify_ts_config(void *eloop_ctx, void *timeout_ctx)
+ {
+ 	struct p1905_managerd_ctx *ctx = (struct p1905_managerd_ctx*)eloop_ctx;
+@@ -13686,13 +13738,21 @@
+ 	struct traffic_separation_db *policy_db = NULL;
+ 	unsigned short vids[256] = {0};
+ 	unsigned char vid_num = 0;
++	unsigned int list_count = 0;
++
++	SLIST_FOREACH(policy_db, &pts_policy->policy_head, policy_entry)
++		if (++list_count > MAX_VLAN_NUM)
++			goto invalid_policy;
++	if (list_count != pts_policy->SSID_num || pts_policy->SSID_num > MAX_VLAN_NUM)
++		goto invalid_policy;
+ 
+ 	/*ts policy does not update, do not notify it*/
+ 	if (!ctx->map_policy.setting.updated && !pts_policy->updated)
+ 		return;
+ 
+-	mapfilter_set_ts_default_8021q(ctx->map_policy.setting.primary_vid, ctx->map_policy.setting.dft.PCP);
+-	mapping = os_zalloc(pts_policy->SSID_num * sizeof(struct ssid_2_vid_mapping));
++	if (!mesh_linux_ts_managed())
++		mapfilter_set_ts_default_8021q(ctx->map_policy.setting.primary_vid, ctx->map_policy.setting.dft.PCP);
++	mapping = os_zalloc((pts_policy->SSID_num ? pts_policy->SSID_num : 1) * sizeof(struct ssid_2_vid_mapping));
+ 	if (!mapping)
+ 		return;
+ 	mapping_org = mapping;
+@@ -13706,7 +13766,8 @@
+ 		mapping++;
+ 	}
+ 
+-	mapfilter_set_ts_policy(pts_policy->SSID_num, mapping_org);
++	if (!mesh_linux_ts_managed())
++		mapfilter_set_ts_policy(pts_policy->SSID_num, mapping_org);
+ 
+ 	/*notify the WiFi driver*/
+ 	_1905_notify_ts_setting(ctx, pts_policy->SSID_num, mapping_org);
+@@ -13714,13 +13775,12 @@
+ 	os_free(mapping_org);
+ 
+ 	/*fisrtly clear all vlan id and then re-set all vids included in traffic separation policy to switch*/
+-	eth_layer_set_traffic_separation_vlan(vids, 0);
+-
+-	if (vid_num)
+-		eth_layer_set_traffic_separation_vlan(vids, vid_num);
+-
+-	/* need rm hnat sessions after resetting the ts vlan */
+-	map_rm_hnat_session();
++	if (!mesh_linux_ts_managed()) {
++		eth_layer_set_traffic_separation_vlan(vids, 0);
++		if (vid_num)
++			eth_layer_set_traffic_separation_vlan(vids, vid_num);
++		map_rm_hnat_session();
++	}
+ 
+ 	/*reset policy*/
+ 	ctx->map_policy.setting.updated = 0;
+@@ -13728,7 +13788,12 @@
+ 
+ 	update_operation_bss_vlan(ctx, &ctx->bss_head, pts_policy, NULL);
+ 	maintain_all_assoc_clients(ctx);
++	return;
+ 
++invalid_policy:
++	/* Revoke a stale managed observation instead of retaining it. */
++	if (mesh_linux_ts_managed())
++		_1905_notify_ts_setting(ctx, MAX_VLAN_NUM + 1, NULL);
+ }
+ 
+ void cmd_set_ts_pvlan(struct p1905_managerd_ctx *ctx, char* buf)
+@@ -14146,45 +14211,71 @@
+ int update_traffic_separation_policy(struct p1905_managerd_ctx *ctx,
+ 	struct set_config_bss_info bss_info[], unsigned char bss_num)
+ {
+-	unsigned char i = 0;
+-	struct traffic_separation_db *traffic_policy = NULL;
+-	struct traffics_policy *policy = &ctx->map_policy.tpolicy;
+-
++	unsigned int i, j, unique = 0;
++	struct traffic_separation_db *traffic_policy;
++	struct traffics_policy candidate = {0};
++	struct traffics_policy *policy = &candidate;
++
++	SLIST_INIT(&candidate.policy_head);
++	/* WTS has separate 2.4/5GL/5GH rows for one SSID. Validate the
++	 * complete set before adding any policy and reject ambiguous mappings. */
+ 	for (i = 0; i < bss_num; i++) {
+ 		if (bss_info[i].vid == INVALID_VLAN_ID)
+ 			continue;
+-
+-		traffic_policy = (struct traffic_separation_db*)os_malloc(sizeof(struct traffic_separation_db));
+-		if (!traffic_policy) {
+-			debug(DEBUG_ERROR, "fail to allocate memory\n");
+-			continue;
++		if (!bss_info[i].ssid_len || bss_info[i].ssid_len > SSID_MAX_LEN ||
++		    bss_info[i].vid == 0 || bss_info[i].vid >= VLAN_N_VID)
++			return -1;
++		for (j = 0; j < i; j++) {
++			if (bss_info[j].vid == INVALID_VLAN_ID ||
++			    bss_info[j].ssid_len != bss_info[i].ssid_len ||
++			    os_memcmp(bss_info[j].ssid, bss_info[i].ssid, bss_info[i].ssid_len))
++				continue;
++			if (bss_info[j].vid != bss_info[i].vid)
++				return -1;
++			break;
+ 		}
+-
++		if (j == i && ++unique > MAX_VLAN_NUM)
++			return -1;
++	}
++	for (i = 0; i < bss_num; i++) {
++		if (bss_info[i].vid == INVALID_VLAN_ID)
++			continue;
++		for (j = 0; j < i; j++)
++			if (bss_info[j].vid != INVALID_VLAN_ID &&
++			    bss_info[j].ssid_len == bss_info[i].ssid_len &&
++			    !os_memcmp(bss_info[j].ssid, bss_info[i].ssid, bss_info[i].ssid_len))
++				break;
++		if (j != i)
++			continue;
++		traffic_policy = (struct traffic_separation_db *)os_zalloc(sizeof(*traffic_policy));
++		if (!traffic_policy)
++			goto fail;
+ 		traffic_policy->vid = bss_info[i].vid;
+ 		traffic_policy->SSID_len = bss_info[i].ssid_len;
+-		traffic_policy->SSID = os_malloc(bss_info[i].ssid_len + 1);
++		traffic_policy->SSID = os_zalloc(traffic_policy->SSID_len + 1);
+ 		if (!traffic_policy->SSID) {
+ 			os_free(traffic_policy);
+-			debug(DEBUG_ERROR, "fail to allocate SSID\n");
+-			continue;
++			goto fail;
+ 		}
+-		os_memset(traffic_policy->SSID, 0, bss_info[i].ssid_len + 1);
+-		os_memcpy(traffic_policy->SSID, bss_info[i].ssid, bss_info[i].ssid_len);
++		os_memcpy(traffic_policy->SSID, bss_info[i].ssid, traffic_policy->SSID_len);
+ 		SLIST_INSERT_HEAD(&policy->policy_head, traffic_policy, policy_entry);
+ 		policy->SSID_num++;
+-
+ 		policy->updated = 1;
+ 	}
+-
+-
++	delete_exist_traffic_policy(ctx, &ctx->map_policy.tpolicy);
++	candidate.updated = 1; /* Empty policy also clears the previous policy. */
++	ctx->map_policy.tpolicy = candidate;
+ 	return 0;
++fail:
++	delete_exist_traffic_policy(ctx, policy);
++	return -1;
+ }
+ 
+ void map_notify_transparent_vlan_setting(void *eloop_ctx, void *timeout_ctx)
+ {
+ 	struct p1905_managerd_ctx *ctx = (struct p1905_managerd_ctx*)eloop_ctx;
+ 
+-	if (!ctx->map_policy.trans_vlan.updated)
++	if (mesh_linux_ts_managed() || !ctx->map_policy.trans_vlan.updated)
+ 		return;
+ 
+ 	mapfilter_set_transparent_vid(ctx->map_policy.trans_vlan.transparent_vids,
+@@ -17252,6 +17343,8 @@
+ 			integrity |= (1 << 1);
+ 			setting.updated = 1;
+ 		} else if (*type == TRAFFIC_SEPARATION_POLICY_TYPE) {
++			if (integrity & (1 << 2))
++				goto fail;
+ 			ret = parse_traffic_separation_policy_tlv(&tpolicy, len, value);
+ 			if (ret < 0) {
+ 				debug(DEBUG_ERROR, "%s error trffic separation policy tlv\n", __func__);
+--- a/src/file_io.c
++++ b/src/file_io.c
+@@ -81,9 +81,10 @@
+ }
+ 
+ int _1905_read_set_config(struct p1905_managerd_ctx *ctx, char *name,
+-	struct set_config_bss_info bss_info[], unsigned char max_bss_num,
++	struct set_config_bss_info output_bss_info[], unsigned char max_bss_num,
+ 	unsigned char *config_bss_num)
+ {
++	struct set_config_bss_info *bss_info = NULL;
+ 	FILE* f;
+ 	int index, resv1, resv2, i, j;
+ 	unsigned int mac_int[6] = {0};
+@@ -93,6 +94,9 @@
+ #ifdef MAP_R2
+ 	unsigned char ssid_tlv[33];
+ 	unsigned int pvid = 0, vid = 0, value = 0, pcp = 0, skip_pvid = 0;
++	unsigned int candidate_primary_set = 0;
++	unsigned int candidate_primary = ctx->map_policy.setting.primary_vid;
++	unsigned int candidate_pcp = ctx->map_policy.setting.dft.PCP;
+ #endif
+ 	int authmode = 0, encrytype = 0;
+ 	unsigned char key[65] = {0};
+@@ -132,8 +136,11 @@
+ 		return -1;
+ 	}
+ 
+-	for (i = 0; i < max_bss_num; i++) {
+-		memset(&bss_info[i], 0, sizeof(struct set_config_bss_info));
++	bss_info = os_zalloc(max_bss_num * sizeof(*bss_info));
++	if (!bss_info) {
++		fclose(f);
++		os_free(content);
++		return -1;
+ 	}
+ 
+ 	i = 0;
+@@ -533,7 +540,8 @@
+ 				pos2 = strstr(pos1, "pvid");
+ 				if (pos2 != NULL && (pos2 - pos1) < 10) {
+ 					debug(DEBUG_ERROR, "default vlan found\n");
+-					ctx->map_policy.setting.primary_vid = vid;
++					candidate_primary = vid;
++					candidate_primary_set = 1;
+ 					pvid = vid;
+ 					pos1 = pos2;
+ 
+@@ -548,11 +556,11 @@
+ 						debug(DEBUG_ERROR, "[%d]sscanf fail!\n", __LINE__);
+ 						goto err;
+ 					}
+-					ctx->map_policy.setting.dft.PCP = pcp;
++					candidate_pcp = pcp;
+ 					pos2++;
+ 					pos1 = pos2;
+ 
+-					ctx->map_policy.tpolicy.updated = 1;
++
+ 				} else {
+ 					debug(DEBUG_TRACE, "pvid not found or too far\n");
+ 				}
+@@ -615,11 +623,11 @@
+ 		}
+ 	}
+ 
+-	*config_bss_num = i;
+-	debug(DEBUG_OFF, "config_bss_num=%d\n", *config_bss_num);
++	debug(DEBUG_OFF, "config_bss_num=%d\n", i);
+ 	os_free(content);
+ 	if (fclose(f) < 0) {
+ 		debug(DEBUG_ERROR, "[%d]fclose fail!\n", __LINE__);
++		os_free(bss_info);
+ 		return -1;
+ 	}
+ 
+@@ -639,11 +647,20 @@
+ 		debug(DEBUG_ERROR, "6G bss is hidden or empty! wps may fail!\n");
+ 	}
+ #ifdef MAP_R2
+-	delete_exist_traffic_policy(ctx, &ctx->map_policy.tpolicy);
+-	update_traffic_separation_policy(ctx, bss_info, *config_bss_num);
++	if ((candidate_primary_set && (!candidate_primary || candidate_primary > INVALID_VLAN_ID || candidate_pcp > 7)) ||
++	    update_traffic_separation_policy(ctx, bss_info, i) < 0) {
++		os_free(bss_info);
++		return -1;
++	}
++	ctx->map_policy.setting.primary_vid = candidate_primary;
++	ctx->map_policy.setting.dft.PCP = candidate_pcp;
+ #endif
++	os_memcpy(output_bss_info, bss_info, max_bss_num * sizeof(*bss_info));
++	*config_bss_num = i;
++	os_free(bss_info);
+ 	return 0;
+ err:
++	os_free(bss_info);
+ 	os_free(content);
+ 	if (fclose(f) < 0)
+ 		debug(DEBUG_ERROR, "[%d]fclose fail!\n", __LINE__);
+--- a/src/_1905_lib_io.c
++++ b/src/_1905_lib_io.c
+@@ -1236,6 +1236,9 @@
+ 	/*mid*/
+ 	p += 2;
+ 
++	if (num > MAX_VLAN_NUM || (num && !mapping))
++		goto invalid_ts;
++
+ 	/*add common traffic separation common setting: primary vid/pcp, all policy*/
+ 	setting = (struct ts_setting*)(p + 2);
+ 	setting->common_setting.primary_vid = ctx->map_policy.setting.primary_vid;
+@@ -1260,6 +1263,10 @@
+ 
+ 			/*fronthaul*/
+ 			if (bss->config.map_vendor_extension & BIT_FH_BSS) {
++				if (fh_count >= MAX_VLAN_NUM ||
++				    sizeof(struct msg) + sizeof(*setting) +
++				    (fh_count + 1) * sizeof(struct ts_fh_config) > sizeof(buf_io))
++					goto invalid_ts;
+ 				os_memcpy(setting->fh_bss_setting.fh_configs[fh_count].itf_mac, bss->mac, ETH_ALEN);
+ 				setting->fh_bss_setting.fh_configs[fh_count].vid = vid;
+ 				debug(DEBUG_ERROR, "%s vid=%d\n", bss->ifname, vid);
+@@ -1273,6 +1280,12 @@
+ 	*(unsigned short*)p = len;
+ 
+ 	_1905_interface_send(ctx, buf_io, len + sizeof(struct msg), NULL);
++	return;
++
++invalid_ts:
++	/* Empty event invalidates a previously exported observation. */
++	*(unsigned short *)p = 0;
++	_1905_interface_send(ctx, buf_io, sizeof(struct msg), NULL);
+ }
+ 
+ void _1905_notify_transparent_vlan_setting(struct p1905_managerd_ctx *ctx)
+--- a/src/p1905_ap_autoconfig.c
++++ b/src/p1905_ap_autoconfig.c
+@@ -644,6 +644,7 @@
+ 			}
+ 			ctx->renew_ctx.trigger_renew = 0;
+ #ifdef MAP_R2
++			ctx->map_policy.tpolicy.updated = 1;
+ 			eloop_cancel_timeout(map_r2_notify_ts_config, (void *)ctx, NULL);
+ 			eloop_cancel_timeout(map_notify_transparent_vlan_setting, (void *)ctx, NULL);
+ 			eloop_register_timeout(0, 0, map_r2_notify_ts_config, (void *)ctx, NULL);
+@@ -1085,6 +1086,9 @@
+ 	if(_1905_set_wireless_setting(ctx) == wapp_utils_error)
+ 		return wifi_utils_error;
+ #ifdef MAP_R2
++	/* BSS membership changed: resend MAC-to-VID mappings even when the
++	 * underlying SSID policy itself did not change. */
++	ctx->map_policy.tpolicy.updated = 1;
+ 	eloop_cancel_timeout(map_r2_notify_ts_config, (void *)ctx, NULL);
+ 	eloop_cancel_timeout(map_notify_transparent_vlan_setting, (void *)ctx, NULL);
+ 	eloop_register_timeout(0, 0, map_r2_notify_ts_config, (void *)ctx, NULL);
+@@ -1101,6 +1105,9 @@
+ 	_1905_flash_out_config(ctx);
+ 
+ #ifdef MAP_R2
++	/* BSS membership changed: resend MAC-to-VID mappings even when the
++	 * underlying SSID policy itself did not change. */
++	ctx->map_policy.tpolicy.updated = 1;
+ 	eloop_cancel_timeout(map_r2_notify_ts_config, (void *)ctx, NULL);
+ 	eloop_cancel_timeout(map_notify_transparent_vlan_setting, (void *)ctx, NULL);
+ 	eloop_register_timeout(0, 0, map_r2_notify_ts_config, (void *)ctx, NULL);
+--- a/src/mapfilter_if.c
++++ b/src/mapfilter_if.c
+@@ -38,6 +38,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include "linux_ts_managed.h"
+ #include <sys/socket.h>
+ #include <linux/netlink.h>
+ #include <linux/socket.h>
+@@ -225,6 +226,7 @@
+ 
+ int mapfilter_ts_onoff(char onoff)
+ {
++	if (mesh_linux_ts_managed() && onoff) return 0;
+ 	struct map_netlink_message *msg = (struct map_netlink_message*)cmd_buf;
+ 	int ret = 0;
+ 
+@@ -266,6 +268,7 @@
+ #ifdef MAP_R2
+ int mapfilter_set_ts_default_8021q(unsigned short primary_vid, unsigned char default_pcp)
+ {
++	if (mesh_linux_ts_managed()) return 0;
+ 	struct map_netlink_message *msg = (struct map_netlink_message*)cmd_buf;
+ 	struct ts_default_8021q *setting = (struct ts_default_8021q*)msg->event;
+ 	int len = 0, ret = 0;
+@@ -282,6 +285,7 @@
+ 
+ int mapfilter_set_ts_policy(unsigned char num, struct ssid_2_vid_mapping *mapping)
+ {
++	if (mesh_linux_ts_managed()) return 0;
+ 	struct map_netlink_message *msg = (struct map_netlink_message*)cmd_buf;
+ 	struct ts_policy *setting = (struct ts_policy*)msg->event;
+ 	int len = 0, ret = 0;
+@@ -301,6 +305,7 @@
+ 
+ int mapfilter_set_transparent_vid(unsigned short vids[], unsigned char vid_num)
+ {
++	if (mesh_linux_ts_managed()) return 0;
+ 	struct map_netlink_message *msg = (struct map_netlink_message*)cmd_buf;
+ 	struct transparent_vids *setting = (struct transparent_vids*)msg->event;
+ 	int len = 0, ret = 0;
+@@ -328,6 +333,7 @@
+ 	unsigned char status, unsigned char ssid_len, char *ssid, 
+ 	unsigned char *al_mac)
+ {
++	if (mesh_linux_ts_managed()) return 0;
+ 	struct map_netlink_message *msg = (struct map_netlink_message*)cmd_buf;
+ 	struct client_vid *setting = (struct client_vid*)msg->event;
+ 	int len = 0, ret = 0;
+--- a/src/cmdu.c
++++ b/src/cmdu.c
+@@ -35,6 +35,7 @@
+  * any receiver's applicable license agreements with MediaTek Inc.
+  */
+ 
++#include "linux_ts_managed.h"
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -323,10 +324,12 @@
+ 			vids[vid_num++] = atoi(str_vlan);
+ 		}
+ 
+-		test_eth_layer_set_vlan(vids, vid_num, 0);
++		if (!mesh_linux_ts_managed()) {
++			test_eth_layer_set_vlan(vids, vid_num, 0);
+ #ifdef MAP_R2
+-		map_rm_hnat_session();
++			map_rm_hnat_session();
+ #endif
++		}
+ 	}  else if (os_strncmp(buf, "set_eth_trans_vlan_id", os_strlen("set_eth_trans_vlan_id")) == 0) {
+ 		char *p = buf + os_strlen("set_eth_trans_vlan_id") + 1;
+ 		char *str_vlan = NULL;
+--- a/src/cmdu_message_parse.c
++++ b/src/cmdu_message_parse.c
+@@ -2944,6 +2944,8 @@
+ 			integrity |= BIT(3);
+ 			setting.updated = 1;
+ 		} else if (*type == TRAFFIC_SEPARATION_POLICY_TYPE) {
++			if (integrity & BIT(4))
++				goto fail;
+ 			ret = parse_traffic_separation_policy_tlv(&tpolicy, len, value);
+ 			if (ret < 0) {
+ 				debug(DEBUG_ERROR, "%s error trffic separation policy tlv\n", __func__);
+--- a/src/ethernet_layer.c
++++ b/src/ethernet_layer.c
+@@ -35,6 +35,7 @@
+  * any receiver's applicable license agreements with MediaTek Inc.
+  */
+ 
++#include "linux_ts_managed.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+@@ -414,6 +415,7 @@
+ 
+ int eth_layer_set_traffic_separation_vlan(unsigned short vid[], unsigned char num)
+ {
++	if (mesh_linux_ts_managed()) return 0;
+ 	/*int ret = ETH_ERROR_NOT_SUPPORT;
+ 
+ 	if (_eth_ops->set_switch_ts_vlan) {
+@@ -429,6 +431,7 @@
+ 
+ int eth_layer_set_switch_trasnparent_vlan(unsigned short vid[], unsigned char num)
+ {
++	if (mesh_linux_ts_managed()) return 0;
+ 	/*int ret = ETH_ERROR_NOT_SUPPORT;
+ 	if ( _eth_ops->set_switch_transparent_vlan) {
+ 		ret = _eth_ops->set_switch_transparent_vlan(vid, num, 1);
+--- a/src/_1905_interface.c
++++ b/src/_1905_interface.c
+@@ -52,6 +52,7 @@
+ #include <stddef.h>
+ #include "_1905_interface.h"
+ #include "p1905_managerd.h"
++#include "linux_ts_managed.h"
+ #include "common.h"
+ #include "debug.h"
+ #include "eloop.h"
+@@ -63,6 +64,9 @@
+ 
+ int _1905_interface_open_sock(struct p1905_managerd_ctx *ctx, char* socket_patch);
+ extern void attach_action(void *eloop_data, void *user_ctx);
++#ifdef MAP_R2
++extern void mesh_ts_republish_after_attach(void *eloop_data, void *user_ctx);
++#endif
+ int _1905_interface_pending(struct p1905_managerd_ctx *ctx, struct timeval *tv);
+ int _1905_interface_recv(struct p1905_managerd_ctx *ctx, unsigned char* buf, int buf_len);
+ extern int _1905_send_sync_recv_buf_size(struct p1905_managerd_ctx* ctx, unsigned short change_len, unsigned short own_len);
+@@ -490,6 +494,14 @@
+ 					&cli_ctrl->daemon_cli_list, &from, fromlen);
+ 			}
+ 		}
++#ifdef MAP_R2
++		else if (new_attached && daemon_name && !strcmp(daemon_name, "map_daemon") &&
++		         mesh_linux_ts_managed()) {
++			/* The subscriber is ready only after its ATTACH reply. */
++			eloop_cancel_timeout(mesh_ts_republish_after_attach, ctx, NULL);
++			eloop_register_timeout(1, 0, mesh_ts_republish_after_attach, ctx, NULL);
++		}
++#endif
+ 	}
+ 	if(reply_buf != NULL)
+ 		free(reply_buf);
+--- /dev/null
++++ b/inc/linux_ts_managed.h
+@@ -0,0 +1,10 @@
++#ifndef LINUX_TS_MANAGED_H
++#define LINUX_TS_MANAGED_H
++#include <stdlib.h>
++#include <string.h>
++static inline int mesh_linux_ts_managed(void)
++{
++ const char *mode = getenv("AX6000_MESH_LINUX_TS");
++ return mode && strcmp(mode, "1") == 0;
++}
++#endif

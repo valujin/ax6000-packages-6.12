@@ -1,0 +1,126 @@
+#!/bin/sh
+# Create private, disabled ownership from an explicit declaration and live TS event.
+# No interface or configuration changes; activation belongs to the reconciler.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+type_is() { local actual; json_get_type actual "$1"; [ "$actual" = "$2" ]; }
+uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 18 ] && [ "$1" -gt 0 ]; }
+# The multicast bit is in the second hex digit of the first byte.
+mac() { printf '%s\n' "$1" | grep -Eq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' && [ "$1" != 00:00:00:00:00:00 ]; }
+private() {
+  local mode
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  mode=$(stat -c %a "$1") || return 1
+  [ "$(stat -c %u "$1")" = 0 ] && [ "$((0$mode & 077))" = 0 ]
+}
+load_file() {
+  local size clean
+  head -c 65537 "$1" > "$2" || fail 'Cannot read input.'
+  size=$(wc -c < "$2"); clean=$(tr -d '\000' < "$2" | wc -c)
+  [ "$size" -le 65536 ] && [ "$size" -eq "$clean" ] || fail 'Invalid input size or NUL.'
+  if grep -qiF '\u0000' "$2"; then fail 'Invalid input NUL.'; fi
+  jshn -R "$2" >/dev/null 2>&1 || fail 'Invalid input JSON.'
+}
+process_start() {
+  local pid=$1 expected=$2 statline rest
+  uint "$pid" && [ "$(cat /proc/$pid/comm 2>/dev/null)" = "$expected" ] || return 1
+  statline=$(cat /proc/$pid/stat) || return 1
+  rest=${statline##*) }; set -- $rest
+  [ "$#" -ge 20 ] || return 1
+  shift 19; uint "$1" || return 1
+  printf '%s' "$1"
+}
+[ "$#" = 3 ] || fail 'Expected declaration, live observation and new ownership path.'
+[ "$(id -u)" = 0 ] || fail 'Ownership production requires root.'
+declaration=$1; observation=$2; output=$3
+private "$declaration" && private "$observation" || fail 'Inputs must be private root-owned regular files.'
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail 'Ownership staging path already exists.'
+work=$(mktemp -d /tmp/ax6000-ts-own.XXXXXX) || fail 'Cannot stage ownership.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+load_file "$declaration" "$work/declaration"
+load_file "$observation" "$work/observation"
+json_load_file "$work/observation"
+for field in schema producer_pid producer_start_ticks connection_generation sequence primary_vid; do type_is "$field" int || fail 'Incomplete observation identity.'; done
+for field in boot_id controller_alid; do type_is "$field" string || fail 'Incomplete observation identity.'; done
+type_is fh array || fail 'Missing observed BSS identities.'
+json_get_vars schema boot_id producer_pid producer_start_ticks connection_generation sequence primary_vid controller_alid
+[ "$schema" = 2 ] || fail 'Schema 2 observation required.'
+[ "$boot_id" = "$(cat /proc/sys/kernel/random/boot_id)" ] || fail 'Observation belongs to another boot.'
+mac "$controller_alid" && uint "$connection_generation" && uint "$sequence" || fail 'Invalid observation identity.'
+mapd_start=$(process_start "$producer_pid" mapd) || fail 'Observation producer is not live.'
+[ "$mapd_start" = "$producer_start_ticks" ] || fail 'Observation producer changed.'
+mapd_pid=$producer_pid
+ieee_pid=$(pidof p1905_managerd) || fail '1905 is not live.'
+ieee_start=$(process_start "$ieee_pid" p1905_managerd) || fail '1905 process identity is ambiguous.'
+json_select fh; json_get_keys entries
+count=0
+for entry in $entries; do
+  count=$((count + 1)); [ "$count" -le 48 ] || fail 'Too many observed BSSs.'
+  type_is "$entry" object || fail 'Invalid observed BSS.'
+  json_select "$entry"; type_is bssid string && type_is vid int || fail 'Invalid observed BSS fields.'
+  json_get_vars bssid vid; mac "$bssid" && uint "$vid" && [ "$vid" -le 4094 ] || fail 'Invalid observed BSS identity.'
+  [ ! -e "$work/bssid-$bssid" ] || fail 'Duplicate observed BSS.'
+  printf '%s' "$vid" > "$work/bssid-$bssid"; json_select ..
+done
+json_load_file "$work/declaration"
+json_get_keys fields
+for field in $fields; do case "$field" in schema|bridge|management_vid|quarantine_vid|controller_alid|management_ifnames|trunk_ifnames|guest_ports|cpu_guest_links) ;; *) fail 'Unexpected ownership declaration field.' ;; esac; done
+for field in schema management_vid quarantine_vid; do type_is "$field" int || fail 'Invalid declaration number.'; done
+for field in bridge controller_alid; do type_is "$field" string || fail 'Invalid declaration identity.'; done
+for field in management_ifnames trunk_ifnames guest_ports cpu_guest_links; do type_is "$field" array || fail 'Missing declared interface list.'; done
+json_get_var declared_schema schema; json_get_var declared_controller controller_alid
+json_get_vars bridge management_vid quarantine_vid
+[ "$declared_schema" = 2 ] && [ "$bridge" = br-lan ] && [ -d /sys/class/net/br-lan/bridge ] || fail 'Unsupported ownership declaration.'
+[ "$declared_controller" = "$controller_alid" ] || fail 'Controller identity does not match authority.'
+[ "$management_vid" = "$primary_vid" ] && uint "$management_vid" && [ "$management_vid" -le 4094 ] || fail 'Primary VID does not match authority.'
+uint "$quarantine_vid" && [ "$quarantine_vid" -le 4094 ] && [ "$quarantine_vid" != "$management_vid" ] || fail 'Invalid quarantine VID.'
+for list in management_ifnames trunk_ifnames; do
+  json_select "$list"; json_get_keys entries; count=0
+  for entry in $entries; do
+    count=$((count + 1)); [ "$count" -le 16 ] || fail 'Too many declared interfaces.'
+    type_is "$entry" string || fail 'Invalid declared interface.'; json_get_var ifname "$entry"
+    case "$ifname" in wan|lan2|lan3|lan4|ra0|rax0|ra1|rax1|apcli0|apclix0) ;; *) fail 'Unsupported management or transport interface.' ;; esac
+    if [ "$list" = trunk_ifnames ]; then case "$ifname" in wan|ra1|rax1|apcli0|apclix0) ;; *) fail 'Transport is not a dedicated backhaul interface.' ;; esac; fi
+    [ -d "/sys/class/net/$ifname" ] && [ -e "/sys/class/net/br-lan/brif/$ifname" ] || fail 'Declared interface is not a current bridge member.'
+    [ ! -e "$work/$list-$ifname" ] || fail 'Duplicate declared interface.'
+    : > "$work/$list-$ifname"
+  done
+  [ "$count" -gt 0 ] || fail 'Management and transport declarations must be explicit.'
+  json_select ..
+done
+json_select guest_ports; json_get_keys entries; count=0
+for entry in $entries; do
+  count=$((count + 1)); [ "$count" -le 4 ] || fail 'Too many guest ports.'
+  type_is "$entry" object || fail 'Invalid guest port.'; json_select "$entry"; json_get_keys fields
+  for field in $fields; do case "$field" in ifname|actual_bssid|vid|enabled) ;; *) fail 'Unexpected guest port field.' ;; esac; done
+  type_is ifname string && type_is actual_bssid string && type_is vid int && type_is enabled boolean || fail 'Invalid guest port fields.'
+  json_get_vars ifname actual_bssid vid enabled
+  case "$ifname" in ra2|ra3|rax2|rax3) ;; *) fail 'Guest port is outside the bounded slot pool.' ;; esac
+  [ "$enabled" = 0 ] || fail 'Ownership must be staged with guests disabled.'
+  [ ! -e "$work/guest-$ifname" ] || fail 'Duplicate guest interface.'
+  mac "$actual_bssid" && [ "$actual_bssid" = "$(cat /sys/class/net/$ifname/address 2>/dev/null)" ] || fail 'Guest BSSID does not match the live interface.'
+  uint "$vid" && [ "$vid" -le 4094 ] && [ "$vid" != "$management_vid" ] && [ "$vid" != "$quarantine_vid" ] || fail 'Invalid guest VID.'
+  [ "$(cat "$work/bssid-$actual_bssid" 2>/dev/null)" = "$vid" ] || fail 'Guest VID does not match the live observation.'
+  : > "$work/guest-$ifname"; json_select ..
+done
+[ "$count" -gt 0 ] || fail 'No explicit guest ports.'
+json_select ..
+# Recheck exact observed event and process identities before creating the candidate.
+cmp -s "$work/observation" "$observation" || fail 'Observation changed during ownership staging.'
+[ "$(process_start "$mapd_pid" mapd)" = "$mapd_start" ] && [ "$(process_start "$ieee_pid" p1905_managerd)" = "$ieee_start" ] || fail 'Daemon lifecycle changed during staging.'
+generation=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+[ "${#generation}" = 32 ] || fail 'Cannot generate ownership nonce.'
+json_add_string boot_id "$boot_id"; json_add_string generation "$generation"
+json_add_object daemons
+for name in mapd ieee1905; do
+  if [ "$name" = mapd ]; then pid=$mapd_pid; start=$mapd_start; else pid=$ieee_pid; start=$ieee_start; fi
+  json_add_object "$name"; json_add_int pid "$pid"; json_add_int starttime "$start"; json_close_object
+done
+json_close_object
+json_add_object observation
+json_add_int connection_generation "$connection_generation"; json_add_int sequence "$sequence"; json_close_object
+json_dump > "$work/ownership"
+(set -C; cat "$work/ownership" > "$output") 2>/dev/null || fail 'Cannot create private ownership candidate.'

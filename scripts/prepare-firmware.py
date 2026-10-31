@@ -213,6 +213,9 @@ def configure(profile, lock, source):
         values.update(no_asu.symbols(config))
         no_asu.configure(profile, source)
     (source / ".config").write_text(set_symbols(config, values))
+    # Apply the authenticated country layer before Mesh validates its vendor UI.
+    if profile.get("mediatek_mesh") and profile.get("vendor_country_db") is True:
+        prepare.optional_package_module("vendor_country").apply_vendor_country_patch(source)
     mediatek_mesh.configure(profile, source, native=True)
     if asu_policy(profile) is not None:
         sibling_module("asu_client").configure(profile, source)

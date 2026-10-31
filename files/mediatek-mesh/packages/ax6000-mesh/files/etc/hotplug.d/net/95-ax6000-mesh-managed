@@ -1,0 +1,10 @@
+#!/bin/sh
+# Bridge recreation needs default-PVID preparation before managed radio recovery.
+case "${ACTION:-}:${INTERFACE:-${DEVICENAME:-}}" in
+ add:br-lan|move:br-lan)
+  [ "$(uci -q get ax6000_mesh.main.enabled 2>/dev/null)" = 1 ] || exit 0
+  [ "$(cat /etc/ax6000-mesh/phase 2>/dev/null)" = committed ] || exit 0
+  umask 077
+  : > /var/run/ax6000-mesh-managed-request
+ ;;
+esac

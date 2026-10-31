@@ -1,0 +1,22 @@
+# Gated Linux Mesh VLAN reconciler
+
+**Goal:** Provide an unhooked `prepare OWNERSHIP`, `apply OWNERSHIP OBSERVATION`, and `verify OWNERSHIP OBSERVATION` helper, without enabling managed TS or changing live routers.
+
+**Architecture:** Real ucode validates private ownership schema 2 and exact local interface identities before taking owned guest ports down. Apply requires current daemon identity and matching schema-2 observation, an already VLAN-filtered bridge and preserved management membership. It changes only owned guest VLAN membership and enumerated trunk guest VIDs, reads back the complete result, and enables only explicitly requested guest ports. Any subsequent failure quarantines the verified owned guests; it never flattens a VLAN or restores guest forwarding.
+
+**Constraints:** No init/netifd hooks, Makefile changes, guest activation, or live operations. Unknown ports remain unchanged. Management is never taken down. The first foundation rejects an unfiltered bridge, changed daemon/connection identity, unknown guest-VID memberships, and conflicting inventories. Event-driven policy has no heartbeat expiry; a mandatory external lifecycle monitor must verify current producer/connection/file identity and quarantine on disappearance or change. No long-lived convergence claim is made.
+
+1. Write stateful command-model tests for quarantine, exact tagged/untagged membership, lifecycle rejection, failure rollback, and unrelated-port preservation. Observe failures before implementation.
+2. Implement the bounded ucode CLI and root-owned private receipt/lock; preserve interface identity and non-owned membership snapshots across prepare/apply.
+3. Run targeted model tests and syntax checks. Probe isolated namespace support; require root-reviewed isolated container execution for real-kernel coverage when local user namespaces are denied.
+4. Coordinate schema and disabled-stage semantics with the ownership producer. Report remaining lifecycle monitoring, first-boot filtering setup, driver packet-presentation and two-node packet-isolation proof requirements.
+
+## Explicit controller CPU ownership and supervisor
+
+Ownership schema 2 now requires `cpu_guest_links`, empty on an L2 agent. Each controller entry has `ifname` exactly `br-lan.VID`, `network` naming an existing UCI interface, and `vid` equal to an owned guest VID. The existing link must be an UP 802.1Q VLAN of the exact current `br-lan`, and the UCI interface must be static with the exact device assignment. Competing device/alias assignments are rejected. Its CPU-self bridge VLAN membership must already exist tagged, without PVID or untagged flags. No L3 interface, address, firewall, DHCP, WAN, or CPU VLAN membership is created or repaired by this helper; configuration remains the controller's explicit responsibility.
+
+Every enabled apply or verify also requires private root-owned `/etc/ax6000-mesh/ts-dataplane-approved` containing exactly the ownership generation nonce (optional final newline). This is an externally supplied acceptance marker for the exact generation after actual packet tests; local command-model and isolated dummy-interface tests only synthesize it to exercise the guard and do not issue production approval.
+
+`ax6000-mesh-ts-supervise run GENERATION` launches the runtime monitor in a separate process group using BusyBox-compatible `setsid PROG ARGS` with no GNU flags. The pinned native config includes `CONFIG_BUSYBOX_CONFIG_SETSID=y`; root separately verified the router's BusyBox 1.37 `setsid [-c]` API. A private PID/start-time record is published before a worker handshake can authorize monitor startup. Worker death or supervisor termination kills the worker process group and independently takes only cached, BSSID-matching owned guest interfaces DOWN and removes their bridge master, without depending on a possibly orphaned reconciler/runtime lock. Approval is revoked. `stop` performs the same shutdown.
+
+After supervisor SIGKILL, the next procd start validates the stale PID/start record, terminates the old worker group, quarantines guests, and revokes approval before any retry. A new disabled stage and fresh root approval are required for forwarding. An unrecorded worker waiting at the handshake exits when its parent disappears. This is bounded recovery, not an atomic kernel interlock: a supervisor SIGKILL has a gap until its independent procd restart, so production activation still requires the reviewed lifecycle wiring and actual packet isolation tests. No startup hook is added by this helper implementation.

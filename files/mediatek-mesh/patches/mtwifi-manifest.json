@@ -2,11 +2,11 @@
   "schema_version": 1,
   "source_commit": "ae65e1de69971b5a2e3cf7e39390ee93f274d488",
   "patch": "mtwifi-mesh.patch",
-  "sha256": "c53a22c0cbb39254dcd94c0909f8054d2887d94f0b0c1cca7b1b767056bd117e",
+  "sha256": "885bcc0fbd97a3d267086c7a2b6ea1f95c6070365edac8a10809d633f251acef",
   "files": {
     "package/mtk/applications/mtwifi-cfg-ucode/Makefile": {
       "before_sha256": "e2adc9c633d68a8dce73c2392c736dd203b5b10c54dc84538dbc8e082952be98",
-      "after_sha256": "49ce5e0c05d698e2f6030f71f6020f15706f108da027503b7a75675b119a4d23"
+      "after_sha256": "e05d79eb2b53836b20475c426c5736cbd1169649cd3bf14be59e9ee7d28294c5"
     },
     "package/mtk/applications/mtwifi-cfg-ucode/files/usr/share/schema/mtwifi/wireless.device.json": {
       "before_sha256": "4aa89a92077ddbcb28d5c25f0fa3a29764f34cb351f8f465e06831e08f498579",
@@ -34,7 +34,7 @@
     },
     "package/mtk/applications/mtwifi-cfg-ucode/files/lib/netifd/wireless/mtwifi.sh": {
       "before_sha256": "de73e985df7ad2f28150f80aa85146f1bdc3dd0f3328079140dde6f86540b613",
-      "after_sha256": "5dd5a54d2c70ae769faa13439bdeb62384588217fe90b6db3db1bf73672ca345"
+      "after_sha256": "0741784ed88a4d94b21f8bd6dd96377000a27cb0dbf8a1b18b57d9b7dcba6cbc"
     },
     "package/mtk/drivers/mt_wifi/Makefile": {
       "before_sha256": "d56b9ab58b50bde5bfe3de234c634b8d32f7ca31b7262ad789ec152fb6615253",

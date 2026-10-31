@@ -1,0 +1,14 @@
+#!/usr/bin/ucode
+import { popen } from 'fs';
+
+// This query contains no credentials. Require the exact bounded daemon reply
+// and successful process exit; neither timeout nor partial output proves SAE.
+let verified = false;
+try {
+	let pipe = popen('timeout 3 mapd_cli /tmp/mapd_ctrl get bh_security 2>/dev/null', 'r');
+	if (pipe) {
+		let reply = pipe.read(33), status = pipe.close();
+		verified = status == 0 && reply === 'sae=1\n';
+	}
+} catch (e) {}
+print(verified ? 'sae=1\n' : 'sae=0\n');

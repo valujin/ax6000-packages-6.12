@@ -98,6 +98,15 @@ class MeshMtwifiTests(unittest.TestCase):
         cls.base = cls.source / 'package/mtk/applications/mtwifi-cfg-ucode'
         cls.ucode = os.environ.get('UCODE') or shutil.which('ucode')
 
+    def test_configuration_package_release_tracks_new_netifd_hook(self):
+        makefile = (self.base / 'Makefile').read_text()
+        self.assertIn('PKG_VERSION:=3\nPKG_RELEASE:=3\n', makefile)
+        driver = (self.source / 'package/mtk/drivers/mt_wifi/Makefile').read_text()
+        self.assertIn('PKG_RELEASE:=2', driver)
+        for relative, hashes in self.contract['files'].items():
+            target = self.source / relative
+            self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), hashes['after_sha256'], relative)
+
     def run_converter(self, config, interfaces, valid=True):
         if not self.ucode:
             self.skipTest('host ucode unavailable; set UCODE to execute converter')

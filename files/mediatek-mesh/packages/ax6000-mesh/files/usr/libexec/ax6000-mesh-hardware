@@ -1,0 +1,20 @@
+#!/bin/sh
+# Board-specific mesh paths; unknown boards must fail closed.
+set -eu
+board=$(cat /tmp/sysinfo/board_name 2>/dev/null || :)
+case "$board" in
+  xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod) prefix=mt7986-ax6000; chip=MT7986 ;;
+  xiaomi,mi-router-ax3000t) prefix=mt7981; chip=MT7981 ;;
+  *) exit 1 ;;
+esac
+profile=/etc/wireless/l1profile.dat
+[ "$(sed -n 's/^INDEX0=//p' "$profile" 2>/dev/null)" = "$chip" ] || exit 1
+[ "$(sed -n 's/^INDEX0_profile_path=//p' "$profile" 2>/dev/null)" = "/etc/wireless/mediatek/$prefix.dbdc.b0.dat;/etc/wireless/mediatek/$prefix.dbdc.b1.dat" ] || exit 1
+case "${1:-}" in
+  supported) ;;
+  radio0) printf '%s_1_1\n' "$chip" ;;
+  radio1) printf '%s_1_2\n' "$chip" ;;
+  dat0) printf '/etc/wireless/mediatek/%s.dbdc.b0.dat\n' "$prefix" ;;
+  dat1) printf '/etc/wireless/mediatek/%s.dbdc.b1.dat\n' "$prefix" ;;
+  *) exit 1 ;;
+esac

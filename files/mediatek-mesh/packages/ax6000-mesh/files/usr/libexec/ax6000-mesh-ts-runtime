@@ -1,0 +1,95 @@
+#!/bin/sh
+# Explicit staged dataplane transaction; default mode remains disabled.
+# stage PRIVATE_OWNERSHIP, monitor GENERATION, or quarantine.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+private() {
+  local mode
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  mode=$(stat -c %a "$1") || return 1
+  [ "$(stat -c %u "$1")" = 0 ] && [ "$(stat -c %h "$1")" = 1 ] && [ "$((0$mode & 077))" = 0 ]
+}
+[ "$(id -u)" = 0 ] || fail 'Managed TS runtime requires root.'
+case "${1-}:$#" in stage:2|monitor:2|quarantine:1) ;; *) fail 'Invalid managed TS operation.' ;; esac
+state=/etc/ax6000-mesh
+owner=$state/ts-ownership.json
+observation=/var/run/ax6000-mesh-ts.json
+reconcile=/usr/libexec/ax6000-mesh-ts-reconcile
+[ -d "$state" ] && [ ! -L "$state" ] || fail 'Mesh transaction state is unavailable.'
+[ -x "$reconcile" ] || fail 'Managed TS reconciler is missing.'
+mkdir -p /var/lock
+exec 8>/var/lock/ax6000-mesh-ts-runtime.lock
+flock -n 8 || fail 'Another managed TS transaction or monitor is active.'
+work=$(mktemp -d "$state/.ts-runtime.XXXXXX") || fail 'Cannot stage managed TS transaction.'
+ports=''; monitor=0
+cleanup() {
+  # A failed verification, signal or normal monitor exit cannot retain guests UP.
+  for port in $ports; do ip link set dev "$port" down >/dev/null 2>&1 || :; done
+  if [ "$monitor" = 1 ] && private "$owner"; then
+    "$reconcile" prepare "$owner" >/dev/null 2>&1 || :
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+if [ "$1" = quarantine ]; then
+  private "$owner" || fail 'Private ownership is unavailable.'
+  "$reconcile" prepare "$owner" >/dev/null || fail 'Cannot quarantine ownership.'
+  exit 0
+fi
+[ "$(uci -q get ax6000_mesh.main.enabled 2>/dev/null)" = 1 ] && [ "$(uci -q get ax6000_mesh.main.linux_ts 2>/dev/null)" = 1 ] || fail 'Managed TS is not explicitly enabled.'
+[ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null)" = 1 ] && [ "$(cat /sys/class/net/br-lan/bridge/default_pvid 2>/dev/null)" = 0 ] || fail 'Filtered bridge with no default ingress VLAN is required.'
+if [ "$1" = stage ]; then
+  private "$2" || fail 'Candidate ownership must be private and root-owned.'
+  cp "$2" "$work/candidate"; chmod 600 "$work/candidate"
+  # Stop old ownership first; retain its exact private definition for recovery.
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    private "$owner" || fail 'Current ownership is invalid.'
+    "$reconcile" prepare "$owner" >/dev/null || fail 'Cannot quarantine prior ownership.'
+    cp "$owner" "$work/previous"
+  fi
+  "$reconcile" prepare "$work/candidate" >/dev/null || fail 'Candidate quarantine failed.'
+  json_load_file "$work/candidate"; json_select guest_ports; json_get_keys entries
+  for entry in $entries; do
+    json_select "$entry"; json_get_vars ifname enabled; json_select ..
+    [ "$enabled" = 0 ] || fail 'Candidate must have all guests disabled.'
+    # prepare validated the schema and exact BSSID for this bounded port.
+    case "$ifname" in ra2|ra3|rax2|rax3) ;; *) fail 'Invalid candidate port.' ;; esac
+    ports="$ports $ifname"
+  done
+  for port in $ports; do
+    ip link set dev "$port" down || fail 'Cannot stop candidate guest.'
+    ip link set dev "$port" master br-lan || fail 'Cannot stage guest on filtered bridge.'
+  done
+  "$reconcile" apply "$work/candidate" "$observation" >/dev/null || fail 'Disabled dataplane staging failed.'
+  "$reconcile" verify "$work/candidate" "$observation" >/dev/null || fail 'Disabled dataplane verification failed.'
+  [ ! -e "$work/previous" ] || mv -f "$work/previous" "$state/ts-ownership.previous.json"
+  mv -f "$work/candidate" "$owner"
+  printf '{"ok":true,"phase":"staged"}\n'
+  exit 0
+fi
+# The independent supervisor owns this foreground activation worker.
+# A nonce authorizes one bounded hardware experiment, or is derived from a
+# validated release capability. It is not itself a packet-test result.
+private "$owner" && private "$state/ts-dataplane-approved" || fail 'This generation has no private activation authorization.'
+json_load_file "$owner"; json_get_var generation generation
+case "$2" in *[!0-9a-f]*|'') fail 'Invalid monitor generation.' ;; esac
+[ "${#2}" = 32 ] && [ "$generation" = "$2" ] && [ "$(cat "$state/ts-dataplane-approved")" = "$generation" ] || fail 'Activation authorization does not match the staged generation.'
+"$reconcile" verify "$owner" "$observation" >/dev/null || fail 'Staged generation is no longer valid.'
+json_select guest_ports; json_get_keys entries
+for entry in $entries; do
+  json_select "$entry"; json_get_var ifname ifname
+  case "$ifname" in ra2|ra3|rax2|rax3) ;; *) fail 'Invalid staged port.' ;; esac
+  ports="$ports $ifname"; json_add_boolean enabled 1; json_select ..
+done
+json_select ..; json_dump > "$work/enabled"
+monitor=1
+mv -f "$work/enabled" "$owner"
+"$reconcile" apply "$owner" "$observation" >/dev/null || fail 'Guest activation failed.'
+while :; do
+  "$reconcile" verify "$owner" "$observation" >/dev/null || fail 'Guest policy or dataplane changed; quarantine applied.'
+  sleep 1
+done

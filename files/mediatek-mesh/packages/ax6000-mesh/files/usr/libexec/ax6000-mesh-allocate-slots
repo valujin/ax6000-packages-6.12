@@ -1,0 +1,120 @@
+#!/bin/sh
+# Pure proposal: POLICY_JSON PREVIOUS_STATE_JSON -> candidate allocation JSON.
+# No state publication, driver commands, UCI writes or slot reclamation.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+fail() { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 1; }
+field_type() { local actual; json_get_type actual "$1"; [ "$actual" = "$2" ]; }
+valid_id() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac; [ "${#1}" -le 32 ]; }
+[ "$#" -eq 2 ] || fail 'Expected policy and previous state files.'
+work=$(mktemp -d /tmp/ax6000-slots.XXXXXX) || fail 'Cannot stage allocation.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+# Snapshot bounded inputs once; never silently interpret missing state as empty.
+read_json() {
+  local size clean
+  [ -f "$1" ] || fail 'Missing allocation input.'
+  head -c 65537 "$1" > "$2" || fail 'Cannot read allocation input.'
+  size=$(wc -c < "$2"); clean=$(tr -d '\000' < "$2" | wc -c)
+  [ "$size" -le 65536 ] && [ "$size" -eq "$clean" ] || fail 'Invalid allocation input size or NUL.'
+  if grep -qiF '\u0000' "$2"; then fail 'Invalid allocation input NUL.'; fi
+  jshn -r "$(cat "$2")" >/dev/null 2>&1 || fail 'Invalid allocation JSON.'
+}
+read_json "$1" "$work/policy"
+read_json "$2" "$work/state"
+/usr/libexec/ax6000-mesh-plan-networks < "$work/policy" > "$work/plan" || fail 'Network policy validation failed.'
+json_load "$(cat "$work/policy")" 2>/dev/null || fail 'Invalid policy.'
+json_get_vars primary_network capacity24 capacity5
+case "$capacity24:$capacity5" in [234]:[234]) ;; *) fail 'Capacity exceeds the bounded four-slot pool.' ;; esac
+# Retain every prior allocation, including tombstones. Slot release needs a
+# separate transaction that proves all nodes removed the old BSS.
+json_load "$(cat "$work/state")" 2>/dev/null || fail 'Invalid allocation state.'
+json_get_keys keys
+for key in $keys; do case "$key" in schema|slots) ;; *) fail 'Unexpected allocation state field.' ;; esac; done
+field_type schema int && field_type slots array || fail 'Invalid allocation state schema.'
+json_get_var schema schema
+[ "$schema" = 1 ] || fail 'Unsupported allocation state schema.'
+json_select slots; json_get_keys entries
+records=0
+for entry in $entries; do
+  records=$((records + 1)); [ "$records" -le 6 ] || fail 'Too many retained slots.'
+  field_type "$entry" object || fail 'Invalid retained slot.'
+  json_select "$entry"; json_get_keys keys
+  for key in $keys; do case "$key" in id|band|slot|active) ;; *) fail 'Unexpected retained slot field.' ;; esac; done
+  field_type id string && field_type band string && field_type slot int && field_type active boolean || fail 'Invalid retained slot fields.'
+  json_get_vars id band slot
+  valid_id "$id" || fail 'Invalid retained identity.'
+  case "$band" in 2g) capacity=$capacity24 ;; 5g) capacity=$capacity5 ;; *) fail 'Invalid retained band.' ;; esac
+  case "$slot" in 0|2|3) ;; *) fail 'Invalid or reserved retained slot.' ;; esac
+  [ "$slot" -lt "$capacity" ] || fail 'Capacity excludes a retained slot.'
+  [ ! -e "$work/id-$id" ] && [ ! -e "$work/port-$band-$slot" ] || fail 'Duplicate retained identity or port.'
+  printf '%s %s %s\n' "$id" "$band" "$slot" > "$work/id-$id"
+  : > "$work/port-$band-$slot"
+  json_select ..
+done
+json_load "$(cat "$work/plan")"; json_select bsses; json_get_keys entries
+# First reserve primary slot zero even if a guest appears first in UCI order.
+for entry in $entries; do
+  json_select "$entry"; json_get_vars id band network; json_select ..
+  [ "$network" = "$primary_network" ] || continue
+  [ ! -e "$work/primary-$band" ] || continue
+  if [ -e "$work/id-$id" ]; then
+    read -r old_id old_band old_slot < "$work/id-$id"
+    [ "$old_band" = "$band" ] || fail 'Retained identity changed band.'
+    # A previously secondary primary-network SSID cannot steal slot zero.
+    [ "$old_slot" = 0 ] || continue
+  else
+    [ ! -e "$work/port-$band-0" ] || continue
+    printf '%s %s 0\n' "$id" "$band" > "$work/id-$id"
+    : > "$work/port-$band-0"
+  fi
+  : > "$work/primary-$band"
+done
+for entry in $entries; do
+  json_select "$entry"; json_get_vars id band network; json_select ..
+  [ -e "$work/primary-$band" ] || fail 'Active band requires its retained primary BSS.'
+  case "$band" in 2g) capacity=$capacity24 ;; 5g) capacity=$capacity5 ;; esac
+  if [ -e "$work/id-$id" ]; then
+    read -r old_id old_band slot < "$work/id-$id"
+    [ "$old_band" = "$band" ] || fail 'Retained identity changed band.'
+    [ "$slot" != 0 ] || [ "$network" = "$primary_network" ] || fail 'Primary slot cannot become a guest.'
+  else
+    slot=''
+    for candidate in 2 3; do
+      [ "$candidate" -lt "$capacity" ] || continue
+      [ ! -e "$work/port-$band-$candidate" ] || continue
+      slot=$candidate; break
+    done
+    [ -n "$slot" ] || fail 'No safe free slot; retained tombstones require explicit retirement.'
+    printf '%s %s %s\n' "$id" "$band" "$slot" > "$work/id-$id"
+    : > "$work/port-$band-$slot"
+  fi
+  : > "$work/active-$id"
+done
+# Keep validated policy fields and substitute stable assignments.
+json_load "$(cat "$work/plan")"
+json_add_string phase proposed
+json_select bsses; json_get_keys entries
+for entry in $entries; do
+  json_select "$entry"; json_get_var id id
+  read -r old_id band slot < "$work/id-$id"
+  case "$band" in 2g) prefix=ra ;; 5g) prefix=rax ;; esac
+  json_add_int slot "$slot"; json_add_string ifname "$prefix$slot"
+  json_select ..
+done
+json_select ..
+json_add_object state
+json_add_int schema 1
+json_add_array slots
+for file in "$work"/id-*; do
+  [ -f "$file" ] || continue
+  read -r id band slot < "$file"
+  active=0; [ ! -e "$work/active-$id" ] || active=1
+  json_add_object
+  json_add_string id "$id"; json_add_string band "$band"
+  json_add_int slot "$slot"; json_add_boolean active "$active"
+  json_close_object
+done
+json_close_array; json_close_object
+json_dump

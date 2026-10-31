@@ -1,0 +1,80 @@
+#!/bin/sh
+# Local native-policy consumer. Native WSC/1905 remains the configuration plane.
+set -eu
+umask 077
+state=/etc/ax6000-mesh
+helpers=/usr/libexec/ax6000-mesh
+observation=/var/run/ax6000-mesh-ts.json
+supervisor=''; last=''; work=''
+stop() {
+ if ! "$helpers-ts-supervise" stop >/dev/null 2>&1; then
+  # Bootstrap has no inventory yet. Once inventory exists, a failed shutdown
+  # blocks replacement; never race an unverifiably stopped forwarding worker.
+  [ ! -e "$state/ts-ownership.json" ] && [ ! -L "$state/ts-ownership.json" ] || return 1
+ fi
+ [ -z "$supervisor" ] || wait "$supervisor" 2>/dev/null || :
+ supervisor=''
+}
+cleanup() { stop || :; [ -z "$work" ] || rm -rf "$work"; }
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+[ "${1-}" = monitor ] && [ "$#" = 1 ] || exit 1
+[ "$(id -u)" = 0 ] || exit 1
+# Recovery first: a prior observer may have been killed during activation.
+stop
+while :; do
+ if [ "$(uci -q get ax6000_mesh.main.enabled 2>/dev/null)" != 1 ] || [ "$(uci -q get ax6000_mesh.main.linux_ts 2>/dev/null)" != 1 ]; then stop; exit 0; fi
+ if [ ! -f "$observation" ] || [ ! -f "$state/ts-transport.json" ]; then
+  stop; last=''; sleep 1; continue
+ fi
+ role=$(uci -q get ax6000_mesh.main.role 2>/dev/null) || role=''
+ case "$role" in
+  controller) current=$state/ts-sync-current; generations=$state/ts-generations ;;
+  agent) current=$state/ts-agent-current; generations=$state/ts-agent-generations ;;
+  *) stop; exit 1 ;;
+ esac
+ generation=$(cat "$current" 2>/dev/null) || generation=''
+ case "$generation" in ''|*[!0-9a-f]*) stop; last=''; sleep 1; continue;; esac
+ [ "${#generation}" = 32 ] || { stop; last=''; sleep 1; continue; }
+ # A valid old native observation cannot authorize changed local UCI policy.
+ # Controller validation includes its accepted network/DHCP/firewall snapshots;
+ # agent validation refuses local changes to its controller-owned generation.
+ if ! "$helpers-$role-sync" validate-current; then stop; last=''; sleep 1; continue; fi
+ # Content changes, native lifecycle changes and proof revocation all invalidate
+ # the local runtime. Static native policy needs no artificial heartbeat lease.
+ fingerprint=$(sha256sum "$observation" "$state/ts-transport.json" /etc/ax6000-mesh-dataplane-capability.json "$current" 2>/dev/null) || fingerprint="pending:$generation:$(sha256sum "$observation" "$state/ts-transport.json" 2>/dev/null)"
+ if [ -n "$supervisor" ] && ! "$helpers-ts-capability"; then stop; last=''; fi
+ if [ "$fingerprint" = "$last" ]; then
+  if [ -n "$supervisor" ] && ! kill -0 "$supervisor" 2>/dev/null; then stop; last=''; fi
+  sleep 1; continue
+ fi
+ # Serialize against publication. Never let a monitor inherit the Mesh lock.
+ exec 9>/var/lock/ax6000-mesh.lock
+ if ! flock -n 9; then exec 9>&-; sleep 1; continue; fi
+ stop
+ work=$(mktemp -d "$state/.ts-observe.XXXXXX")
+ if [ "$role" = controller ]; then
+  cpu=$generations/$generation/normalized/cpu_guest_links.json
+ else
+  printf '%s\n' '{"links":[]}' > "$work/cpu.json"; cpu=$work/cpu.json
+ fi
+ # Full validation happens in the producer and reconciler, including actual
+ # BSSID, daemon PID/start, connection epoch, bridge inventory and CPU aliases.
+ if "$helpers-ts-declare" "$state/ts-transport.json" "$observation" "$cpu" "$work/declaration.json" &&
+    "$helpers-ts-own" "$work/declaration.json" "$observation" "$work/ownership.json" &&
+    "$helpers-ts-runtime" stage "$work/ownership.json" &&
+    "$helpers-$role-sync" validate-current; then
+  last=$fingerprint
+  if "$helpers-ts-capability" && "$helpers-$role-sync" validate-current; then
+   nonce=$(jsonfilter -i "$state/ts-ownership.json" -e '@.generation')
+   case "$nonce" in ''|*[!0-9a-f]*) exit 1;; esac
+   [ "${#nonce}" = 32 ] || exit 1
+   printf '%s\n' "$nonce" > "$state/ts-dataplane-approved.new"
+   mv -f "$state/ts-dataplane-approved.new" "$state/ts-dataplane-approved"
+   "$helpers-ts-supervise" run "$nonce" 9>&- & supervisor=$!
+  fi
+ fi
+ rm -rf "$work"; work=''
+ exec 9>&-
+ sleep 1
+done

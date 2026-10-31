@@ -1,0 +1,67 @@
+#!/bin/sh
+# Validate bounded user MU-MIMO edits; emit a private candidate, never live UCI.
+set -eu
+umask 077
+LC_ALL=C; export LC_ALL
+fail() { echo 'Radio tuning differs outside supported MU-MIMO options.' >&2; exit 1; }
+[ "$#" = 2 ] && [ ! -e "$2" ] || fail
+base=$1; output=$2
+work=$(mktemp -d "${output}.tmp.XXXXXX") || fail
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir "$work/before" "$work/after" "$work/restore" "$work/delta"
+cp -p "$base/wireless" "$work/before/wireless"
+[ -f /etc/config/wireless ] && [ ! -L /etc/config/wireless ] && [ "$(stat -c %a /etc/config/wireless)" = "$(stat -c %a "$base/wireless")" ] || fail
+cp -p /etc/config/wireless "$work/after/wireless"
+cp -p /etc/ax6000-mesh/original-wireless "$work/restore/wireless"
+u() { dir=$1; shift; uci -q -c "$work/$dir" -C "$work/$dir" -t "$work/delta" "$@"; }
+g() { u "$1" get "$2" 2>/dev/null || :; }
+# Canonical comparisons ignore formatting only. Named sections and their order
+# remain strict; only original user AP options may change, never Mesh BSSes.
+for dir in before after; do u "$dir" -X show wireless > "$work/$dir.show" || fail; done
+for section in $(u restore -X show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_]*\)=wifi-iface$/\1/p'); do
+ case "$section" in ax6000_mesh_*) continue;; esac
+ [ "$(g restore wireless.$section.mode)" = ap ] || continue
+ [ "$(g before wireless.$section.mode):$(g after wireless.$section.mode)" = ap:ap ] || fail
+ for option in mumimo_dl mumimo_ul; do
+  for dir in before after; do
+   value=$(g "$dir" wireless.$section.$option)
+   case "$value" in ''|0|1) ;; *) fail;; esac
+   sed -i "/^wireless\.$section\.$option=/d" "$work/$dir.show"
+  done
+  value=$(g after wireless.$section.$option)
+  if [ -n "$value" ]; then u restore set "wireless.$section.$option=$value" || fail
+  else u restore delete "wireless.$section.$option" || :; fi
+ done
+done
+cmp -s "$work/before.show" "$work/after.show" || fail
+u restore commit wireless || fail
+seen=' '
+for device in $(u after -X show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_]*\)=wifi-device$/\1/p'); do
+ [ "$(g after wireless.$device.type)" = mtwifi ] || fail
+ case "$(g after wireless.$device.band)" in 2g) label=dat0; live=$(/usr/libexec/ax6000-mesh-hardware dat0) || fail;; 5g) label=dat1; live=$(/usr/libexec/ax6000-mesh-hardware dat1) || fail;; *) fail;; esac
+ case "$seen" in *" $label "*) fail;; esac; seen="$seen$label "
+ [ -f "$live" ] && [ ! -L "$live" ] && [ "$(stat -c %a "$live")" = "$(stat -c %a "$base/$label")" ] || fail
+ cp -p "$live" "$work/$label"
+ # Match only the already-authorized two-slot WSC/channel normalization
+ # used by transaction.normalized(); all additional DAT keys stay strict.
+ sed -E '/^(MuMimo(Dl|Ul)Enable|SSID[12]|WPAPSK[12]|AuthMode|EncrypType|HideSSID|PMFMFPC|PMFMFPR|PMFSHA256|Channel)=/d' "$base/$label" > "$work/old.dat"
+ sed -E '/^(MuMimo(Dl|Ul)Enable|SSID[12]|WPAPSK[12]|AuthMode|EncrypType|HideSSID|PMFMFPC|PMFMFPR|PMFSHA256|Channel)=/d' "$work/$label" > "$work/new.dat"
+ cmp -s "$work/old.dat" "$work/new.dat" || fail
+ for direction in dl ul; do
+  tokens=''; count=0
+  for section in $(u after -X show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_]*\)=wifi-iface$/\1/p'); do
+   [ "$(g after wireless.$section.mode):$(g after wireless.$section.device)" = "ap:$device" ] || continue
+   value=$(g after wireless.$section.mumimo_$direction); value=${value:-0}
+   case "$value" in 0|1) ;; *) fail;; esac
+   [ -z "$tokens" ] || tokens="$tokens;"; tokens="$tokens$value"; count=$((count+1))
+  done
+  [ "$count" = 2 ] || fail
+  key=MuMimoDlEnable; [ "$direction" != ul ] || key=MuMimoUlEnable
+  [ "$(grep -c "^$key=" "$work/$label")" = 1 ] && [ "$(sed -n "s/^$key=//p" "$work/$label")" = "$tokens" ] || fail
+ done
+done
+[ "$seen" = ' dat0 dat1 ' ] || [ "$seen" = ' dat1 dat0 ' ] || fail
+cp -p "$work/after/wireless" "$work/wireless"
+cp -p "$work/restore/wireless" "$work/rollback-wireless"
+rm -rf "$work/before" "$work/after" "$work/restore" "$work/delta" "$work/before.show" "$work/after.show" "$work/old.dat" "$work/new.dat"
+mv "$work" "$output"

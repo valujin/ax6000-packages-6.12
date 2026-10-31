@@ -1,0 +1,107 @@
+#!/bin/sh
+# CAPACITY_MANIFEST NEW_OUTPUT_DIR: offline agent four-slot bootstrap.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+. /usr/share/ax6000-mesh/vendor.sh
+state=/etc/ax6000-mesh
+config=/etc/config
+lib=/usr/libexec
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+name_ok() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1;; esac; [ "${#1}" -le 32 ]; }
+private() {
+ [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] || return 1
+ local mode; mode=$(stat -c %a "$1"); [ "$((0$mode & 077))" = 0 ]
+}
+[ "$#" = 2 ] || fail 'Expected capacity manifest and new output directory.'
+[ "$(id -u)" = 0 ] || fail 'Agent staging requires root.'
+capacity=$1; output=$2
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail 'Output already exists.'
+[ "$(cat "$state/phase" 2>/dev/null)" = committed ] || fail 'Committed enrollment is required.'
+private "$capacity" || fail 'A private root-owned capacity manifest is required.'
+work=$(mktemp -d "${output}.tmp.XXXXXX") || fail 'Cannot create private staging directory.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir "$work/config" "$work/delta" "$work/bsses"
+head -c 65537 "$capacity" > "$work/capacity"
+[ "$(wc -c < "$work/capacity")" -le 65536 ] && [ "$(wc -c < "$work/capacity")" = "$(tr -d '\000' < "$work/capacity" | wc -c)" ] || fail 'Invalid capacity size or NUL.'
+! grep -qiF '\u0000' "$work/capacity" || fail 'Invalid capacity NUL.'
+jshn -R "$work/capacity" >/dev/null 2>&1 && json_load_file "$work/capacity" 2>/dev/null || fail 'Invalid capacity JSON.'
+for field in schema capacity24 capacity5; do json_get_type type "$field"; [ "$type" = int ] || fail 'Invalid capacity fields.'; done
+json_get_type type confirmed; [ "$type" = boolean ] || fail 'Invalid capacity confirmation.'
+json_get_vars schema confirmed capacity24 capacity5
+[ "$schema:$confirmed:$capacity24:$capacity5" = 1:1:4:4 ] || fail 'Confirmed four-slot capacity is required.'
+# Unique cloned package names also isolate UCI's default pending-delta path.
+package=mesh_agent_$(basename "$work" | tr -cd A-Za-z0-9_)
+for name in wireless ax6000_mesh; do
+ [ -f "$config/$name" ] && [ ! -L "$config/$name" ] || fail 'Missing regular source configuration.'
+ cp "$config/$name" "$work/config/${package}_$name"
+done
+u() { uci -q -c "$work/config" -C "$work/config" -t "$work/delta" "$@"; }
+get() { u get "${package}_$1" 2>/dev/null || :; }
+[ "$(get ax6000_mesh.main.enabled):$(get ax6000_mesh.main.role)" = 1:agent ] || fail 'Enabled committed agent mode is required.'
+quarantine_key=''
+u -X show "${package}_wireless" | sed -n "s/^${package}_wireless\\.\\([^.=]*\\)=wifi-iface$/\\1/p" > "$work/ifaces"
+while IFS= read -r id; do
+ name_ok "$id" || fail 'Named wireless interfaces are required.'
+ mode=$(get "wireless.$id.mode")
+ case "$id" in
+ ax6000_mesh_ap1|ax6000_mesh_ap2)
+  [ "$mode:$(get "wireless.$id.map_bss_type")" = ap:64 ] || fail 'Unowned backhaul identity.'
+  continue;;
+ ax6000_mesh_bh1|ax6000_mesh_bh2)
+  [ "$mode" = sta ] || fail 'Unowned station identity.'; continue;;
+ ax6000_mesh_slot24_2|ax6000_mesh_slot24_3|ax6000_mesh_slot5_2|ax6000_mesh_slot5_3)
+  [ "$mode:$(get "wireless.$id.mesh_placeholder"):$(get "wireless.$id.map_bss_type")" = ap:1:32 ] || fail 'Unowned placeholder identity.'
+  placeholder_key=$(get "wireless.$id.key")
+  mesh_validate_credentials Quarantine "$placeholder_key" psk2 || fail 'Invalid placeholder credentials.'
+  [ -z "$quarantine_key" ] || [ "$quarantine_key" = "$placeholder_key" ] || fail 'Inconsistent placeholder credentials.'
+  quarantine_key=$placeholder_key; continue;;
+ ax6000_mesh_*) fail 'Reserved wireless identity.';;
+ esac
+ [ "$mode" = ap ] && [ "$(get "wireless.$id.disabled")" != 1 ] || fail 'Only active primary APs are supported.'
+ network=$(get "wireless.$id.network"); [ -n "$network" ] || network=$(get "wireless.$id.mesh_network")
+ [ "$network" = lan ] || fail 'Agent bootstrap requires LAN primary APs only.'
+ device=$(get "wireless.$id.device"); name_ok "$device" || fail 'Invalid radio identity.'
+ band=$(get "wireless.$device.band"); case "$band" in 2g|5g) ;; *) fail 'Unsupported radio band.';; esac
+ [ ! -e "$work/band-$band" ] || fail 'Exactly one primary AP per band is required.'
+ ssid=$(get "wireless.$id.ssid"); key=$(get "wireless.$id.key"); security=$(get "wireless.$id.encryption")
+ mesh_validate_credentials "$ssid" "$key" "$security" || fail 'Unsupported primary credentials.'
+ hidden=$(get "wireless.$id.hidden"); hidden=${hidden:-0}; isolate=$(get "wireless.$id.isolate"); isolate=${isolate:-0}
+ case "$hidden:$isolate" in 0:0|0:1|1:0|1:1) ;; *) fail 'Unsupported primary flags.';; esac
+ for field in vlan_file dynamic_vlan wds ieee80211r auth_server; do
+  value=$(get "wireless.$id.$field"); [ -z "$value" ] || [ "$value" = 0 ] || fail 'Unsupported primary wireless option.'
+ done
+ mkdir "$work/bsses/$id"
+ for field in ssid key security band hidden isolate; do eval 'value=$'"$field"; printf '%s' "$value" > "$work/bsses/$id/$field"; done
+ printf '%s\n' "$id" > "$work/band-$band"
+done < "$work/ifaces"
+[ -f "$work/band-2g" ] && [ -f "$work/band-5g" ] || fail 'Both primary APs are required.'
+if [ -z "$quarantine_key" ]; then
+ if [ -e "$state/ts-quarantine-key" ]; then
+  private "$state/ts-quarantine-key" || fail 'Invalid private quarantine seed.'
+  quarantine_key=$(cat "$state/ts-quarantine-key")
+ else quarantine_key=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n'); fi
+fi
+mesh_validate_credentials Quarantine "$quarantine_key" psk2 || fail 'Invalid quarantine seed.'
+json_init; json_add_int schema 1; json_add_string primary_network lan; json_add_int primary_vid 1; json_add_int primary_pcp 0
+json_add_int capacity24 4; json_add_int capacity5 4; json_add_array bsses
+for band in 2g 5g; do
+ id=$(cat "$work/band-$band"); json_add_object; json_add_string id "$id"; json_add_string band "$band"
+ json_add_string network lan; json_add_int vid 1
+ json_add_string ssid "$(cat "$work/bsses/$id/ssid")"; json_add_string security "$(cat "$work/bsses/$id/security")"
+ json_add_boolean hidden "$(cat "$work/bsses/$id/hidden")"; json_add_boolean isolate "$(cat "$work/bsses/$id/isolate")"; json_close_object
+done
+json_close_array; json_dump > "$work/policy"
+json_init; json_add_int schema 1; json_add_string quarantine_key "$quarantine_key"; json_add_array keys
+for band in 2g 5g; do
+ id=$(cat "$work/band-$band"); json_add_object; json_add_string id "$id"; json_add_string key "$(cat "$work/bsses/$id/key")"; json_close_object
+done
+json_close_array; json_dump > "$work/credentials"
+printf '{"schema":1,"slots":[]}\n' > "$work/empty-state"
+"$lib/ax6000-mesh-allocate-slots" "$work/policy" "$work/empty-state" > "$work/plan" || fail 'Cannot allocate primary slots.'
+cp "$work/config/${package}_wireless" "$work/source-wireless"
+[ -f "$state/original-wireless" ] && [ ! -L "$state/original-wireless" ] || fail 'Original wireless snapshot is required.'
+"$lib/ax6000-mesh-materialize-networks" "$work/plan" "$work/credentials" "$work/source-wireless" "$work/result" "$state/original-wireless" || fail 'Cannot materialize agent slots.'
+cp "$work/plan" "$work/result/plan"; printf '%s\n' "$quarantine_key" > "$work/result/quarantine-key"
+mv "$work/result" "$output"

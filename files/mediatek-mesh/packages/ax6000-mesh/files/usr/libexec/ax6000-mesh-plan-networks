@@ -1,0 +1,117 @@
+#!/bin/sh
+# Validate normalized, non-secret Mesh network policy and propose BSS slots.
+# Does not read UCI or invoke any wireless/network commands.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+fail() { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 1; }
+valid_uint() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 4 ] || return 1
+  [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+valid_name() {
+  case "$1" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+  [ "${#1}" -le 32 ]
+}
+field_type() { local actual; json_get_type actual "$1"; [ "$actual" = "$2" ]; }
+work=$(mktemp -d /tmp/ax6000-plan.XXXXXX) || fail 'Cannot prepare policy validation.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+head -c 65537 > "$work/input" || fail 'Cannot read policy.'
+size=$(wc -c < "$work/input")
+[ "$size" -le 65536 ] || fail 'Policy is too large.'
+# Shell variables and jshn cannot represent NUL; reject it before parsing.
+without_nul=$(tr -d '\000' < "$work/input" | wc -c)
+[ "$size" -eq "$without_nul" ] || fail 'Policy contains an invalid NUL.'
+if grep -qiF '\u0000' "$work/input"; then fail 'Policy contains an invalid NUL.'; fi
+input=$(cat "$work/input")
+jshn -r "$input" >/dev/null 2>&1 || fail 'Invalid JSON policy.'
+json_load "$input" 2>/dev/null || fail 'Invalid JSON policy.'
+json_get_keys keys || fail 'Invalid JSON policy.'
+for key in $keys; do
+  case "$key" in schema|primary_network|primary_vid|primary_pcp|capacity24|capacity5|bsses) ;; *) fail 'Unexpected policy field.' ;; esac
+done
+for field in schema primary_vid primary_pcp capacity24 capacity5; do field_type "$field" int || fail 'Missing or invalid numeric policy field.'; done
+field_type primary_network string || fail 'Missing primary network.'
+field_type bsses array || fail 'Missing BSS list.'
+json_get_vars schema primary_network primary_vid primary_pcp capacity24 capacity5
+[ "$schema" = 1 ] || fail 'Unsupported policy schema.'
+valid_name "$primary_network" || fail 'Invalid primary network name.'
+valid_uint "$primary_vid" 1 4094 || fail 'Invalid primary VLAN ID.'
+valid_uint "$primary_pcp" 0 7 || fail 'Invalid primary PCP.'
+valid_uint "$capacity24" 2 16 && valid_uint "$capacity5" 2 16 || fail 'Invalid radio capacity.'
+json_select bsses || fail 'Invalid BSS list.'
+json_get_keys entries || fail 'Invalid BSS list.'
+count=0; count24=0; count5=0
+for entry in $entries; do
+  count=$((count + 1)); [ "$count" -le 30 ] || fail 'Too many client BSS entries.'
+  field_type "$entry" object || fail 'Invalid BSS entry.'
+  json_select "$entry" || fail 'Invalid BSS entry.'
+  json_get_keys keys || fail 'Invalid BSS entry.'
+  for key in $keys; do
+    case "$key" in id|ssid|network|vid|band|security|isolate|hidden) ;; *) fail 'Unexpected BSS field.' ;; esac
+  done
+  for field in id ssid network band security; do field_type "$field" string || fail 'Missing or invalid BSS field.'; done
+  field_type vid int || fail 'Missing or invalid BSS VLAN ID.'
+  field_type isolate boolean && field_type hidden boolean || fail 'Invalid BSS flags.'
+  json_get_vars id ssid network vid band security isolate hidden
+  valid_name "$id" && valid_name "$network" || fail 'Invalid BSS or network identifier.'
+  case "$ssid" in ''|*[![:print:]]*) fail 'Invalid SSID.' ;; esac
+  [ "${#ssid}" -le 32 ] || fail 'Invalid SSID.'
+  valid_uint "$vid" 1 4094 || fail 'Invalid BSS VLAN ID.'
+  case "$security" in psk2|sae-mixed) ;; *) fail 'Unsupported BSS security.' ;; esac
+  case "$isolate:$hidden" in 0:0|0:1|1:0|1:1) ;; *) fail 'Invalid BSS flags.' ;; esac
+  if [ "$network" = "$primary_network" ]; then
+    [ "$vid" = "$primary_vid" ] || fail 'Primary network VLAN does not match.'
+  else
+    [ "$vid" != "$primary_vid" ] || fail 'Guest VLAN conflicts with primary VLAN.'
+  fi
+  case "$band" in
+    2g) count24=$((count24 + 1)); [ "$count24" -lt "$capacity24" ] || fail '2.4 GHz BSS capacity exceeded.'; slot=$((count24 - 1)); prefix=ra ;;
+    5g) count5=$((count5 + 1)); [ "$count5" -lt "$capacity5" ] || fail '5 GHz BSS capacity exceeded.'; slot=$((count5 - 1)); prefix=rax ;;
+    *) fail 'Invalid radio band.' ;;
+  esac
+  [ "$slot" -eq 0 ] || slot=$((slot + 1))
+  i=1
+  while [ "$i" -lt "$count" ]; do
+    prev="$work/$i"
+    [ "$id" != "$(cat "$prev/id")" ] || fail 'Duplicate BSS identifier.'
+    old_network=$(cat "$prev/network"); old_vid=$(cat "$prev/vid")
+    if [ "$network" = "$old_network" ]; then
+      [ "$vid" = "$old_vid" ] || fail 'One network uses conflicting VLAN IDs.'
+    else
+      [ "$vid" != "$old_vid" ] || fail 'VLAN ID is shared by different networks.'
+    fi
+    if [ "$ssid" = "$(cat "$prev/ssid")" ]; then
+      [ "$band" != "$(cat "$prev/band")" ] || fail 'Duplicate SSID on one band.'
+      [ "$network" = "$old_network" ] && [ "$vid" = "$old_vid" ] || fail 'SSID maps to different networks.'
+      [ "$security" = "$(cat "$prev/security")" ] && [ "$isolate" = "$(cat "$prev/isolate")" ] && [ "$hidden" = "$(cat "$prev/hidden")" ] || fail 'SSID properties differ between bands.'
+    fi
+    i=$((i + 1))
+  done
+  mkdir "$work/$count"
+  for field in id ssid network vid band security isolate hidden slot; do
+    eval 'value=$'"$field"
+    printf '%s' "$value" > "$work/$count/$field"
+  done
+  printf '%s%s' "$prefix" "$slot" > "$work/$count/ifname"
+  json_select ..
+done
+[ "$count" -gt 0 ] || fail 'No client BSS entries.'
+json_init
+json_add_boolean ok 1
+json_add_int schema 1
+json_add_string primary_network "$primary_network"
+json_add_int primary_vid "$primary_vid"
+json_add_int primary_pcp "$primary_pcp"
+json_add_array bsses
+for i in $(seq 1 "$count"); do
+  json_add_object
+  for field in id ssid network band security ifname; do json_add_string "$field" "$(cat "$work/$i/$field")"; done
+  for field in vid slot; do json_add_int "$field" "$(cat "$work/$i/$field")"; done
+  for field in isolate hidden; do json_add_boolean "$field" "$(cat "$work/$i/$field")"; done
+  json_close_object
+done
+json_close_array
+json_dump

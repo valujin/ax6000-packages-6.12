@@ -5,6 +5,7 @@ its explicit LuCI choice and package release; defaults and backend stay exact.
 """
 from pathlib import Path
 import hashlib
+import json
 import os
 import tempfile
 
@@ -131,6 +132,23 @@ def apply_vendor_country_patch(source_root):
     hashes = tuple(map(digest, before))
     matched = [(series, False) for series, pair in PREIMAGES.items() if hashes == pair]
     matched += [(series, True) for series, pair in POSTIMAGES.items() if hashes == pair]
+    mesh_manifest_path = Path(__file__).resolve().parents[1] / 'files/mediatek-mesh/patches/mtwifi-wireless-manifest.json'
+    candidate = json.loads(mesh_manifest_path.read_bytes()) if not matched and mesh_manifest_path.is_file() else None
+    candidate_pair = tuple(next(item['after_sha256'] for name, item in candidate['files'].items() if name.endswith(suffix))
+                           for suffix in ('wireless-mtk.js', '/Makefile')) if candidate else None
+    if not matched and hashes == candidate_pair:
+        # Mesh layers the native page over this exact country postimage. Accept
+        # only its complete authenticated JS/recipe/defaults generation on replay.
+        import mediatek_mesh
+        manifest = mediatek_mesh.vendor_wireless_manifest()
+        js_entry = next(item for name, item in manifest['files'].items() if name.endswith('wireless-mtk.js'))
+        recipe_entry = next(item for name, item in manifest['files'].items() if name.endswith('/Makefile'))
+        if hashes == (js_entry['after_sha256'], recipe_entry['after_sha256']):
+            _, patched = mediatek_mesh.patch_targets(root, manifest)
+            _require(patched, 'vendor Mesh country layer is incomplete')
+            return {'series': '612', 'changed': False, 'release': '3',
+                    'package': str(package.relative_to(root)),
+                    'javascript_sha256': hashes[0], 'makefile_sha256': hashes[1]}
     _require(len(matched) == 1, 'vendor country files differ from reviewed preimage/postimage pair (or partial patch)')
     series, applied = matched[0]
     release = RELEASES[series]

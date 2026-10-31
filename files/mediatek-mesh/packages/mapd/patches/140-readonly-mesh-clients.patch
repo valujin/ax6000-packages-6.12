@@ -1,0 +1,339 @@
+--- a/mapd_interface/mesh_clients.h
++++ b/mapd_interface/mesh_clients.h
+@@ -0,0 +1,8 @@
++/* Read-only UI measurements. Keep timestamps outside the vendor blob ABI. */
++#ifndef MAPD_MESH_CLIENTS_H
++#define MAPD_MESH_CLIENTS_H
++struct associated_clients;
++enum mesh_measurement { MESH_LINK, MESH_EXTENDED, MESH_TRAFFIC };
++void mesh_client_observe(struct associated_clients *sta, enum mesh_measurement kind);
++void mesh_client_forget(struct associated_clients *sta);
++#endif
+--- a/mapd_interface/mesh_clients.inc
++++ b/mapd_interface/mesh_clients.inc
+@@ -0,0 +1,201 @@
++/* A fixed-schema snapshot: no SSID, passphrase, arbitrary filename or writes.
++ * Do not add fields to associated_clients: prebuilt vendor libraries share it. */
++#include <stdarg.h>
++#include "mesh_clients.h"
++/* Vendor helper is exported but omitted from topologySrv.h. */
++struct _1905_map_device *topo_srv_get_1905_device_from_iface(
++	struct own_1905_device *ctx, unsigned char *iface_addr);
++#define MESH_NODE_CAP 16
++#define MESH_CLIENT_CAP 128
++#define MESH_INTERFACE_CAP 16
++#define MESH_FRESH_MS 30000ULL
++#define MESH_REPLY_CAP 65536
++struct mesh_observation {
++	const struct associated_clients *sta;
++	unsigned char mac[6], bssid[6];
++	unsigned int valid;
++	unsigned long long stamp[3];
++};
++static struct mesh_observation mesh_observations[MESH_CLIENT_CAP];
++static unsigned long long mesh_now_ms(void)
++{
++	struct os_reltime now;
++	if (os_get_reltime(&now) < 0)
++		return 0;
++	return (unsigned long long)now.sec * 1000ULL + now.usec / 1000;
++}
++void mesh_client_forget(struct associated_clients *sta)
++{
++	unsigned int i;
++	for (i = 0; i < MESH_CLIENT_CAP; i++)
++		if (mesh_observations[i].sta == sta)
++			os_memset(&mesh_observations[i], 0, sizeof(mesh_observations[i]));
++}
++static struct mesh_observation *mesh_observation(struct associated_clients *sta)
++{
++	unsigned int i;
++	for (i = 0; i < MESH_CLIENT_CAP; i++) {
++		struct mesh_observation *o = &mesh_observations[i];
++		if (o->sta == sta && !os_memcmp(o->mac, sta->client_addr, 6) &&
++		    sta->bss && !os_memcmp(o->bssid, sta->bss->bssid, 6))
++			return o;
++	}
++	return NULL;
++}
++void mesh_client_observe(struct associated_clients *sta, enum mesh_measurement kind)
++{
++	struct mesh_observation *o;
++	unsigned int i;
++	unsigned long long now = mesh_now_ms();
++	if (!now || !sta || !sta->bss || kind < MESH_LINK || kind > MESH_TRAFFIC)
++		return;
++	o = mesh_observation(sta);
++	if (!o) {
++		for (i = 0; i < MESH_CLIENT_CAP; i++) {
++			unsigned long long last = mesh_observations[i].stamp[0];
++			if (mesh_observations[i].stamp[1] > last) last = mesh_observations[i].stamp[1];
++			if (mesh_observations[i].stamp[2] > last) last = mesh_observations[i].stamp[2];
++			if (!mesh_observations[i].sta || mesh_observations[i].sta == sta ||
++			    (now >= last && now - last > MESH_FRESH_MS)) {
++				os_memset(&mesh_observations[i], 0, sizeof(mesh_observations[i]));
++				o = &mesh_observations[i];
++				break;
++			}
++		}
++	}
++	if (!o)
++		return; /* Missing data stays unknown if the bounded cache is full. */
++	o->sta = sta;
++	os_memcpy(o->mac, sta->client_addr, 6);
++	os_memcpy(o->bssid, sta->bss->bssid, 6);
++	o->stamp[kind] = now;
++	o->valid |= 1U << kind;
++}
++struct mesh_json { char *buf; size_t size, used; int failed; };
++static void mesh_json_add(struct mesh_json *j, const char *fmt, ...)
++{
++	va_list ap;
++	int n;
++	if (j->failed)
++		return;
++	va_start(ap, fmt);
++	n = vsnprintf(j->buf + j->used, j->size - j->used, fmt, ap);
++	va_end(ap);
++	if (n < 0 || (size_t)n >= j->size - j->used)
++		j->failed = 1;
++	else
++		j->used += n;
++}
++static void mesh_json_mac(struct mesh_json *j, const unsigned char *m)
++{
++	mesh_json_add(j, "\"%02x:%02x:%02x:%02x:%02x:%02x\"",
++		m[0], m[1], m[2], m[3], m[4], m[5]);
++}
++static int mesh_valid_mac(const unsigned char *m)
++{
++	static const unsigned char zero[6] = {0};
++	return !(m[0] & 1) && os_memcmp(m, zero, 6);
++}
++static int mesh_age(struct mesh_observation *o, enum mesh_measurement kind,
++		unsigned long long now, unsigned long long *age)
++{
++	if (!now || !o || !(o->valid & (1U << kind)) || now < o->stamp[kind])
++		return 0;
++	*age = now - o->stamp[kind];
++	return *age <= MESH_FRESH_MS;
++}
++static int mesh_dump_clients(struct mapd_global *global, char *reply, size_t size)
++{
++	struct own_1905_device *ctx = &global->dev;
++	struct _1905_map_device *own = topo_srv_get_next_1905_device(ctx, NULL), *dev;
++	struct mesh_json j = {reply, size, 0, 0};
++	unsigned int nodes = 0, clients = 0, visits = 0;
++	int truncated = 0;
++	unsigned long long now = mesh_now_ms();
++	mesh_json_add(&j, "{\"schema\":1,\"fresh_ms\":30000,\"nodes\":[");
++	for (dev = own; dev && visits++ < 64; dev = topo_srv_get_next_1905_device(ctx, dev)) {
++		struct iface_info *iface, *next;
++		unsigned int interfaces = 0, scanned = 0;
++		if (dev != own && !dev->in_network)
++			continue;
++		if (!mesh_valid_mac(dev->_1905_info.al_mac_addr))
++			continue;
++		if (nodes == MESH_NODE_CAP) { truncated = 1; break; }
++		mesh_json_add(&j, "%s{\"alid\":", nodes++ ? "," : "");
++		mesh_json_mac(&j, dev->_1905_info.al_mac_addr);
++		mesh_json_add(&j, ",\"role\":%u,\"local\":%s,\"interfaces\":[",
++			(unsigned int)dev->device_role, dev == own ? "true" : "false");
++		SLIST_FOREACH_SAFE(iface, &dev->_1905_info.first_iface, next_iface, next) {
++			if (++scanned > 64 || interfaces == MESH_INTERFACE_CAP) { truncated = 1; break; }
++			if (!mesh_valid_mac(iface->iface_addr))
++				continue;
++			mesh_json_add(&j, "%s", interfaces++ ? "," : "");
++			mesh_json_mac(&j, iface->iface_addr);
++		}
++		mesh_json_add(&j, "]}");
++	}
++	if (dev) truncated = 1;
++	mesh_json_add(&j, "],\"clients\":[");
++	visits = 0;
++	for (dev = own; dev && visits++ < 64; dev = topo_srv_get_next_1905_device(ctx, dev)) {
++		struct associated_clients *sta, *next;
++		unsigned int scanned = 0;
++		if (dev != own && !dev->in_network)
++			continue;
++		SLIST_FOREACH_SAFE(sta, &dev->assoc_clients, next_client, next) {
++			struct mesh_observation *o;
++			unsigned long long link_age = 0, ext_age = 0, traffic_age = 0;
++			int link, extended, traffic;
++			const char *band = "null";
++			if (++scanned > 512 || clients == MESH_CLIENT_CAP) { truncated = 1; break; }
++			if (!sta->bss || !sta->bss->radio || sta->is_bh_link || sta->is_APCLI ||
++			    !mesh_valid_mac(sta->client_addr) || !mesh_valid_mac(sta->bss->bssid) ||
++			    topo_srv_get_1905_device_from_iface(ctx, sta->client_addr))
++				continue;
++			o = mesh_observation(sta);
++			link = mesh_age(o, MESH_LINK, now, &link_age);
++			extended = mesh_age(o, MESH_EXTENDED, now, &ext_age);
++			traffic = mesh_age(o, MESH_TRAFFIC, now, &traffic_age);
++			if (sta->bss->radio->band == BAND_2G) band = "\"2g\"";
++			else if (sta->bss->radio->band == BAND_5GL || sta->bss->radio->band == BAND_5GH) band = "\"5g\"";
++#ifdef MAP_6E_SUPPORT
++			else if (sta->bss->radio->band == BAND_6G) band = "\"6g\"";
++#endif
++			mesh_json_add(&j, "%s{\"mac\":", clients++ ? "," : "");
++			mesh_json_mac(&j, sta->client_addr);
++			mesh_json_add(&j, ",\"node\":"); mesh_json_mac(&j, dev->_1905_info.al_mac_addr);
++			mesh_json_add(&j, ",\"bssid\":"); mesh_json_mac(&j, sta->bss->bssid);
++			mesh_json_add(&j, ",\"band\":%s,\"rssi_dbm\":", band);
++			if (link && (signed char)sta->rssi_uplink >= -127 && (signed char)sta->rssi_uplink < 0)
++				mesh_json_add(&j, "%d", (signed char)sta->rssi_uplink);
++			else mesh_json_add(&j, "null");
++			mesh_json_add(&j, ",\"link_age_ms\":");
++			if (link) mesh_json_add(&j, "%llu", link_age); else mesh_json_add(&j, "null");
++			mesh_json_add(&j, ",\"downlink_mbps\":");
++			if (link) mesh_json_add(&j, "%u", sta->erate_downlink); else mesh_json_add(&j, "null");
++			mesh_json_add(&j, ",\"uplink_mbps\":");
++			if (link) mesh_json_add(&j, "%u", sta->erate_uplink); else mesh_json_add(&j, "null");
++#ifdef MAP_R2
++			mesh_json_add(&j, ",\"last_downlink_mbps\":");
++			if (extended) mesh_json_add(&j, "%u", sta->sta_ext_info.last_data_dl_rate); else mesh_json_add(&j, "null");
++			mesh_json_add(&j, ",\"last_uplink_mbps\":");
++			if (extended) mesh_json_add(&j, "%u", sta->sta_ext_info.last_data_ul_rate); else mesh_json_add(&j, "null");
++#endif
++			mesh_json_add(&j, ",\"traffic_age_ms\":");
++#ifdef CENT_STR
++			if (traffic && (dev == own || dev->byte_cnt_unit <= 2)) {
++				unsigned long long scale = dev == own ? 1ULL : 1ULL << (dev->byte_cnt_unit * 10);
++				mesh_json_add(&j, "%llu,\"tx_bytes\":%llu,\"rx_bytes\":%llu,\"tx_packets\":%u,\"rx_packets\":%u,\"tx_errors\":%u,\"rx_errors\":%u,\"retries\":%u",
++					traffic_age, sta->stat_db.bytes_sent * scale, sta->stat_db.bytes_received * scale,
++					sta->stat_db.packets_sent, sta->stat_db.packets_received,
++					sta->stat_db.tx_packets_errors, sta->stat_db.rx_packets_errors, sta->stat_db.retransmission_count);
++			} else
++#endif
++				mesh_json_add(&j, "null,\"tx_bytes\":null,\"rx_bytes\":null,\"tx_packets\":null,\"rx_packets\":null,\"tx_errors\":null,\"rx_errors\":null,\"retries\":null");
++			mesh_json_add(&j, "}");
++		}
++	}
++	if (dev) truncated = 1;
++	mesh_json_add(&j, "],\"truncated\":%s}\n", truncated ? "true" : "false");
++	return j.failed ? -1 : (int)j.used;
++}
+--- a/mapd_interface/ctrl_iface.c
++++ b/mapd_interface/ctrl_iface.c
+@@ -499,6 +499,7 @@
+ }
+ 
+ #ifdef SUPPORT_MULTI_AP
++#include "mesh_clients.inc"
+ /* Numeric diagnostics only: do not expose configuration or alter state. */
+ static int mapd_get_bh_state(const struct mapd_global *global,
+ 		char *reply, size_t reply_size)
+@@ -524,7 +525,7 @@
+ 		char *buf, size_t *resp_len)
+ {
+ 	char *reply = NULL;
+-	const int reply_size = 8092;
++	const int reply_size = os_strcmp(buf, "GET mesh_clients") == 0 ? 65536 : 8092;
+ 	int reply_len = 0;
+ 	int level = MSG_DEBUG;
+ #ifdef SUPPORT_MULTI_AP
+@@ -566,6 +567,8 @@
+ 			*reply=(char)global->dev.device_role;
+ 			reply_len = 1;
+ 
++	} else if (os_strcmp(buf, "GET mesh_clients") == 0) {
++		reply_len = mesh_dump_clients(global, reply, reply_size);
+ 	} else if (os_strcmp(buf, "GET bh_state") == 0) {
+ 		reply_len = mapd_get_bh_state(global, reply, reply_size);
+ 	}else if (os_strncmp(buf, "SELECT BEST AP", 14) == 0){
+--- a/mapd_ctrl/mapd_cli.c
++++ b/mapd_ctrl/mapd_cli.c
+@@ -60,7 +60,7 @@
+ 
+ static int _mapd_ctrl_commapd(struct mapd_interface_ctrl *ctrl, const char *cmd, size_t len1)
+ {
+-    char buf[8092];
++    char buf[65536];
+     size_t len;
+     int ret;
+ 
+--- a/src/topologySrv/metrics.c
++++ b/src/topologySrv/metrics.c
+@@ -1,3 +1,4 @@
++#include "mesh_clients.h"
+ /*
+  * ***************************************************************************
+  * *  Mediatek Inc.
+@@ -1277,6 +1278,7 @@
+ 	// TODO move connected clients to bss basis
+ 	client = (struct connected_clients *)os_zalloc(sizeof(struct connected_clients));
+ 	assoc_client = (struct associated_clients *)os_zalloc(sizeof(struct associated_clients));
++			mesh_client_forget(assoc_client);
+ 	if (!client || !assoc_client) {
+ 		err("mem assoc failed");
+ 		if (client)
+@@ -1370,6 +1372,7 @@
+ 		metrics_ctx->erate_downlink = info->erate_downlink;
+ 		metrics_ctx->erate_uplink = info->erate_uplink;
+ 		metrics_ctx->rssi_uplink = info->rssi_uplink;
++		mesh_client_observe(metrics_ctx, MESH_LINK);
+ 		info->rssi_uplink = rssi_to_rcpi((signed char)info->rssi_uplink);
+ 
+ 		info("insert struct metrics_db");
+@@ -1452,6 +1455,7 @@
+ 			metrics_ctx->sta_ext_info.last_data_ul_rate = info->last_data_ul_rate;
+ 			metrics_ctx->sta_ext_info.utilization_rx = info->utilization_rx;
+ 			metrics_ctx->sta_ext_info.utilization_tx = info->utilization_tx;
++			mesh_client_observe(metrics_ctx, MESH_EXTENDED);
+ 			debug("insert struct link_metrics_db");
+ 			debug("dl rate: %d, ul rate: %d", metrics_ctx->sta_ext_info.last_data_dl_rate, metrics_ctx->sta_ext_info.last_data_ul_rate);
+ 			debug("rx rate: %d, tx rate: %d", metrics_ctx->sta_ext_info.utilization_rx, metrics_ctx->sta_ext_info.utilization_tx);
+--- a/src/topologySrv/tlv_parsor.c
++++ b/src/topologySrv/tlv_parsor.c
+@@ -1,3 +1,4 @@
++#include "mesh_clients.h"
+ /*
+  * ***************************************************************************
+  * *  Mediatek Inc.
+@@ -1858,6 +1859,7 @@
+ 			pos += 4;
+ 			sta->sta_ext_info.utilization_tx = ((*pos) << 24) | ((*(pos + 1)) << 16) |
+ 												((*(pos + 2)) << 8) | (*(pos + 3));
++			mesh_client_observe(sta, MESH_EXTENDED);
+ 			pos += 4;
+ 			break;
+ 		}
+@@ -3360,6 +3362,7 @@
+ 			client->erate_uplink = (((*p)<<24)|((*(p+1))<<16)|((*(p+2))<<8)|(*(p+3)));
+ 			p+=4;
+ 			client->rssi_uplink = rcpi_to_rssi(*p);
++			mesh_client_observe(client, MESH_LINK);
+ 			p++;
+ #ifdef CENT_STR
+ 			uint32_t cid = client_db_get_cid_from_mac((struct mapd_global *)ctx->back_ptr, client->client_addr);
+@@ -4782,6 +4785,7 @@
+ 		cli->stat_db.last_bytes_recieved = cli->stat_db.bytes_received;
+ 		cli->stat_db.last_bytes_sent = cli->stat_db.bytes_sent;
+ 		cli->stat_db.last_traffic_stats_time = now;
++		mesh_client_observe(cli, MESH_TRAFFIC);
+ 	}
+ 
+ 	if (sta && found == 1) {
+@@ -6640,6 +6644,7 @@
+ #endif
+ 			{
+ 				assoc_client = (struct associated_clients *)os_zalloc(sizeof(struct associated_clients));
++			mesh_client_forget(assoc_client);
+ 				if (assoc_client == NULL) {
+ 					err(TOPO_PREX"Memory allocation error\n");
+ 					return -1;
+--- a/src/topologySrv/topologySrv.c
++++ b/src/topologySrv/topologySrv.c
+@@ -1,3 +1,4 @@
++#include "mesh_clients.h"
+ /*
+  * ***************************************************************************
+  * *  Mediatek Inc.
+@@ -8542,6 +8543,7 @@
+ 			err("update sta("MACSTR") in bss("MACSTR")", MAC2STR(cinfo->sta_mac), MAC2STR(cinfo->bssid));
+ 		} else {
+ 			assoc_client = (struct associated_clients *)os_zalloc(sizeof(struct associated_clients));
++			mesh_client_forget(assoc_client);
+ 			if (!assoc_client) {
+ 				err("alloc memory fail for sta("MACSTR") in bss("MACSTR")",
+ 					MAC2STR(cinfo->sta_mac), MAC2STR(cinfo->bssid));

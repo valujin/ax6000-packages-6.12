@@ -3,15 +3,21 @@
 
 case "$1" in
 list)
-  echo '{"status":{},"configure":{"role":"String","backhaul":"String"},"apply":{},"pair":{},"disable":{}}'
+  echo '{"status":{},"clients":{},"configure":{"role":"String","backhaul":"String","backhaul_security":"String","backhaul_band":"String"},"apply":{},"pair":{},"disable":{}}'
   ;;
 call)
   method="$2"
   case "$method" in
+    clients)
+      timeout 5 /usr/libexec/ax6000-mesh-clients || echo '{"ok":false,"error":"Mesh client information is unavailable.","nodes":[],"clients":[]}'
+      ;;
     status)
       enabled="$(uci -q get ax6000_mesh.main.enabled || echo 0)"
       role="$(uci -q get ax6000_mesh.main.role || echo controller)"
       backhaul="$(uci -q get ax6000_mesh.main.backhaul || echo wired)"
+      security="$(uci -q get ax6000_mesh.main.backhaul_security)"
+      [ -n "$security" ] || { if [ "$enabled" = 1 ]; then security=psk2; else security=sae; fi; }
+      band="$(uci -q get ax6000_mesh.main.backhaul_band)"; band=${band:-auto}
       running=0
       if /usr/libexec/ax6000-mesh-health; then running=1; fi
       enrollment='{}'; pairing_remaining=0; connected=false
@@ -22,13 +28,41 @@ call)
           json_get_var connected connected
         else enrollment='{}'; fi
       fi
+      sae_verified=0
+      if [ "$running" = 1 ] && [ "$role" = agent ] && [ "$backhaul" = wireless ] && [ "$security" = sae ]; then
+        if security_reply="$(/usr/libexec/ax6000-mesh-security)" && [ "$security_reply" = 'sae=1' ]; then sae_verified=1
+        else
+          connected=false
+          if json_load "$enrollment" 2>/dev/null; then
+            json_add_boolean connected 0
+            enrollment=$(json_dump)
+          fi
+        fi
+      fi
+      # Bootstrap status describes local management only, never remote application.
+      # Parse a bounded fixed-schema file and publish only an allowlisted phase.
+      managed_sync_phase=unknown
+      managed_file=/var/run/ax6000-mesh-managed-status.json
+      if [ "$enabled" = 1 ] && [ "$running" = 1 ] &&
+         [ "$(cat /etc/ax6000-mesh/phase 2>/dev/null)" = committed ] &&
+         [ -f "$managed_file" ] && [ ! -L "$managed_file" ] &&
+         [ "$(stat -c %s "$managed_file" 2>/dev/null)" -le 1024 ] 2>/dev/null &&
+         json_load "$(head -c 1024 "$managed_file")" 2>/dev/null; then
+        json_get_type managed_schema_type schema
+        json_get_var managed_schema schema
+        json_get_type managed_phase_type phase
+        json_get_var managed_phase phase
+        if [ "$managed_schema_type:$managed_schema:$managed_phase_type" = int:1:string ]; then
+          case "$managed_phase" in
+            unsupported|pending|error) managed_sync_phase=$managed_phase ;;
+            managed) [ "$(uci -q get ax6000_mesh.main.linux_ts)" != 1 ] || managed_sync_phase=managed ;;
+          esac
+        fi
+      fi
       case "$pairing_remaining" in ''|*[!0-9]*) pairing_remaining=0 ;; esac
       json_init
       available=0
-      case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
-        xiaomi,redmi-router-ax6000-stock|xiaomi,redmi-router-ax6000-mtkuboot|xiaomi,redmi-router-ax6000-ubootmod)
-          if command -v wapp >/dev/null && command -v mapd >/dev/null && command -v p1905_managerd >/dev/null && /usr/libexec/ax6000-mesh-control abi; then available=1; fi ;;
-      esac
+      if /usr/libexec/ax6000-mesh-hardware supported && command -v wapp >/dev/null && command -v mapd >/dev/null && command -v p1905_managerd >/dev/null && /usr/libexec/ax6000-mesh-control abi; then available=1; fi
       json_add_boolean ok 1
       json_add_boolean available "$available"
       json_add_boolean enabled "$enabled"
@@ -38,6 +72,10 @@ call)
       json_add_boolean recovery_pending "$recovery_pending"
       json_add_string role "$role"
       json_add_string backhaul "$backhaul"
+      json_add_string backhaul_security "$security"
+      json_add_string backhaul_band "$band"
+      json_add_boolean backhaul_security_verified "$sae_verified"
+      json_add_string managed_sync_phase "$managed_sync_phase"
       if [ -f /var/run/ax6000-mesh-operation/state ]; then
         state="$(cat /var/run/ax6000-mesh-operation/state)"
       elif [ "$enabled" != 1 ]; then state=disabled; elif [ "$running" = 1 ]; then state=running; else state=stopped; fi
@@ -46,6 +84,7 @@ call)
         if [ "$connected" = 1 ] || [ "$connected" = true ]; then phase=connected
         elif [ "$running" = 1 ]; then phase=ready; else phase=$state; fi
       fi
+      if [ "$role" = agent ] && [ "$backhaul" = wireless ] && [ "$security" = sae ] && [ "$sae_verified" != 1 ] && [ "$phase" = connected ]; then phase=ready; fi
       json_add_string state "$state"
       json_add_string phase "$phase"
       json_add_int pairing_remaining "$pairing_remaining"
@@ -54,6 +93,9 @@ call)
         json_add_string error "$(head -c 512 /var/run/ax6000-mesh-error)"
       elif [ -s /etc/ax6000-mesh-last-error ]; then
         json_add_string error "$(head -c 512 /etc/ax6000-mesh-last-error)"
+      elif [ "$enabled" = 1 ] && [ -f /var/run/ax6000-mesh-radio-error ] && [ ! -L /var/run/ax6000-mesh-radio-error ]; then
+        # The callback marker is private; publish no marker contents.
+        json_add_string error 'Mesh could not validate the wireless change. Restore the previous wireless settings or check Mesh recovery before retrying.'
       fi
       status_json=$(json_dump)
       # Both values were generated/validated with jshn, never raw daemon text.
@@ -65,9 +107,39 @@ call)
       fi
       input="$(cat)"
       json_load "$input" || exit 1
-      json_get_var role role
-      json_get_var backhaul backhaul
-      result="$(/usr/libexec/ax6000-mesh-control configure "$role" "$backhaul" 2>&1)" && ok=1 || ok=0
+      invalid=0
+      json_get_keys keys
+      for key in $keys; do
+        case "$key" in role|backhaul|backhaul_security|backhaul_band) ;; *) invalid=1 ;; esac
+      done
+      json_get_type role_type role; json_get_type backhaul_type backhaul
+      json_get_var role role; json_get_var backhaul backhaul
+      [ "$role_type" = string ] && [ "$backhaul_type" = string ] || invalid=1
+      case "$role" in controller|agent) ;; *) invalid=1 ;; esac
+      case "$backhaul" in wired|wireless) ;; *) invalid=1 ;; esac
+      json_get_type security_type backhaul_security
+      json_get_type band_type backhaul_band
+      if [ -n "$security_type" ]; then
+        json_get_var security backhaul_security
+        [ "$security_type" = string ] || invalid=1
+        case "$security" in sae|psk2) ;; *) invalid=1 ;; esac
+      fi
+      if [ -n "$band_type" ]; then
+        json_get_var band backhaul_band
+        [ "$band_type" = string ] || invalid=1
+        case "$band" in auto|5g|2g) ;; *) invalid=1 ;; esac
+      fi
+      if [ "$invalid" = 1 ]; then
+        json_init; json_add_boolean ok 0; json_add_string error 'Invalid Mesh configuration.'; json_dump; exit 0
+      fi
+      # Preserve the legacy three-argument backend call when no new fields exist.
+      set -- configure "$role" "$backhaul"
+      if [ -n "$band_type" ]; then
+        if [ -z "$security_type" ]; then security="$(uci -q get ax6000_mesh.main.backhaul_security)"; security=${security:-psk2}; fi
+        case "$security" in sae|psk2) ;; *) json_init; json_add_boolean ok 0; json_add_string error 'Invalid Mesh security.'; json_dump; exit 0 ;; esac
+        set -- "$@" "$security" "$band"
+      elif [ -n "$security_type" ]; then set -- "$@" "$security"; fi
+      result="$(/usr/libexec/ax6000-mesh-control "$@" 2>&1)" && ok=1 || ok=0
       json_init; json_add_boolean ok "$ok"; [ "$ok" = 1 ] || json_add_string error "$result"; json_dump
       ;;
     apply|disable)

@@ -128,6 +128,13 @@ esac
             p.chmod(0o755)
         for name in ('dnsmasq', 'odhcpd'):
             (self.root / ('running-' + name)).touch()
+        hardware = (FILES / 'usr/libexec/ax6000-mesh-hardware').read_text().replace('/tmp/sysinfo/board_name', str(self.root / 'board_name'))
+        (self.root / 'etc/wireless/l1profile.dat').write_text('INDEX0=MT7986\nINDEX0_profile_path=/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat;/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat\n')
+        hardware = hardware.replace('/etc/wireless/l1profile.dat', str(self.root / 'etc/wireless/l1profile.dat'))
+        (self.root / 'board_name').write_text('xiaomi,redmi-router-ax6000-stock\n')
+        hw = self.root / 'usr/libexec/ax6000-mesh-hardware'
+        hardware = hardware.replace("printf '/etc/wireless/mediatek/%s.dbdc", "printf '" + str(self.root) + "/etc/wireless/mediatek/%s.dbdc")
+        hw.write_text(hardware); hw.chmod(0o755)
         self.helper = self.root / 'transaction'
         text = HELPER.read_text()
         prefixes = ('/etc', '/sys', '/var', '/usr/libexec', '/usr/share/ax6000-mesh', '/proc/uptime', '/proc/sys/kernel/random/boot_id')
@@ -136,6 +143,9 @@ esac
         for command in ('uci', 'pidof', 'ifdown', 'ip', 'cp', 'wifi', 'iwpriv', 'rmmod'):
             text = re.sub(r'(?<![A-Za-z0-9_./-])' + command + r'(?= )',
                           str(self.root / 'bin' / command), text)
+        # Model root-owned transaction files using the test runner's UID.
+        text = text.replace(' = 0:700 ]', ' = '+str(os.getuid())+':700 ]')
+        text = re.sub(r'(\$\(stat -c %u [^\n]+?\)" = )0( \])', r'\g<1>'+str(os.getuid())+r'\2', text)
         self.helper.write_text(text)
         self.helper.chmod(0o755)
         self.env = {**os.environ, 'TEST_ROOT': str(self.root), 'PATH': str(self.root / 'bin') + ':' + os.environ['PATH']}

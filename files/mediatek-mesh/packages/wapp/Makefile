@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=wappd
 PKG_VERSION:=3.0.2.0
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 PKG_SOURCE_VERSION:=80ca5724
 PKG_SOURCE:=wappd-80ca5724.tar.bz2
 PKG_SOURCE_URL:=https://raw.githubusercontent.com/immortalwrt-mt798x/immortalwrt/a3f94baa4ea053130be796915ad9ff2fa5fcf567/dl

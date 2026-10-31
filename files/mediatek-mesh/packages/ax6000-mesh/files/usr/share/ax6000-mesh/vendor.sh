@@ -8,6 +8,11 @@ mesh_auth_code() {
   case "$1" in psk2) printf '0x0020' ;; sae-mixed) printf '0x0060' ;; *) return 1 ;; esac
 }
 
+# Keep FH pairing modes separate from the dedicated backhaul policy.
+mesh_backhaul_auth_code() {
+  case "$1" in psk2) printf '0x0020' ;; sae) printf '0x0040' ;; *) return 1 ;; esac
+}
+
 mesh_validate_credentials() {
   [ "$#" = 3 ] || return 1
   case "$1$2" in *[![:print:]]*) return 1 ;; esac
@@ -16,12 +21,14 @@ mesh_validate_credentials() {
 }
 
 mesh_write_bss() {
-  [ "$#" = 9 ] || return 1
+  [ "$#" = 9 ] || [ "$#" = 10 ] || return 1
   local output="$1" ssid24="$2" key24="$3" auth24="$4" ssid5="$5" key5="$6" auth5="$7" bh_ssid="$8" bh_key="$9"
+  local bh_security="${10-psk2}" bh_auth
   local band index=1 ssid key auth escaped_ssid escaped_key escaped_bh escaped_bhkey
   mesh_validate_credentials "$ssid24" "$key24" "$auth24" &&
     mesh_validate_credentials "$ssid5" "$key5" "$auth5" &&
     mesh_validate_credentials "$bh_ssid" "$bh_key" psk2 || return 1
+  bh_auth=$(mesh_backhaul_auth_code "$bh_security") || return 1
   escaped_bh=$(printf '%s' "$bh_ssid" | sed 's/\\/\\\\/g; s/ /\\ /g')
   escaped_bhkey=$(printf '%s' "$bh_key" | sed 's/\\/\\\\/g; s/ /\\ /g')
   (umask 077; : > "$output") || return 1
@@ -34,7 +41,7 @@ mesh_write_bss() {
     escaped_key=$(printf '%s' "$key" | sed 's/\\/\\\\/g; s/ /\\ /g')
     printf '%s,ff:ff:ff:ff:ff:ff %s %s %s 0x0008 %s 0 1 hidden-N 4095 N/A N/A\n' "$index" "$band" "$escaped_ssid" "$auth" "$escaped_key" >> "$output" || return 1
     index=$((index + 1))
-    printf '%s,ff:ff:ff:ff:ff:ff %s %s 0x0020 0x0008 %s 1 0 hidden-Y 4095 N/A N/A\n' "$index" "$band" "$escaped_bh" "$escaped_bhkey" >> "$output" || return 1
+    printf '%s,ff:ff:ff:ff:ff:ff %s %s %s 0x0008 %s 1 0 hidden-Y 4095 N/A N/A\n' "$index" "$band" "$escaped_bh" "$bh_auth" "$escaped_bhkey" >> "$output" || return 1
     index=$((index + 1))
   done
 }

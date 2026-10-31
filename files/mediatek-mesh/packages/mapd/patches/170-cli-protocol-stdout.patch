@@ -1,0 +1,84 @@
+--- a/mapd_ctrl/mapd_cli.c
++++ b/mapd_ctrl/mapd_cli.c
+@@ -40,7 +40,7 @@
+ 	ctrl_conn = mapd_interface_ctrl_open(ctrl_path);
+ 
+ 	if (!ctrl_conn) {
+-		printf("mapd_interface_ctrl_open failed\n");
++		fprintf(stderr, "mapd_interface_ctrl_open failed\n");
+ 		return -1;
+ 	}
+ 
+@@ -55,7 +55,7 @@
+ 
+ static void mapd_cli_msg_cb(char *msg, size_t len)
+ {
+-    printf("%s\n", msg);
++    fprintf(stderr, "%s\n", msg);
+ }
+ 
+ static int _mapd_ctrl_commapd(struct mapd_interface_ctrl *ctrl, const char *cmd, size_t len1)
+@@ -65,17 +65,17 @@
+     int ret;
+ 
+     if (ctrl_conn == NULL) {
+-        printf("Not connected to Mand - commapd dropped.\n");
++        fprintf(stderr, "Not connected to Mand - commapd dropped.\n");
+         return -1;
+     }
+     len = sizeof(buf) - 1;
+     ret = mapd_interface_ctrl_request(ctrl, cmd, len1, buf, &len,
+             mapd_cli_msg_cb);
+     if (ret == -2) {
+-        printf("'%s' commapd timed out.\n", cmd);
++        fprintf(stderr, "'%s' commapd timed out.\n", cmd);
+         return -2;
+     } else if (ret < 0) {
+-        printf("'%s' commapd failed.\n", cmd);
++        fprintf(stderr, "'%s' commapd failed.\n", cmd);
+         return -1;
+     }
+     buf[len] = '\0';
+@@ -89,14 +89,14 @@
+     int res;
+ 
+     if (argc != 1) {
+-        printf("Invalid GET commapd: needs one argument (variable "
++        fprintf(stderr, "Invalid GET commapd: needs one argument (variable "
+                 "name)\n");
+         return -1;
+     }
+ 
+     res = os_snprintf(cmd, sizeof(cmd), "GET %s", argv[0]);
+     if (os_snprintf_error(sizeof(cmd), res)) {
+-        printf("Too long GET commapd.\n");
++        fprintf(stderr, "Too long GET commapd.\n");
+         return -1;
+     }
+     return _mapd_ctrl_commapd(ctrl, cmd, strlen(cmd));
+@@ -1950,20 +1950,20 @@
+         return -1;
+     }
+ 
+-	printf("count =%d 1=%s 2=%s\n", argc, argv[0], argv[1]);
++	fprintf(stderr, "count =%d 1=%s 2=%s\n", argc, argv[0], argv[1]);
+ 	if (os_snprintf(socket_path, sizeof(socket_path), "%s", argv[1]) < 0)
+-		printf("Os_printf cmd error =%d\n", __LINE__);
++		fprintf(stderr, "Os_printf cmd error =%d\n", __LINE__);
+ 
+ 	if(mapd_cli_open_connection(socket_path) < 0) {
+-        printf("Can't connect to %s\n", socket_path);
++        fprintf(stderr, "Can't connect to %s\n", socket_path);
+ 	    return -1;
+     }
+-    printf("Succesfully opened connection to mapd\n");
++    fprintf(stderr, "Succesfully opened connection to mapd\n");
+ 
+ 	ret = mapd_cli_request(ctrl_conn, argc - 2, &argv[2]);
+ 
+ 	if (ret < 0)
+-		printf("command FAIL!!!\n");
++		fprintf(stderr, "command FAIL!!!\n");
+ 
+ 	mapd_cli_close_connection();
+ 

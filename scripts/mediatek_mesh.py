@@ -25,6 +25,8 @@ ABI_MARKER = {'schema_version': 1, 'abi': 'mtk-20250408-map6e', 'source_commit':
               'defines': {'MAP_MLO_UPLINK': 1}}
 
 
+LUCI_WIRELESS_VERSION = '26.249.28459~d6167ea-r2'
+VENDOR_WIRELESS_VERSION = '1-r3'
 SDK_UAPI = 'ax6000-baseline/mesh-uapi'
 UAPI_HEADERS = {
     'wapp_cmm_type.h': '821fa92e0b2f044928af64e420a4f1735635e7567f312add971c9d715da13898',
@@ -93,13 +95,115 @@ def tree(directory):
     return result
 
 
+def wireless_manifest(profile):
+    """Authenticate the source patch against the selected immutable LuCI feed."""
+    manifest = json.loads(regular(ASSETS / 'patches/luci-wireless-manifest.json', ASSETS))
+    pins = [feed.get('commit') for feed in profile.get('feeds', []) if feed.get('name') == 'luci']
+    need(manifest.get('schema_version') == 1 and pins == [manifest.get('feed_commit')],
+         'MediaTek LuCI wireless feed pin differs')
+    need(manifest.get('patch') == 'luci-wireless-mesh.patch', 'Unexpected LuCI wireless patch')
+    patch = regular(ASSETS / 'patches' / manifest['patch'], ASSETS)
+    need(len(patch) <= 512 * 1024 and digest(patch) == manifest['sha256'], 'LuCI wireless patch hash differs')
+    need(manifest.get('package_version') == LUCI_WIRELESS_VERSION, 'LuCI wireless package version differs')
+    allowed = {
+        'feeds/luci/modules/luci-mod-network/Makefile': None,
+        'feeds/luci/modules/luci-mod-network/root/etc/uci-defaults/95-ax6000-mesh-wireless-vendor':
+            'etc/uci-defaults/95-ax6000-mesh-wireless-vendor',
+        'feeds/luci/modules/luci-mod-network/root/usr/share/rpcd/acl.d/luci-mod-network.json':
+            'usr/share/rpcd/acl.d/luci-mod-network.json',
+    }
+    need(set(manifest['files']) == set(allowed) and
+         all(item['image_path'] == allowed[name] for name, item in manifest['files'].items()),
+         'Unexpected LuCI wireless patch target')
+    recipe = wireless_images(manifest)['feeds/luci/modules/luci-mod-network/Makefile'].decode()
+    need(re.findall(r'^PKG_VERSION:=(.+)$', recipe, re.M) == ['26.249.28459~d6167ea']
+         and re.findall(r'^PKG_RELEASE:=(.+)$', recipe, re.M) == ['2'], 'LuCI wireless recipe version differs')
+    return manifest
+
+
+def vendor_wireless_manifest():
+    """The active MediaTek page is a layer over the exact DB-country postimage."""
+    manifest = json.loads(regular(ASSETS / 'patches/mtwifi-wireless-manifest.json', ASSETS))
+    prefix = 'package/mtk/applications/luci-app-mtwifi-cfg/'
+    allowed = {prefix + 'Makefile': None,
+               prefix + 'root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js': 'usr/share/luci-app-mtwifi-cfg/wireless-mtk.js',
+               prefix + 'root/etc/uci-defaults/luci-app-mtwifi-cfg.default': 'etc/uci-defaults/luci-app-mtwifi-cfg.default'}
+    need(manifest.get('schema_version') == 1 and manifest.get('source_commit') == SOURCE_COMMIT and
+         manifest.get('requires_country_postimage') == '612' and
+         manifest.get('package_version') == VENDOR_WIRELESS_VERSION and
+         manifest.get('patch') == 'mtwifi-wireless-mesh.patch', 'MediaTek vendor wireless manifest differs')
+    need(set(manifest['files']) == set(allowed) and
+         all(item['image_path'] == allowed[name] and item['mode'] == 0o644
+             for name, item in manifest['files'].items()), 'Unexpected MediaTek vendor wireless target')
+    need(manifest.get('runtime_copies') == {'usr/share/luci-app-mtwifi-cfg/wireless-mtk.js':
+         'www/luci-static/resources/view/network/wireless.js'}, 'MediaTek vendor wireless lifecycle differs')
+    import vendor_country
+    need(manifest['files'][prefix + 'root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js']['before_sha256'] == vendor_country.POSTIMAGES['612'][0] and
+         manifest['files'][prefix + 'Makefile']['before_sha256'] == vendor_country.POSTIMAGES['612'][1],
+         'MediaTek vendor wireless country layer differs')
+    images = wireless_images(manifest)
+    recipe = images[prefix + 'Makefile'].decode()
+    need(re.findall(r'^PKG_VERSION:=(.+)$', recipe, re.M) == ['1'] and
+         re.findall(r'^PKG_RELEASE:=(.+)$', recipe, re.M) == ['3'], 'MediaTek vendor wireless recipe differs')
+    return manifest
+
+
+def wireless_images(manifest, *, after=True):
+    """Full-context patch carries authenticated source preimages and postimages."""
+    patch = regular(ASSETS / 'patches' / manifest['patch'], ASSETS)
+    need(digest(patch) == manifest['sha256'], 'LuCI wireless patch hash differs')
+    files, current = {}, None
+    for line in patch.decode().splitlines(keepends=True):
+        if line.startswith('diff --git '):
+            current = line.split(' b/', 1)[1].strip()
+            need(current in manifest['files'] and current not in files, 'Unexpected LuCI addition header')
+            files[current] = []
+        elif line.startswith('--- a/'):
+            current = line[6:].strip()
+            need(current in manifest['files'] and current not in files, 'Unexpected LuCI wireless patch header')
+            files[current] = []
+        elif line.startswith(('+++ ', '@@', '--- /dev/null')):
+            continue
+        elif current and line[:1] in (' ', '+' if after else '-'):
+            files[current].append(line[1:])
+    result = {name: ''.join(lines).encode() for name, lines in files.items()}
+    field = 'after_sha256' if after else 'before_sha256'
+    need(set(result) == set(manifest['files']) and
+         all((not after and manifest['files'][name][field] is None and data == b'') or
+             digest(data) == manifest['files'][name][field] for name, data in result.items()),
+         'LuCI wireless full-context image hash differs')
+    return result
+
+
+def wireless_targets(source, manifest):
+    targets, states = {}, set()
+    for relative, hashes in manifest['files'].items():
+        target = source / relative
+        if hashes['before_sha256'] is None and not target.exists():
+            need(not any(path.is_symlink() for path in (target, *target.parents)), 'Linked LuCI patch addition refused')
+            actual = None
+        else:
+            data = regular(target, source)
+            actual = digest(data)
+        need(actual in (hashes['before_sha256'], hashes['after_sha256']),
+             'LuCI wireless preimage hash differs: ' + relative)
+        targets[relative] = target
+        states.add(actual == hashes['after_sha256'])
+    need(len(states) == 1, 'LuCI wireless patch has mixed before/after state')
+    return targets, states == {True}
+
+
 def provenance(profile):
     need(validate(profile), 'MediaTek mesh provenance requires explicit opt-in')
     manifest = json.loads(regular(ASSETS / 'patches/mtwifi-manifest.json', ASSETS))
     need(manifest['source_commit'] == SOURCE_COMMIT, 'MediaTek mtwifi patch source differs')
     patch = regular(ASSETS / 'patches' / manifest['patch'], ASSETS)
     need(digest(patch) == manifest['sha256'], 'MediaTek mtwifi patch hash differs')
+    luci = wireless_manifest(profile)
+    vendor = vendor_wireless_manifest()
     return {'schema_version': 1, 'source_commit': SOURCE_COMMIT,
+            'luci_wireless': {'package_version': luci['package_version'], 'feed_commit': luci['feed_commit'], 'patch_sha256': luci['sha256'], 'files': luci['files']},
+            'vendor_wireless': vendor,
             'mtwifi_patch_sha256': manifest['sha256'], 'firmware_abi': ABI_MARKER,
             'wapp_uapi': UAPI_HEADERS,
             'vendor_driver': {'package': 'kmod-mt_wifi', 'version': '7.6.7.3', 'release': 2,
@@ -149,6 +253,10 @@ def configure(profile, source, *, native=False, check_only=False):
         verify_sdk_uapi(source)
     manifest = json.loads(regular(ASSETS / 'patches/mtwifi-manifest.json', ASSETS))
     targets, patched = patch_targets(source, manifest)
+    luci_manifest = wireless_manifest(profile)
+    luci_targets, luci_patched = wireless_targets(source, luci_manifest)
+    vendor_manifest = vendor_wireless_manifest()
+    vendor_targets, vendor_patched = patch_targets(source, vendor_manifest)
     proof = provenance(profile)
     if not native:
         need(baseline['mediatek_mesh'] == proof, 'Native SDK MediaTek mesh recipe provenance differs')
@@ -175,31 +283,38 @@ def configure(profile, source, *, native=False, check_only=False):
             need(not check_only, 'MediaTek mesh copied package absent: ' + name)
     if check_only:
         need(patched, 'MediaTek mtwifi patch is not applied')
+        need(luci_patched, 'LuCI wireless patch is not applied')
+        need(vendor_patched, 'MediaTek vendor wireless patch is not applied')
         return proof
     # Preflight the complete patch in a temporary canonical tree before copying
     # any package or changing any real upstream file.
     updates = {}
-    if not patched:
-        with tempfile.TemporaryDirectory(prefix='ax6000-mtwifi-patch-') as temporary:
+    all_targets = {**targets, **luci_targets, **vendor_targets}
+    for active_manifest, active_targets, already_patched in ((manifest, targets, patched),
+                                                            (luci_manifest, luci_targets, luci_patched),
+                                                            (vendor_manifest, vendor_targets, vendor_patched)):
+        if already_patched:
+            continue
+        with tempfile.TemporaryDirectory(prefix='ax6000-mesh-source-patch-') as temporary:
             temporary = Path(temporary)
-            for relative, path in targets.items():
+            for relative, path in active_targets.items():
                 staged = temporary / relative
                 staged.parent.mkdir(parents=True, exist_ok=True)
                 if path.is_file():
                     staged.write_bytes(path.read_bytes())
-            patch = ASSETS / 'patches' / manifest['patch']
+            patch = ASSETS / 'patches' / active_manifest['patch']
             subprocess.run(['git', 'apply', '--check', str(patch)], cwd=temporary, check=True, capture_output=True)
             subprocess.run(['git', 'apply', str(patch)], cwd=temporary, check=True, capture_output=True)
-            for relative in targets:
+            for relative in active_targets:
                 data = (temporary / relative).read_bytes()
-                need(digest(data) == manifest['files'][relative]['after_sha256'], 'MediaTek mtwifi patched hash differs')
+                need(digest(data) == active_manifest['files'][relative]['after_sha256'], 'MediaTek patched source hash differs')
                 updates[relative] = data
     for name in LOCAL_PACKAGES:
         if not (destination / name).exists():
             shutil.copytree(ASSETS / 'packages' / name, destination / name)
     for relative, data in updates.items():
-        targets[relative].parent.mkdir(parents=True, exist_ok=True)
-        targets[relative].write_bytes(data)
+        all_targets[relative].parent.mkdir(parents=True, exist_ok=True)
+        all_targets[relative].write_bytes(data)
     if native and not marker.exists():
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_bytes(abi_bytes())
@@ -251,9 +366,22 @@ def expected(profile):
     patch_manifest = json.loads((ASSETS / 'patches/mtwifi-manifest.json').read_bytes())
     hashes = {relative.split('/files/', 1)[1]: item['after_sha256']
               for relative, item in patch_manifest['files'].items() if '/files/' in relative}
-    versions['mtwifi-cfg-ucode'] = '3-r2'
+    luci_manifest = wireless_manifest(profile)
+    for relative, data in wireless_images(luci_manifest).items():
+        image_path = luci_manifest['files'][relative]['image_path']
+        if image_path is not None:
+            files[image_path] = (data, 0o644)
+    vendor_manifest = vendor_wireless_manifest()
+    for relative, data in wireless_images(vendor_manifest).items():
+        item = vendor_manifest['files'][relative]
+        if item['image_path'] is not None:
+            files[item['image_path']] = (data, item['mode'])
+    versions['luci-app-mtwifi-cfg'] = vendor_manifest['package_version']
+    versions['luci-mod-network'] = luci_manifest['package_version']
+    versions['mtwifi-cfg-ucode'] = '3-r3'
     versions['kmod-mt_wifi'] = '6.12.108.7.6.7.3-r2'
     return {'files': files, 'hashes': hashes, 'versions': versions,
+            'runtime_copies': vendor_manifest['runtime_copies'],
             'version_suffixes': {'luci-i18n-ax6000-mesh-ru': ''}}
 
 

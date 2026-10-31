@@ -1,0 +1,211 @@
+#!/bin/sh
+# Automatic management-preserving entry into already measured managed Mesh.
+set -e
+umask 077
+LC_ALL=C; export LC_ALL
+. /usr/share/libubox/jshn.sh
+state=/etc/ax6000-mesh
+journal=$state/ts-bootstrap
+lib=/usr/libexec
+config=/etc/config
+status_file=/var/run/ax6000-mesh-managed-status.json
+work=''; rollback_needed=0
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+get() { uci -q get "$1" 2>/dev/null || :; }
+private() {
+ [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ] && [ "$(stat -c %h "$1")" = 1 ] && [ "$(stat -c %s "$1")" -le 262144 ] || return 1
+ [ "$((0$(stat -c %a "$1") & 077))" = 0 ]
+}
+status() {
+ # Fixed statuses only: never include credentials or raw command errors.
+ printf '{"schema":1,"phase":"%s","reason":"%s"}\n' "$1" "$2" > "$status_file.new"
+ mv "$status_file.new" "$status_file"
+}
+phase() { printf '%s\n' "$1" > "$journal/phase.new"; mv "$journal/phase.new" "$journal/phase"; sync; }
+clean_uci() {
+ local p
+ for p in network dhcp wireless ax6000_mesh; do [ -z "$(uci -q changes "$p")" ] || return 1; done
+}
+transport() {
+ private "$state/ts-transport.json" && private "$state/ts-capabilities.json" || return 1
+ json_load_file "$state/ts-transport.json" || return 1
+ json_get_vars schema bridge management_vid quarantine_vid
+ [ "$schema:$bridge:$management_vid" = 2:br-lan:1 ] || return 1
+ case "$quarantine_vid" in ''|*[!0-9]*) return 1;; esac
+ [ "$quarantine_vid" -gt 1 ] && [ "$quarantine_vid" -le 4094 ]
+}
+staged_uci() { uci -c "$work" -t "$work/.uci" "$@"; }
+# Reconstruct the only permitted network/mesh mutations from journal originals.
+# Used by the transaction API as well as the writer; no live commands here.
+candidates() {
+ local section found='' ports='' n q names trunks
+ cp "$journal/before-network" "$work/network"
+ cp "$journal/before-mesh" "$work/ax6000_mesh"
+ [ "$(staged_uci -q get network.lan.device)" = br-lan ] || return 1
+ for section in $(staged_uci -q -X show network | sed -n 's/^network\.\([A-Za-z0-9_]*\)=device$/\1/p'); do
+  [ "$(staged_uci -q get network.$section.name || :)" = br-lan ] || continue
+  [ -z "$found" ] || return 1; found=$section
+ done
+ [ -n "$found" ] && [ "$(staged_uci -q get network.$found.type)" = bridge ] || return 1
+ [ -z "$(staged_uci -q get network.ax6000_mesh_management || :)" ] || return 1
+ for section in $(staged_uci -q -X show network | sed -n 's/^network\.\([A-Za-z0-9_]*\)=bridge-vlan$/\1/p'); do
+  [ "$(staged_uci -q get network.$section.device || :)" = br-lan ] || continue
+  [ "$(staged_uci -q get network.$section.vlan || :)" != 1 ] || return 1
+ done
+ json_load_file "$journal/bridge-plan.json" || return 1
+ json_select transport || return 1; json_get_var q quarantine_vid; [ "$q" = "$quarantine_vid" ] || return 1
+ json_get_values names management_ifnames
+ json_get_values trunks trunk_ifnames
+ names=$(printf '%s\n' "$names" "$trunks" | tr ' ' '\n' | sort -u)
+ for n in $names; do
+  [ "$n" != br-lan ] || continue
+  case "$n" in ''|*[!A-Za-z0-9_.-]*) return 1;; esac
+  [ "${#n}" -le 15 ] || return 1
+  ports="$ports $n"
+ done
+ staged_uci set "network.$found.vlan_filtering=1"
+ staged_uci set network.ax6000_mesh_management=bridge-vlan
+ staged_uci set network.ax6000_mesh_management.device=br-lan
+ staged_uci set network.ax6000_mesh_management.vlan=1
+ staged_uci set network.ax6000_mesh_management.local=1
+ for n in $ports; do staged_uci add_list "network.ax6000_mesh_management.ports=$n:u*"; done
+ staged_uci set ax6000_mesh.main.linux_ts=1
+ staged_uci set "ax6000_mesh.main.quarantine_vid=$quarantine_vid"
+ staged_uci commit network; staged_uci commit ax6000_mesh
+}
+journal_valid() {
+ [ -d "$journal" ] && [ ! -L "$journal" ] && [ "$(stat -c %u:%a "$journal")" = 0:700 ] || return 1
+ local n
+ for n in before-network before-mesh network ax6000_mesh bridge-plan.json source.sha256 transport.sha256; do private "$journal/$n" || return 1; done
+ (cd "$journal" && sha256sum -s -c source.sha256) || return 1
+ [ "$(sha256sum "$state/ts-transport.json" | cut -d' ' -f1)" = "$(cat "$journal/transport.sha256")" ] || return 1
+ work=$(mktemp -d "$state/.bootstrap-validate.XXXXXX") || return 1
+ candidates && cmp -s "$work/network" "$journal/network" && cmp -s "$work/ax6000_mesh" "$journal/ax6000_mesh"
+}
+validate() {
+ transport && journal_valid || return 1
+ case "${1-}" in
+  '') cmp -s "$config/network" "$journal/network" && cmp -s "$config/ax6000_mesh" "$journal/ax6000_mesh" ;;
+  rollback) cmp -s "$config/network" "$journal/before-network" && cmp -s "$config/ax6000_mesh" "$journal/before-mesh" ;;
+  *) return 1 ;;
+ esac
+}
+restore() {
+ local n before candidate live
+ # Rollback only the exact bootstrap candidates; never overwrite a newer edit.
+ for n in network ax6000_mesh; do
+  before=before-network; [ "$n" != ax6000_mesh ] || before=before-mesh
+  candidate=$journal/$n; live=$config/$n
+  cmp -s "$live" "$candidate" || cmp -s "$live" "$journal/$before" || return 1
+ done
+ "$lib/ax6000-mesh-bootstrap-bridge" rollback "$journal/bridge-plan.json" || return 1
+ cp -p "$journal/before-network" "$config/network.bootstrap-new"; mv "$config/network.bootstrap-new" "$config/network"
+ cp -p "$journal/before-mesh" "$config/ax6000_mesh.bootstrap-new"; mv "$config/ax6000_mesh.bootstrap-new" "$config/ax6000_mesh"
+ # If publication failed before adoption, the original seal is already valid.
+ # Only a successfully resealed transition needs inverse adoption.
+ "$lib/ax6000-mesh-transaction" check || "$lib/ax6000-mesh-transaction" adopt-managed-bootstrap rollback || return 1
+ phase rolled_back; rollback_needed=0; status error bootstrap_restored
+}
+cleanup() {
+ rc=$?
+ if [ "$rollback_needed" = 1 ]; then restore || status error rollback_requires_recovery; fi
+ [ -z "$work" ] || rm -rf "$work"
+ exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+case "${1-}" in
+ validate-journal) [ "$#" = 1 ] || exit 1; transport && journal_valid; exit $? ;;
+ validate) [ "$#" -le 2 ] || exit 1; validate "${2-}"; exit $? ;;
+ once) [ "$#" = 1 ] || exit 1 ;;
+ monitor)
+  [ "$#" = 1 ] || exit 1
+  while :; do
+   rm -f /var/run/ax6000-mesh-managed-request
+   "$0" once || :
+   tick=0
+   while [ "$tick" -lt 5 ] && [ ! -f /var/run/ax6000-mesh-managed-request ]; do sleep 1; tick=$((tick+1)); done
+  done ;;
+ *) fail 'Invalid managed bootstrap operation.' ;;
+esac
+[ "$(id -u)" = 0 ] || fail 'Managed bootstrap requires root.'
+if [ "$(cat "$state/phase" 2>/dev/null)" != committed ] || [ "$(get ax6000_mesh.main.enabled)" != 1 ]; then
+ rm -f "$status_file"; exit 0
+fi
+role=$(get ax6000_mesh.main.role)
+case "$role" in controller|agent) ;; *) fail 'Invalid enrolled Mesh role.';; esac
+exec 7>/var/lock/ax6000-mesh-bootstrap.lock; flock -n 7 || exit 0
+exec 9>/var/lock/ax6000-mesh.lock; flock -n 9 || exit 0
+# Invalid/missing hardware proof does not convert or interrupt legacy enrollment.
+if ! "$lib/ax6000-mesh-ts-provision" bootstrap || ! "$lib/ax6000-mesh-ts-capability" || ! transport; then
+ if [ "$(get ax6000_mesh.main.linux_ts)" = 1 ]; then "$lib/ax6000-mesh-ts-runtime" quarantine 7>&- 9>&- >/dev/null 2>&1 || :; fi
+ status unsupported validated_capability_unavailable; exit 0
+fi
+# Serialize with driver radio creation during the management bridge transition.
+exec 8>/var/lock/mtwifi.lock
+attempt=0
+while ! flock -n 8; do
+ attempt=$((attempt+1)); [ "$attempt" -lt 30 ] || { status pending radio_configuration_busy; exit 1; }; sleep 1
+done
+if [ -f "$journal/phase" ]; then
+ case "$(cat "$journal/phase")" in
+  publishing) journal_valid || fail 'Interrupted bootstrap journal is invalid.'; rollback_needed=1; restore || fail 'Interrupted bootstrap needs recovery.' ;;
+  adopted|syncing|active) ;; # Existing policy journal owns any later pool changes.
+  prepared|rolled_back) rm -rf "$journal" ;;
+  *) fail 'Unknown bootstrap journal phase.' ;;
+ esac
+fi
+if [ "$(get ax6000_mesh.main.linux_ts)" != 1 ]; then
+ "$lib/ax6000-mesh-transaction" check || fail 'Enrollment changed before managed bootstrap.'
+ clean_uci || fail 'Pending configuration edits defer managed bootstrap.'
+ # Pure generation must succeed before bridge or UCI publication.
+ if [ "$role" = controller ]; then
+  "$lib/ax6000-mesh-controller-sync" preflight "$quarantine_vid" || { status unsupported controller_policy_unsupported; exit 1; }
+ else "$lib/ax6000-mesh-agent-sync" preflight || { status unsupported agent_policy_unsupported; exit 1; }; fi
+ [ ! -e "$journal" ] || fail 'Bootstrap journal already exists.'
+ mkdir -m 700 "$journal"
+ cp -p "$config/network" "$journal/before-network"; cp -p "$config/ax6000_mesh" "$journal/before-mesh"
+ chmod 600 "$journal/before-network" "$journal/before-mesh"
+ (cd "$journal" && sha256sum before-network before-mesh > source.sha256)
+ sha256sum "$state/ts-transport.json" | cut -d' ' -f1 > "$journal/transport.sha256"
+ "$lib/ax6000-mesh-bootstrap-bridge" plan "$state/ts-transport.json" "$journal/bridge-plan.json" || { rm -rf "$journal"; status unsupported bridge_shape_unsupported; exit 1; }
+ work=$(mktemp -d "$state/.bootstrap-stage.XXXXXX")
+ candidates || { rm -rf "$journal"; status unsupported network_shape_unsupported; exit 1; }
+ cp "$work/network" "$journal/network"; cp "$work/ax6000_mesh" "$journal/ax6000_mesh"
+ phase prepared
+ cmp -s "$config/network" "$journal/before-network" && cmp -s "$config/ax6000_mesh" "$journal/before-mesh" && clean_uci || fail 'Configuration changed while staging bootstrap.'
+ phase publishing; rollback_needed=1
+ "$lib/ax6000-mesh-bootstrap-bridge" apply "$journal/bridge-plan.json" || fail 'Cannot prepare management-preserving bridge.'
+ cp "$journal/network" "$config/network.bootstrap-new"; mv "$config/network.bootstrap-new" "$config/network"
+ cp "$journal/ax6000_mesh" "$config/ax6000_mesh.bootstrap-new"; mv "$config/ax6000_mesh.bootstrap-new" "$config/ax6000_mesh"
+ "$lib/ax6000-mesh-transaction" adopt-managed-bootstrap || fail 'Cannot adopt exact managed bootstrap.'
+ phase adopted; rollback_needed=0
+fi
+# A recreated bridge inherits kernel PVID 1: quarantine every owned guest
+# before any filter change. The bridge helper independently refuses any live or
+# attached guest remaining, including placeholders absent from ownership.
+repaired=0
+if [ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null)" != 1 ] || [ "$(cat /sys/class/net/br-lan/bridge/default_pvid 2>/dev/null)" != 0 ] || ! "$lib/ax6000-mesh-bootstrap-bridge" health "$state/ts-transport.json"; then
+ "$lib/ax6000-mesh-ts-supervise" stop 7>&- 9>&- >/dev/null 2>&1 || :
+ "$lib/ax6000-mesh-ts-runtime" quarantine 7>&- 9>&- >/dev/null 2>&1 || :
+ [ -z "$work" ] || rm -rf "$work"
+ work=$(mktemp -d "$state/.bootstrap-recover.XXXXXX")
+ "$lib/ax6000-mesh-bootstrap-bridge" plan-recover "$state/ts-transport.json" "$work/bridge-plan.json" || { status pending bridge_recovery_quarantined; exit 1; }
+ "$lib/ax6000-mesh-bootstrap-bridge" apply "$work/bridge-plan.json" || { status error bridge_recovery_failed; exit 1; }
+ repaired=1
+fi
+# Healthy workers own continuous policy reconciliation; polling bootstrap must
+# not repeatedly restart them or issue duplicate native renew commands.
+if [ "$(cat "$journal/phase" 2>/dev/null)" = active ] && [ "$repaired" = 0 ] && /etc/init.d/ax6000-mesh-sync running 7>&- 9>&-; then
+ status managed remote_dataplane_unverified; exit 0
+fi
+# No legacy-file rollback after this point: role-sync owns publication recovery.
+phase syncing
+exec 9>&-
+exec 8>&-
+if [ "$repaired" = 1 ]; then
+ timeout 30 /sbin/wifi reload 7>&- || { status pending radio_recovery_pending; exit 1; }
+fi
+if ! timeout 180 "$lib/ax6000-mesh-$role-sync" once 7>&-; then status pending policy_generation_pending; exit 1; fi
+/etc/init.d/ax6000-mesh-sync start 7>&- || { status pending supervisor_start_pending; exit 1; }
+phase active; status managed remote_dataplane_unverified

@@ -9,12 +9,14 @@ lock=/var/lock/ax6000-mesh.lock
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 get() { uci -q get "$1" 2>/dev/null || :; }
 paths() {
-  cat <<'PATHS'
+  dat0=$(/usr/libexec/ax6000-mesh-hardware dat0) || return 1
+  dat1=$(/usr/libexec/ax6000-mesh-hardware dat1) || return 1
+  cat <<PATHS
 network /etc/config/network
 wireless /etc/config/wireless
 mesh /etc/config/ax6000_mesh
-dat0 /etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat
-dat1 /etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat
+dat0 $dat0
+dat1 $dat1
 map-cfg /etc/map/mapd_cfg
 map-user /etc/map/mapd_user.cfg
 1905 /etc/map/1905d.cfg
@@ -28,6 +30,7 @@ wapp-main /etc/wapp_main_inf.conf
 dhcp /etc/config/dhcp
 PATHS
 }
+mesh_paths=$(paths) || fail 'Unsupported Mesh hardware or radio profile.'
 process_birth() {
   [ -r "/proc/$1/stat" ] || return 1
   sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}'
@@ -46,7 +49,7 @@ valid() {
       [ "$(stat -c %u:%g:%a "$state/original-$label")" = "$(cat "$state/mode-$label")" ] || return 1
     else [ -f "$state/absent-$label" ] || return 1; fi
   done <<EOF_PATHS
-$(paths)
+${mesh_paths}
 EOF_PATHS
 }
 require() { valid || fail 'No complete valid Mesh snapshot is available; retained files were not changed.'; }
@@ -114,7 +117,7 @@ begin() {
       stat -c %u:%g:%a "$temporary/original-$label" > "$temporary/mode-$label"
     else : > "$temporary/absent-$label"; fi
   done <<EOF_PATHS
-$(paths)
+${mesh_paths}
 EOF_PATHS
   if [ -d /etc/map ] && [ ! -L /etc/map ]; then stat -c %a /etc/map > "$temporary/map-directory-mode";
   elif [ -e /etc/map ]; then fail 'Unsupported map configuration directory.';
@@ -129,9 +132,12 @@ EOF_PATHS
   else printf '0\n' > "$temporary/owner-pid"; printf '0\n' > "$temporary/owner-birth"; fi
   read -r now _ < /proc/uptime; now=${now%%.*}
   printf '%s\n' "$((now + 360))" > "$temporary/deadline"
+  if [ "$role" = agent ] && lean_agent_services; then : > "$temporary/lean-services"; fi
   for label in dnsmasq odhcpd; do
     if pidof "$label" >/dev/null 2>&1; then printf '1\n'; else printf '0\n'; fi > "$temporary/was-running-$label"
+    if /etc/init.d/$label enabled >/dev/null 2>&1; then printf '1\n'; else printf '0\n'; fi > "$temporary/was-enabled-$label"
   done
+  if [ -f "$temporary/lean-services" ]; then snapshot_optional_services "$temporary"; fi
   (cd "$temporary" && find . -maxdepth 1 -type f ! -name snapshot.sha256 -exec sha256sum '{}' ';' > snapshot.sha256) || fail 'Cannot hash snapshot.'
   printf 'pending\n' > "$temporary/phase"
   sync
@@ -145,6 +151,158 @@ EOF_PATHS
     rm -rf "$state"; sync
     fail 'Cannot start the independent Mesh watchdog; original configuration is unchanged.'
   fi
+}
+lean_agent_services() {
+  local section type option value file dns=0 odhcp=0
+  # A deliberately enabled PBR configuration may depend on local resolver or
+  # VPN policy even without another netifd interface. Own only the dormant
+  # image default, never silently deactivate a configured routing service.
+  case "$(get pbr.config.enabled)" in ''|0) ;; *) return 1 ;; esac
+  for file in /etc/dnsmasq.conf /etc/dnsmasq.*.conf /etc/ethers; do
+    [ -e "$file" ] || continue
+    [ -f "$file" ] && [ -r "$file" ] || return 1
+    if [ "$file" = /etc/dnsmasq.conf ]; then
+      # This native default changes logging only, not DNS/DHCP ownership.
+      if grep -Ev '^[[:space:]]*(#|$)|^[[:space:]]*log-facility[[:space:]]*=[[:space:]]*/dev/null[[:space:]]*$' "$file" >/dev/null; then return 1; else [ "$?" = 1 ] || return 1; fi
+    else
+      if grep -q '^[[:space:]]*[^#[:space:]]' "$file"; then return 1; else [ "$?" = 1 ] || return 1; fi
+    fi
+  done
+  for section in $(uci -q -X show network | sed -n 's/^network\.\([A-Za-z0-9_]*\)=interface$/\1/p'); do
+    case "$section" in
+      loopback|lan|wan|wan6) ;;
+      tailscale)
+        # Only the dormant image default is harmless. An existing Tailscale
+        # device or any additional interface options retain local services.
+        [ "$(get network.$section.proto)" = none ] && [ "$(get network.$section.device)" = tailscale0 ] &&
+          [ "$(get network.$section.multipath)" = off ] && [ ! -e /sys/class/net/tailscale0 ] &&
+          ! pidof tailscaled >/dev/null 2>&1 || return 1
+        # At early boot the device is absent even for an enabled VPN service.
+        # Do not classify that future consumer as a dormant image placeholder.
+        if [ -x /etc/init.d/tailscale ]; then
+          if timeout 5 /etc/init.d/tailscale enabled 9>&- >/dev/null 2>&1; then return 1
+          else [ "$?" = 1 ] || return 1; fi
+        fi
+        for option in $(uci -q -X show "network.$section" | sed -n "s/^network\.$section\.\([^=]*\)=.*/\1/p"); do
+          case "$option" in proto|device|multipath) ;; *) return 1 ;; esac
+        done ;;
+      *) return 1 ;;
+    esac
+  done
+  for section in $(uci -q -X show dhcp | sed -n 's/^dhcp\.\([A-Za-z0-9_]*\)=\([A-Za-z0-9_]*\)$/\1/p'); do
+    type=$(get dhcp.$section)
+    case "$type" in
+      dnsmasq)
+        dns=$((dns + 1))
+        for option in $(uci -q -X show "dhcp.$section" | sed -n "s/^dhcp\.$section\.\([^=]*\)=.*/\1/p"); do
+          case "$option" in
+            domainneeded|boguspriv|filterwin2k|localise_queries|rebind_protection|rebind_localhost|expandhosts|min_cache_ttl|use_stale_cache|cachesize|nonegcache|authoritative|readethers|leasefile|nonwildcard|dns_redirect|ednspacket_max|filter_aaaa|filter_a) ;;
+            localservice) value=$(get dhcp.$section.$option); [ "$value" = 1 ] || return 1 ;;
+            local) value=$(get dhcp.$section.$option); [ "$value" = /lan/ ] || return 1 ;;
+            domain) value=$(get dhcp.$section.$option); [ "$value" = lan ] || return 1 ;;
+            resolvfile) value=$(get dhcp.$section.$option); [ "$value" = /tmp/resolv.conf.d/resolv.conf.auto ] || return 1 ;;
+            *) return 1 ;;
+          esac
+        done ;;
+      odhcpd) odhcp=$((odhcp + 1)) ;;
+      dhcp) [ "$section" = lan ] || [ "$(get dhcp.$section.interface)" = lan ] || { [ "$(get dhcp.$section.interface)" = wan ] && [ "$(get dhcp.$section.ignore)" = 1 ]; } || return 1 ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$dns" = 1 ] && [ "$odhcp" -le 1 ]
+}
+optional_running_state() {
+  local result
+  if [ "$1" = pbr ]; then
+    # Pinned pbr is one-shot: rc.common dispatches running to its explicit
+    # service_running() nft-chain check. status is a diagnostic, pidof is wrong.
+    if timeout 5 /etc/init.d/pbr running 9>&- >/dev/null 2>&1; then printf '1\n'
+    else result=$?; [ "$result" = 1 ] || return 1; printf '0\n'; fi
+  else
+    if pidof "$1" >/dev/null 2>&1; then printf '1\n'; else printf '0\n'; fi
+  fi
+}
+snapshot_optional_services() {
+  local destination=$1 service running enabled result
+  : > "$destination/lean-optional-services"
+  for service in pbr miniupnpd; do
+    running=0; enabled=0
+    if [ -x /etc/init.d/$service ]; then
+      printf '1\n' > "$destination/was-present-$service"
+      running=$(optional_running_state "$service") || fail 'Cannot determine optional AP service activity; original configuration is unchanged.'
+      if timeout 5 /etc/init.d/$service enabled 9>&- >/dev/null 2>&1; then enabled=1
+      else result=$?; [ "$result" = 1 ] || fail 'Cannot determine optional AP service startup; original configuration is unchanged.'; fi
+    else printf '0\n' > "$destination/was-present-$service"; fi
+    printf '%s\n' "$running" > "$destination/was-running-$service"
+    printf '%s\n' "$enabled" > "$destination/was-enabled-$service"
+  done
+}
+stop_optional_services() {
+  [ -f "$state/lean-services" ] && [ -f "$state/lean-optional-services" ] || return 0
+  local service running polls
+  for service in pbr miniupnpd; do
+    case "$(cat "$state/was-present-$service")" in 0) continue ;; 1) ;; *) fail 'Invalid optional AP service snapshot.' ;; esac
+    [ -x /etc/init.d/$service ] || fail 'An owned optional AP service disappeared; snapshot retained.'
+    running=$(optional_running_state "$service") || fail 'Cannot verify optional AP service activity.'
+    # Stop even an inactive one-shot service: procd may still hold interface
+    # watchers which could activate it after network handover.
+    timeout 20 /etc/init.d/$service stop 9>&- || fail 'Cannot stop an unused AP service safely.'
+    polls=0
+    while [ "$(optional_running_state "$service")" = 1 ]; do
+      [ "$polls" -lt 20 ] || fail 'An unused AP service is still active.'
+      polls=$((polls + 1)); sleep 1 9>&-
+    done
+    running=$(optional_running_state "$service") || fail 'Cannot verify optional AP service shutdown.'
+    [ "$running" = 0 ] || fail 'An unused AP service is still active.'
+    timeout 20 /etc/init.d/$service disable 9>&- || fail 'Cannot disable an unused AP service safely.'
+  done
+}
+restore_optional_startup() {
+  [ -f "$state/lean-services" ] && [ -f "$state/lean-optional-services" ] || return 0
+  local service action
+  for service in pbr miniupnpd; do
+    case "$(cat "$state/was-present-$service")" in 0) continue ;; 1) ;; *) fail 'Invalid optional AP service snapshot.' ;; esac
+    case "$(cat "$state/was-enabled-$service")" in 1) action=enable ;; 0) action=disable ;; *) fail 'Invalid optional AP startup snapshot.' ;; esac
+    timeout 20 /etc/init.d/$service "$action" 9>&- || fail 'Cannot restore optional AP service startup; snapshot retained.'
+  done
+}
+restore_optional_running() {
+  [ -f "$state/lean-services" ] && [ -f "$state/lean-optional-services" ] || return 0
+  local service wanted running action
+  for service in pbr miniupnpd; do
+    case "$(cat "$state/was-present-$service")" in 0) continue ;; 1) ;; *) fail 'Invalid optional AP service snapshot.' ;; esac
+    wanted=$(cat "$state/was-running-$service")
+    case "$wanted" in 0|1) ;; *) fail 'Invalid optional AP activity snapshot.' ;; esac
+    running=$(optional_running_state "$service") || fail 'Cannot verify optional AP service restore.'
+    [ "$wanted" != "$running" ] || continue
+    if [ "$wanted" = 1 ]; then action=start; else action=stop; fi
+    timeout 20 /etc/init.d/$service "$action" 9>&- || fail 'Cannot restore optional AP service activity; snapshot retained.'
+    running=$(optional_running_state "$service") || fail 'Cannot verify optional AP service restore.'
+    [ "$running" = "$wanted" ] || fail 'Optional AP service restore did not verify; snapshot retained.'
+  done
+  # PBR start can restart its DNS resolver. Recheck the independently saved
+  # server states after that action, including a server originally stopped.
+  local polls
+  for service in dnsmasq odhcpd; do
+    wanted=$(cat "$state/was-running-$service")
+    case "$wanted" in
+      1)
+        if ! pidof "$service" >/dev/null 2>&1; then
+          timeout 20 /etc/init.d/$service start 9>&- || fail 'Cannot restore LAN service activity; snapshot retained.'
+        fi
+        pidof "$service" >/dev/null 2>&1 || fail 'LAN service restore did not verify; snapshot retained.' ;;
+      0)
+        if pidof "$service" >/dev/null 2>&1; then
+          timeout 20 /etc/init.d/$service stop 9>&- || fail 'Cannot restore stopped LAN service state; snapshot retained.'
+        fi
+        polls=0
+        while pidof "$service" >/dev/null 2>&1; do
+          [ "$polls" -lt 20 ] || fail 'LAN service remained active; snapshot retained.'
+          polls=$((polls + 1)); sleep 1 9>&-
+        done ;;
+      *) fail 'Invalid saved LAN activity state; snapshot retained.' ;;
+    esac
+  done
 }
 stop_servers() {
   local service polls
@@ -165,7 +323,15 @@ prepare_agent() {
   [ "$(phase)" = pending ] && [ "$(cat "$state/role")" = agent ] || fail 'Agent preparation requires a pending agent transaction.'
   [ ! -f "$state/prepared" ] || fail 'Agent network is already prepared.'
   no_pending_uci; preflight_agent
+  # PBR resolver cleanup can restart dnsmasq. Stop it before the DHCP/DNS
+  # shutdown barrier, so it cannot bring a server back during AP handover.
+  stop_optional_services
   stop_servers
+  if [ -f "$state/lean-services" ]; then
+    for service in dnsmasq odhcpd; do
+      timeout 20 /etc/init.d/$service disable 9>&- || fail 'Cannot disable unused LAN services safely.'
+    done
+  fi
   local section option
   for section in $(uci -q -X show dhcp | sed -n 's/^dhcp\.\([A-Za-z0-9_]*\)=dhcp$/\1/p'); do
     [ "$section" = lan ] || [ "$(get dhcp.$section.interface)" = lan ] || continue
@@ -184,10 +350,40 @@ prepare_agent() {
   uci commit network
   : > "$state/prepared"; sync
 }
+# WSC may rewrite credentials only inside the explicitly measured managed pool.
+# Do not call generation validation here: adoption itself computes this digest.
+managed_four_slots() (
+  [ "$(get ax6000_mesh.main.enabled):$(get ax6000_mesh.main.linux_ts)" = 1:1 ] || exit 1
+  role=$(get ax6000_mesh.main.role)
+  case "$role" in agent|controller) ;; *) exit 1;; esac
+  [ "$(cat "$state/role" 2>/dev/null)" = "$role" ] || exit 1
+  manifest=$state/ts-capabilities.json
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] && [ "$(stat -c %u "$manifest")" = 0 ] || exit 1
+  mode=$(stat -c %a "$manifest"); [ "$((0$mode & 077))" = 0 ] || exit 1
+  # Read bounded input once; parsing and type checks share the same snapshot.
+  [ "$(stat -c %s "$manifest")" -le 65536 ] || exit 1
+  input=$(head -c 65537 "$manifest" | tr '\000' '\001')
+  [ "${#input}" -le 65536 ] || exit 1
+  nul_marker=$(printf '\001')
+  case "$input" in *"$nul_marker"*) exit 1;; esac
+  case "$input" in *'\u0000'*) exit 1;; esac
+  jshn -r "$input" >/dev/null 2>&1 || exit 1
+  set +u # jshn uses unset namespace variables; isolation is local to this subshell.
+  . /usr/share/libubox/jshn.sh
+  json_load "$input" 2>/dev/null || exit 1
+  for field in schema capacity24 capacity5; do
+    json_get_type type "$field"; [ "$type" = int ] || exit 1
+  done
+  json_get_type type confirmed; [ "$type" = boolean ] || exit 1
+  json_get_vars schema confirmed capacity24 capacity5
+  [ "$schema:$confirmed:$capacity24:$capacity5" = 1:1:4:4 ]
+)
 normalized() {
-  local label=$1 path=$2
+  local label=$1 path=$2 slots=12
   case "$label" in
-    dat0|dat1) sed -E '/^(SSID[12]|WPAPSK[12]|AuthMode|EncrypType|HideSSID|PMFMFPC|PMFMFPR|PMFSHA256|Channel)=/d' "$path" ;;
+    dat0|dat1)
+      if managed_four_slots; then slots=1234; fi
+      sed -E "/^(SSID[$slots]|WPAPSK[$slots]|AuthMode|EncrypType|HideSSID|PMFMFPC|PMFMFPR|PMFSHA256|Channel)=/d" "$path" ;;
     map-cfg|map-user) sed -E '/^BhProfile[0-9](Valid|Ssid|AuthMode|EncrypType|WpaPsk|RaID)=/d' "$path" ;;
     *) cat "$path" ;;
   esac
@@ -205,7 +401,7 @@ current_digest() {
     elif [ ! -e "$path" ]; then printf '%s absent\n' "$label";
     else return 1; fi
   done <<EOF_PATHS
-$(paths)
+${mesh_paths}
 EOF_PATHS
 }
 seal() {
@@ -232,7 +428,229 @@ canonical_agent_wts() (
   mesh_write_bss "$tmp" AX6000-joining "$bh_key" sae-mixed AX6000-joining "$bh_key" sae-mixed "$bh_ssid" "$bh_key" || exit 1
   cmp -s "$tmp" /etc/map/wts_bss_info_config
 )
+# Accept only a normalized, explicit managed controller generation. Immutable
+# enrollment originals remain intact; accepted user config is a separate overlay.
+# Bootstrap alone may adopt its two exact validated configuration candidates.
+# It cannot absorb a partial radio publication or rewrite enrollment originals.
+adopt_managed_bootstrap() {
+  require; no_pending_uci
+  [ "$(phase)" = committed ] || fail 'Managed bootstrap requires committed enrollment.'
+  local mode=${1:-apply} journal=$state/ts-bootstrap target_network target_mesh current old item previous
+  case "$mode" in apply|rollback) ;; *) fail 'Invalid bootstrap adoption operation.' ;; esac
+  [ -d "$journal" ] && [ ! -L "$journal" ] && [ "$(stat -c %u "$journal")" = 0 ] && [ "$(stat -c %a "$journal")" = 700 ] || fail 'Private bootstrap journal is required.'
+  if [ "$mode" = rollback ]; then
+    target_network=$journal/before-network; target_mesh=$journal/before-mesh
+    /usr/libexec/ax6000-mesh-managed-bootstrap validate rollback || fail 'Bootstrap rollback candidates are invalid.'
+  else
+    target_network=$journal/network; target_mesh=$journal/ax6000_mesh
+    /usr/libexec/ax6000-mesh-ts-capability || fail 'Bootstrap dataplane capability is not valid.'
+    /usr/libexec/ax6000-mesh-managed-bootstrap validate || fail 'Bootstrap candidates are invalid.'
+  fi
+  for item in "$target_network" "$target_mesh"; do
+    [ -f "$item" ] && [ ! -L "$item" ] && [ "$(stat -c %u "$item")" = 0 ] && [ "$(stat -c %h "$item")" = 1 ] && [ "$((0$(stat -c %a "$item") & 077))" = 0 ] || fail 'Bootstrap configuration is not private.'
+  done
+  cmp -s /etc/config/network "$target_network" && cmp -s /etc/config/ax6000_mesh "$target_mesh" || fail 'Current configuration is not the exact bootstrap candidate.'
+  current=$(current_digest) || fail 'Cannot inspect bootstrap generation.'
+  old=$(cat "$state/expected")
+  # Toggling managed mode changes the bounded DAT credential normalization.
+  # Compare unchanged files using the PRE-transition mode, then seal the new one.
+  previous=$( (
+    get() {
+      if [ "$1" = ax6000_mesh.main.linux_ts ]; then
+        if [ "$mode" = rollback ]; then printf 1; else printf 0; fi
+      else uci -q get "$1" 2>/dev/null || :; fi
+    }
+    current_digest
+  ) ) || fail 'Cannot inspect prior bootstrap normalization.'
+  [ "$(printf '%s\n' "$previous" | sed -E '/^(network|mesh) /d')" = "$(printf '%s\n' "$old" | sed -E '/^(network|mesh) /d')" ] || fail 'An unrelated configuration changed during bootstrap.'
+  printf '%s\n' "$current" > "$state/expected.new"
+  mv "$state/expected.new" "$state/expected"; sync
+}
+adopt_agent_slots() {
+  require; no_pending_uci
+  [ "$(phase)" = committed ] && [ "$(cat "$state/role")" = agent ] && [ "$(get ax6000_mesh.main.linux_ts)" = 1 ] || fail 'Only a committed managed agent may adopt slots.'
+  /usr/libexec/ax6000-mesh-agent-sync validate-current || fail 'Agent slot generation is invalid.'
+  local current old
+  current=$(current_digest) || fail 'Cannot inspect agent slot generation.'
+  old=$(cat "$state/expected")
+  [ "$(printf '%s\n' "$current" | sed -E '/^(wireless|mesh|dat0|dat1|1905|map-cfg) /d')" = "$(printf '%s\n' "$old" | sed -E '/^(wireless|mesh|dat0|dat1|1905|map-cfg) /d')" ] || fail 'An unrelated agent configuration changed.'
+  printf '%s\n' "$current" > "$state/expected.new"
+  mv "$state/expected.new" "$state/expected"; sync
+}
+# Remove only the network mutations proven by the immutable bootstrap journal.
+# Work on the accepted overlay, retaining unrelated current user configuration.
+strip_bootstrap_network() (
+  overlay=$1
+  journal=$state/ts-bootstrap
+  [ -e "$journal" ] || [ -L "$journal" ] || exit 0
+  /usr/libexec/ax6000-mesh-managed-bootstrap validate-journal || exit 1
+  for input in "$journal/before-network" "$journal/network"; do
+    [ -f "$input" ] && [ ! -L "$input" ] && [ "$(stat -c %u "$input")" = 0 ] && [ "$(stat -c %h "$input")" = 1 ] && [ "$((0$(stat -c %a "$input") & 077))" = 0 ] || exit 1
+  done
+  work=$(mktemp -d "$overlay/.network-clean.XXXXXX") || exit 1
+  trap 'rm -rf "$work"' EXIT HUP INT TERM
+  mkdir "$work/delta"
+  prefix=mesh_overlay_$(basename "$work" | tr -cd A-Za-z0-9_)
+  before=${prefix}_before; candidate=${prefix}_candidate; accepted=${prefix}_accepted
+  cp "$journal/before-network" "$work/$before"
+  cp "$journal/network" "$work/$candidate"
+  cp "$overlay/network" "$work/$accepted"
+  ouci() { uci -q -c "$work" -C "$work" -t "$work/delta" "$@"; }
+  oget() { ouci get "$1" 2>/dev/null || :; }
+  bridge=''
+  for section in $(ouci -X show "$before" | sed -n "s/^$before\\.\\([A-Za-z0-9_]*\\)=device$/\\1/p"); do
+    [ "$(oget "$before.$section.name")" = br-lan ] || continue
+    [ -z "$bridge" ] || exit 1
+    bridge=$section
+  done
+  [ -n "$bridge" ] && [ "$(oget "$before.$bridge.type")" = bridge ] || exit 1
+  [ -z "$(oget "$before.ax6000_mesh_management")" ] || exit 1
+  [ "$(oget "$candidate.$bridge.name"):$(oget "$candidate.$bridge.type"):$(oget "$candidate.$bridge.vlan_filtering")" = br-lan:bridge:1 ] || exit 1
+  [ "$(oget "$accepted.$bridge.name"):$(oget "$accepted.$bridge.type"):$(oget "$accepted.$bridge.vlan_filtering")" = br-lan:bridge:1 ] || exit 1
+  [ "$(oget "$candidate.ax6000_mesh_management")" = bridge-vlan ] || exit 1
+  # Compare the entire owned section, including its list and any extra options.
+  ouci -X show "$candidate.ax6000_mesh_management" | sed "s/^$candidate\\./network./" > "$work/expected-section"
+  ouci -X show "$accepted.ax6000_mesh_management" | sed "s/^$accepted\\./network./" > "$work/actual-section"
+  cmp -s "$work/expected-section" "$work/actual-section" || exit 1
+  original_filter=$(oget "$before.$bridge.vlan_filtering")
+  case "$original_filter" in ''|0|1) ;; *) exit 1;; esac
+  ouci delete "$accepted.ax6000_mesh_management" || exit 1
+  if [ -n "$original_filter" ]; then
+    ouci set "$accepted.$bridge.vlan_filtering=$original_filter" || exit 1
+  else ouci delete "$accepted.$bridge.vlan_filtering" || exit 1; fi
+  ouci commit "$accepted" || exit 1
+  mv "$work/$accepted" "$overlay/network"
+)
+adopt_controller_sync() {
+  require; no_pending_uci
+  [ "$(phase)" = committed ] && [ "$(cat "$state/role")" = controller ] || fail 'Only a committed controller may adopt network synchronization.'
+  [ "$(get ax6000_mesh.main.linux_ts)" = 1 ] || fail 'Managed synchronization is not enabled.'
+  local source=${1:-} current old overlay label
+  case "$source" in "$state"/ts-generations/*/materialized/user-wireless) ;; *) fail 'Invalid managed user overlay path.' ;; esac
+  [ -f "$source" ] && [ ! -L "$source" ] && [ "$(stat -c %u "$source")" = 0 ] || fail 'Missing managed user overlay.'
+  current=$(current_digest) || fail 'Cannot inspect managed generation.'
+  old=$(cat "$state/expected")
+  # Network/DHCP/Wi-Fi are user-owned accepted edits. All unrelated sealed
+  # vendor files remain unchanged; credential-bearing DAT slots are bounded.
+  [ "$(printf '%s\n' "$current" | sed -E '/^(network|dhcp|wireless|mesh|dat0|dat1|wts|1905|map-cfg) /d')" = "$(printf '%s\n' "$old" | sed -E '/^(network|dhcp|wireless|mesh|dat0|dat1|wts|1905|map-cfg) /d')" ] || fail 'An unrelated Mesh-owned configuration changed.'
+  overlay=$(mktemp -d "$state/.accepted-user.XXXXXX") || fail 'Cannot stage user rollback overlay.'
+  cp -p /etc/config/network "$overlay/network" && cp -p /etc/config/dhcp "$overlay/dhcp" && cp -p "$source" "$overlay/wireless" || { rm -rf "$overlay"; fail 'Cannot preserve user configuration.'; }
+  chmod 700 "$overlay"; chmod 600 "$overlay"/*
+  strip_bootstrap_network "$overlay" || { rm -rf "$overlay"; fail 'Bootstrap-owned network options conflict with accepted user edits.'; }
+  (cd "$overlay" && sha256sum network dhcp wireless > sha256) || { rm -rf "$overlay"; fail 'Cannot seal user overlay.'; }
+  # Publish a pointer atomically; either old or new complete overlay survives power loss.
+  printf '%s\n' "${overlay##*/}" > "$state/accepted-user-path.new"
+  mv "$state/accepted-user-path.new" "$state/accepted-user-path"
+  printf '%s\n' "$current" > "$state/expected.new"
+  mv "$state/expected.new" "$state/expected"; sync
+}
+# A separate accepted preimage permits narrowly validated MU tuning without
+# weakening immutable enrollment snapshots or the ordinary ownership check.
+radio_directory() {
+  local name=$1 item
+  case "$name" in .radio-*) ;; *) return 1;; esac
+  case "$name" in *[!A-Za-z0-9_.-]*) return 1;; esac
+  radio_dir=$state/$name
+  [ -d "$radio_dir" ] && [ ! -L "$radio_dir" ] && [ "$(stat -c %u:%a "$radio_dir")" = 0:700 ] || return 1
+  for item in wireless dat0 dat1 expected before-expected rollback-wireless sha256; do
+    [ -f "$radio_dir/$item" ] && [ ! -L "$radio_dir/$item" ] && [ "$(stat -c %u "$radio_dir/$item")" = 0 ] && [ "$(stat -c %h "$radio_dir/$item")" = 1 ] || return 1
+  done
+  (cd "$radio_dir" && sha256sum -s -c sha256)
+}
+radio_seal_directory() {
+  (cd "$1" && sha256sum wireless dat0 dat1 expected before-expected rollback-wireless > sha256)
+}
+radio_recover() {
+  [ -f "$state/radio-tuning-pending" ] || return 0
+  radio_directory "$(cat "$state/radio-tuning-pending")" || fail 'Radio tuning journal is invalid.'
+  [ "$(current_digest)" = "$(cat "$radio_dir/expected")" ] || fail 'Radio tuning journal conflicts with current configuration.'
+  cmp -s "$state/expected" "$radio_dir/before-expected" || cmp -s "$state/expected" "$radio_dir/expected" || fail 'Radio tuning journal conflicts with enrollment seal.'
+  cp "$radio_dir/expected" "$state/expected.new"; mv "$state/expected.new" "$state/expected"
+  printf '%s\n' "${radio_dir##*/}" > "$state/radio-baseline-path.new"
+  mv "$state/radio-baseline-path.new" "$state/radio-baseline-path"
+  sync; rm -f "$state/radio-tuning-pending"; sync
+}
+radio_publish() {
+  radio_seal_directory "$1" || fail 'Cannot seal radio tuning candidate.'
+  printf '%s\n' "${1##*/}" > "$state/radio-tuning-pending.new"
+  mv "$state/radio-tuning-pending.new" "$state/radio-tuning-pending"; sync
+  radio_recover
+}
+radio_preimage_matches() {
+  local label digest
+  for label in wireless dat0 dat1; do
+    [ -f "$1/$label" ] && [ ! -L "$1/$label" ] || return 1
+    digest=$(normalized "$label" "$1/$label" | sha256sum) || return 1
+    [ "$label $(stat -c %a "$1/$label") ${digest%% *}" = "$(sed -n "/^$label /p" "$2")" ] || return 1
+  done
+}
+radio_capture() {
+  local candidate label path
+  candidate=$(mktemp -d "$state/.radio-XXXXXX") || fail 'Cannot capture accepted radio preimage.'
+  while read -r label path; do
+    case "$label" in wireless|dat0|dat1) cp -p "$path" "$candidate/$label" || fail 'Cannot capture radio files.';; esac
+  done <<EOF_RADIO
+${mesh_paths}
+EOF_RADIO
+  cp "$state/expected" "$candidate/expected"; cp "$state/expected" "$candidate/before-expected"
+  cp -p "$state/original-wireless" "$candidate/rollback-wireless"
+  radio_preimage_matches "$candidate" "$candidate/expected" || fail 'Radio preimage changed during capture.'
+  radio_publish "$candidate"
+}
+radio_import() {
+  require; no_pending_uci
+  [ "$(phase)" = committed ] && [ "$#" = 1 ] && [ ! -e "$state/radio-baseline-path" ] && [ ! -e "$state/radio-tuning-pending" ] || fail 'Radio baseline import requires an unbound committed enrollment.'
+  local input=$1 label digest expected candidate
+  [ -d "$input" ] && [ ! -L "$input" ] && [ "$(stat -c %u:%a "$input")" = 0:700 ] || fail 'Private authenticated radio preimage required.'
+  for label in wireless dat0 dat1; do
+    [ -f "$input/$label" ] && [ ! -L "$input/$label" ] && [ "$(stat -c %u "$input/$label")" = 0 ] && [ "$(stat -c %h "$input/$label")" = 1 ] || fail 'Invalid radio preimage file.'
+    digest=$(normalized "$label" "$input/$label" | sha256sum)
+    expected="$label $(stat -c %a "$input/$label") ${digest%% *}"
+    [ "$expected" = "$(sed -n "/^$label /p" "$state/expected")" ] || fail 'Radio preimage does not match the accepted enrollment seal.'
+  done
+  candidate=$(mktemp -d "$state/.radio-XXXXXX") || fail 'Cannot stage radio baseline.'
+  for label in wireless dat0 dat1; do cp -p "$input/$label" "$candidate/$label"; done
+  cp "$state/expected" "$candidate/expected"; cp "$state/expected" "$candidate/before-expected"
+  cp -p "$state/original-wireless" "$candidate/rollback-wireless"
+  radio_preimage_matches "$candidate" "$candidate/expected" || fail 'Radio preimage changed during import.'
+  radio_seal_directory "$candidate" || fail 'Cannot seal imported radio baseline.'
+  printf '%s\n' "${candidate##*/}" > "$state/radio-baseline-path.new"
+  mv "$state/radio-baseline-path.new" "$state/radio-baseline-path"; sync
+}
+adopt_radio_tuning() {
+  require; no_pending_uci
+  [ "$(phase)" = committed ] || fail 'Radio tuning requires committed enrollment.'
+  radio_recover
+  # No changed-policy exception is needed for ordinary restart or legacy nodes.
+  if (check) >/dev/null 2>&1; then
+    # check also accepts the pre-existing canonical agent WTS exception.
+    # Preserve that restart without rebasing its different WTS digest.
+    if [ ! -f "$state/radio-baseline-path" ] && [ "$(current_digest)" = "$(cat "$state/expected")" ]; then radio_capture; fi
+    return 0
+  fi
+  [ "$(get ax6000_mesh.main.linux_ts)" != 1 ] || fail 'Managed radio edits require the managed policy coordinator.'
+  [ -f "$state/radio-baseline-path" ] && radio_directory "$(cat "$state/radio-baseline-path")" || fail 'Authenticated accepted radio preimage is required before applying tuning.'
+  local baseline=$radio_dir candidate label digest line
+  cmp -s "$baseline/expected" "$state/expected" || fail 'Radio baseline no longer matches the accepted enrollment seal.'
+  radio_preimage_matches "$baseline" "$state/expected" || fail 'Radio baseline files do not match their accepted seal.'
+  # Every unrelated sealed file is still exact. The helper checks only the
+  # three exceptions, including actual driver token order for both bands.
+  [ "$(current_digest | sed -E '/^(wireless|dat0|dat1) /d')" = "$(sed -E '/^(wireless|dat0|dat1) /d' "$state/expected")" ] || fail 'An unrelated enrolled configuration changed.'
+  candidate=$(mktemp -d "$state/.radio-XXXXXX"); rmdir "$candidate"
+  /usr/libexec/ax6000-mesh-radio-tuning "$baseline" "$candidate" || fail 'Radio tuning validation failed; native daemons were not stopped.'
+  # The staged copies must still be exactly the files validated by the helper.
+  for label in wireless dat0 dat1; do
+    digest=$(normalized "$label" "$candidate/$label" | sha256sum)
+    line="$label $(stat -c %a "$candidate/$label") ${digest%% *}"
+    [ "$line" = "$(current_digest | sed -n "/^$label /p")" ] || fail 'Radio files changed during tuning validation.'
+  done
+  current_digest > "$candidate/expected"; cp "$state/expected" "$candidate/before-expected"
+  radio_preimage_matches "$candidate" "$candidate/expected" || fail 'Radio files changed during final validation.'
+  [ "$(sed -E '/^(wireless|dat0|dat1) /d' "$candidate/expected")" = "$(sed -E '/^(wireless|dat0|dat1) /d' "$candidate/before-expected")" ] || fail 'Unrelated configuration changed during radio tuning.'
+  radio_publish "$candidate"
+}
 check() {
+  require; radio_recover
   require; [ -f "$state/expected" ] || fail 'The Mesh configuration has not been sealed.'
   no_pending_uci
   local current
@@ -257,9 +675,12 @@ commit() {
   current_digest > "$state/expected.new" || fail 'Cannot capture enrolled vendor configuration.'
   mv "$state/expected.new" "$state/expected"; sync
   local service
-  for service in dnsmasq odhcpd; do
-    [ "$(cat "$state/was-running-$service")" != 1 ] || timeout 20 /etc/init.d/$service start 9>&- || fail 'Cannot resume DHCP/IPv6 services.'
-  done
+  if [ ! -f "$state/lean-services" ]; then
+    for service in dnsmasq odhcpd; do
+      [ "$(cat "$state/was-running-$service")" != 1 ] || timeout 20 /etc/init.d/$service start 9>&- || fail 'Cannot resume DHCP/IPv6 services.'
+    done
+  fi
+  radio_capture
   write_phase committed
   /etc/init.d/ax6000-mesh-watchdog stop 9>&- || :
 }
@@ -294,6 +715,7 @@ rollback() {
   if [ "$reason" != boot ]; then
     timeout 30 /usr/libexec/ax6000-mesh-control disconnect-backhaul 9>&- || fail 'Cannot stop Mesh and disconnect its backhaul; snapshot retained.'
   fi
+  stop_optional_services
   stop_servers
   disconnect_agent "$reason"
   if [ "$reason" != boot ]; then
@@ -306,16 +728,42 @@ rollback() {
     else
       mkdir -p "${path%/*}"
       destination="$path.mesh-restore.$$"
-      cp -p "$state/original-$label" "$destination" || fail 'Restore failed; complete original snapshot retained.'
+      restore_source="$state/original-$label"
+      if [ "$(cat "$state/role")" = controller ] && [ -f "$state/accepted-user-path" ]; then
+        case "$label" in network|dhcp|wireless)
+          overlay_name=$(cat "$state/accepted-user-path")
+          case "$overlay_name" in .accepted-user.*) ;; *) fail 'Invalid accepted user overlay pointer.' ;; esac
+          case "$overlay_name" in *[!A-Za-z0-9_.-]*) fail 'Invalid accepted user overlay pointer.' ;; esac
+          overlay_path="$state/$overlay_name"
+          [ -d "$overlay_path" ] && [ ! -L "$overlay_path" ] && (cd "$overlay_path" && sha256sum -s -c sha256) || fail 'Accepted user overlay is damaged; originals retained.'
+          restore_source="$overlay_path/$label" ;;
+        esac
+      fi
+      if [ "$label" = wireless ] && [ -f "$state/radio-baseline-path" ]; then
+        radio_directory "$(cat "$state/radio-baseline-path")" || fail 'Accepted radio rollback overlay is damaged.'
+        # Managed controller overlays own newer policy and are never replaced.
+        [ -f "$state/accepted-user-path" ] || restore_source="$radio_dir/rollback-wireless"
+      fi
+      cp -p "$restore_source" "$destination" || fail 'Restore failed; complete original snapshot retained.'
       mv -f "$destination" "$path" || fail 'Restore failed; complete original snapshot retained.'
     fi
   done <<EOF_PATHS
-$(paths)
+${mesh_paths}
 EOF_PATHS
   if [ -f "$state/map-directory-mode" ]; then chmod "$(cat "$state/map-directory-mode")" /etc/map;
   else rmdir /etc/map 2>/dev/null || :; fi
   for label in network dhcp wireless ax6000_mesh; do uci -q revert "$label"; done
   sync
+  if [ -f "$state/lean-services" ]; then
+    for service in dnsmasq odhcpd; do
+      case "$(cat "$state/was-enabled-$service")" in
+        1) timeout 20 /etc/init.d/$service enable 9>&- || fail 'Cannot restore service startup; snapshot retained.' ;;
+        0) timeout 20 /etc/init.d/$service disable 9>&- || fail 'Cannot restore service startup; snapshot retained.' ;;
+        *) fail 'Invalid saved service startup state; snapshot retained.' ;;
+      esac
+    done
+  fi
+  restore_optional_startup
   if [ "$reason" != boot ]; then
     # Resume loads driver modules before wifi up reloads the restored network
     # configuration. Keep the snapshot until both radios are ready.
@@ -323,6 +771,7 @@ EOF_PATHS
     for service in dnsmasq odhcpd; do
       [ "$(cat "$state/was-running-$service")" != 1 ] || timeout 20 /etc/init.d/$service start 9>&- || fail 'DHCP/IPv6 restore failed; snapshot retained for retry.'
     done
+    restore_optional_running
   fi
   if [ "$owns_mapfilter" = 1 ] && [ -d /sys/module/mapfilter ]; then
     rmmod mapfilter || fail 'Cannot unload the Mesh-owned mapfilter module; snapshot retained.'
@@ -346,14 +795,34 @@ case "${1:-}" in
   prepare-agent) prepare_agent ;;
   seal) seal ;;
   check) check ;;
+  import-radio-baseline) shift; radio_import "$@" ;;
+  adopt-radio-tuning) adopt_radio_tuning ;;
   commit) commit ;;
+  adopt-controller-sync) adopt_controller_sync "${2:-}" ;;
+  adopt-agent-slots) adopt_agent_slots ;;
+  adopt-managed-bootstrap) adopt_managed_bootstrap "${2:-apply}" ;;
   rollback) rollback "${2:-disable}" ;;
   expire) if [ "$(phase)" = pending ]; then rollback timeout; fi ;;
   recover-boot)
     # sysupgrade selects files/symlinks only; tar may recreate this parent with
     # default permissions. Secure stored credentials before any boot services.
     if [ -d "$state" ] && [ ! -L "$state" ]; then chmod 700 "$state" || fail 'Cannot secure the Mesh snapshot directory.'; fi
-    if [ "$(phase)" = pending ]; then rollback boot; elif [ -e "$state" ]; then require; fi ;;
+    if [ "$(phase)" = pending ]; then rollback boot
+    elif [ -e "$state" ]; then
+      require
+      if [ -f "$state/lean-services" ] && [ "$(cat "$state/role")" = agent ]; then
+        if lean_agent_services; then
+          stop_optional_services
+          stop_servers
+          for service in dnsmasq odhcpd; do timeout 20 /etc/init.d/$service disable 9>&- || fail 'Cannot disable unused LAN services safely.'; done
+        else
+          for service in dnsmasq odhcpd; do
+            [ "$(cat "$state/was-enabled-$service")" != 1 ] || timeout 20 /etc/init.d/$service enable 9>&- || fail 'Cannot restore service startup.'
+          done
+          restore_optional_startup
+        fi
+      fi
+    fi ;;
 
   *) fail 'Invalid Mesh transaction operation.' ;;
 esac

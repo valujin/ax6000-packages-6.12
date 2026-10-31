@@ -2,7 +2,8 @@
 # Coalesce setup callbacks from both radios and avoid blocking netifd.
 pending=/var/run/ax6000-mesh-radio.pending
 mkdir "$pending" 2>/dev/null || exit 0
-trap 'rmdir "$pending" 2>/dev/null || :' EXIT HUP INT TERM
+trap 'rc=$?; rmdir "$pending" 2>/dev/null || :; exit "$rc"' EXIT
+trap 'exit 1' HUP INT TERM
 sleep 8
 exec 9>/var/lock/ax6000-mesh.lock
 # An activation or restoration will start the daemons itself.
@@ -16,8 +17,16 @@ while ! flock -n 8; do
   [ "$attempt" -lt 30 ] || exit 0
   sleep 1
 done
+# Validate and atomically adopt supported user tuning before stopping daemons.
+if ! /usr/libexec/ax6000-mesh-transaction adopt-radio-tuning; then
+  printf '%s\n' 'Mesh radio restart refused: unsupported or unverified configuration change.' > /var/run/ax6000-mesh-radio-error
+  exit 1
+fi
+rm -f /var/run/ax6000-mesh-radio-error
 # Do not hold the radio lock while waiting for both BH bridge ports: a sibling
 # radio setup may still need this lock to create its port.
 flock -u 8
 exec 8>&-
-/etc/init.d/ax6000-mesh restart 9>&- >/dev/null 2>&1
+# The synchronous ownership check must share this flock. start_service closes
+# its inherited descriptor after prepare, before declaring any daemon instance.
+/etc/init.d/ax6000-mesh restart >/dev/null 2>&1

@@ -1,0 +1,65 @@
+#!/bin/sh
+# Mandatory before driver setup and before netifd CMD_UP in managed TS mode.
+set -eu
+LC_ALL=C; export LC_ALL
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+get() { uci -q get "$1" 2>/dev/null || :; }
+case "${1-}" in preflight|preattach) ;; *) fail 'Invalid TS gate phase.' ;; esac
+[ "$#" = 1 ] || fail 'Invalid TS gate arguments.'
+[ "$(get ax6000_mesh.main.linux_ts)" = 1 ] || exit 0
+[ "$(get ax6000_mesh.main.enabled)" = 1 ] || fail 'Managed TS requires an active Mesh transaction.'
+[ "$(id -u)" = 0 ] || fail 'Managed TS gate requires root.'
+[ -x /usr/libexec/ax6000-mesh-ts-reconcile ] || fail 'Managed TS reconciler is missing.'
+[ -z "$(uci -q changes wireless)" ] || fail 'Pending wireless changes cannot enter managed TS.'
+[ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering 2>/dev/null)" = 1 ] || fail 'Managed bridge VLAN filtering has not been prepared.'
+# UCI ordering is the driver slot ordering, including disabled AP sections.
+# The whole bounded pool must be owned; no unknown AP may inherit netifd LAN.
+sections=$(uci -q -X show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_]*\)=wifi-iface$/\1/p')
+devices=$(uci -q -X show wireless | sed -n 's/^wireless\.\([A-Za-z0-9_]*\)=wifi-device$/\1/p')
+seen24=0; seen5=0
+for device in $devices; do
+  [ "$(get wireless.$device.type)" = mtwifi ] || continue
+  case "$(get wireless.$device.band)" in
+    2g) [ "$seen24" = 0 ] || fail 'Duplicate managed band.'; seen24=1 ;;
+    5g) [ "$seen5" = 0 ] || fail 'Duplicate managed band.'; seen5=1 ;;
+    *) fail 'Unsupported managed radio band.' ;;
+  esac
+  slot=0
+  for section in $sections; do
+    [ "$(get wireless.$section.device)" = "$device" ] || continue
+    [ "$(get wireless.$section.mode)" = ap ] || continue
+    [ "$slot" -le 3 ] || fail 'AP count exceeds the managed four-slot pool.'
+    case "$slot" in
+      0) [ "$(get wireless.$section.network)" = lan ] && [ "$(get wireless.$section.map_bss_type)" = 32 ] || fail 'Primary slot ownership is invalid.' ;;
+      1) [ "$(get wireless.$section.network)" = lan ] && [ "$(get wireless.$section.map_bss_type)" = 64 ] || fail 'Backhaul slot ownership is invalid.' ;;
+      2|3)
+        [ -z "$(get wireless.$section.network)" ] || fail 'Guest or placeholder slot must not be attached by netifd.'
+        [ "$(get wireless.$section.isolate)" = 1 ] && [ "$(get wireless.$section.map_bss_type)" = 32 ] || fail 'Guest or placeholder isolation intent is missing.'
+        ;;
+    esac
+    slot=$((slot + 1))
+  done
+  [ "$slot" = 4 ] || fail 'Each managed radio requires a complete four-slot pool.'
+done
+[ "$seen24:$seen5" = 1:1 ] || fail 'Both managed radios are required.'
+# This helper independently validates the root-owned inventory. It may accept
+# stale daemon identity for quarantine only, never for apply/forwarding.
+# First provisioning has no trustworthy BSSID until the driver creates slots.
+# It may bootstrap management/BH only: every guest is independently detached below.
+if [ -e /etc/ax6000-mesh/ts-ownership.json ] || [ -L /etc/ax6000-mesh/ts-ownership.json ]; then
+  /usr/libexec/ax6000-mesh-ts-reconcile prepare /etc/ax6000-mesh/ts-ownership.json || fail 'Managed TS quarantine failed.'
+fi
+# Also quarantine unallocated/placeholder slots omitted from active inventory.
+# These UCI slots were checked above; they are never unrelated interfaces.
+for iface in ra2 ra3 rax2 rax3; do
+  if [ ! -d "/sys/class/net/$iface" ]; then
+    [ "$1" = preflight ] || fail 'A managed guest slot was not created.'
+    continue
+  fi
+  ip link set dev "$iface" down || fail 'Cannot stop a managed guest slot.'
+  if [ -e "/sys/class/net/$iface/master" ]; then
+    ip link set dev "$iface" nomaster || fail 'Cannot detach a managed guest slot.'
+  fi
+  flags=$(cat "/sys/class/net/$iface/flags") || fail 'Cannot verify guest link flags.'
+  [ "$((flags & 1))" = 0 ] && [ ! -e "/sys/class/net/$iface/master" ] || fail 'Managed guest quarantine did not verify.'
+done

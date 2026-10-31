@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "feed_commit": "d6167ea0645cbd1327708d85f94824f42d0eb872",
+  "patch": "luci-wireless-mesh.patch",
+  "sha256": "3f3cf6ccb3d169cbc2e63af0cd01211f20ad2cd044c627f60cff9fb59b6b5062",
+  "files": {
+    "feeds/luci/modules/luci-mod-network/root/usr/share/rpcd/acl.d/luci-mod-network.json": {
+      "before_sha256": "38ba28adae3cfd5fc9241b7abacc8b441078cc9ff57da70a85241fdaa63b426b",
+      "after_sha256": "da54515a60a4637de9512e3a64aea82fd698c8a8e57f0e5698c6f5ca99e5020b",
+      "image_path": "usr/share/rpcd/acl.d/luci-mod-network.json"
+    },
+    "feeds/luci/modules/luci-mod-network/Makefile": {
+      "before_sha256": "6655bfdd158af34233396a24fac0a3f671e543553f8c14b377ac2948932d09d6",
+      "after_sha256": "48c3e49d3715ef10f219f557019f5df0df35d3e03a468298a4838a1e28e4af91",
+      "image_path": null
+    },
+    "feeds/luci/modules/luci-mod-network/root/etc/uci-defaults/95-ax6000-mesh-wireless-vendor": {
+      "before_sha256": null,
+      "after_sha256": "e726fdb7c43420d0ed1686d7fa44946d7bb9b7e130b173589615de32cff63543",
+      "image_path": "etc/uci-defaults/95-ax6000-mesh-wireless-vendor"
+    }
+  },
+  "package_version": "26.249.28459~d6167ea-r2"
+}

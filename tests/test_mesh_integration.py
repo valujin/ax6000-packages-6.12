@@ -35,6 +35,11 @@ class MeshIntegration(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.source = Path(self.temp.name)
 
+    def test_expected_versions_bind_updated_mtwifi_scripts_and_unchanged_driver(self):
+        versions = MESH.expected(profile())['versions']
+        self.assertEqual(versions['mtwifi-cfg-ucode'], '3-r3')
+        self.assertEqual(versions['kmod-mt_wifi'], '6.12.108.7.6.7.3-r2')
+
     def test_historical_profiles_have_no_mesh_side_effects(self):
         old = profile()
         del old['mediatek_mesh']
@@ -111,6 +116,8 @@ class MeshIntegration(unittest.TestCase):
         self.addCleanup(MeshMtwifiTests.doClassCleanups)
         shutil.copytree(MeshMtwifiTests.source / 'package', self.source / 'package')
         subprocess.run(['git', 'apply', '-R', str(ROOT / 'files/mediatek-mesh/patches/mtwifi-mesh.patch')], cwd=self.source, check=True)
+        from test_mesh_wireless_page import seed_wireless_source
+        seed_wireless_source(self.source)
         return self.source
 
     def test_complete_native_install_is_idempotent_and_detects_package_tamper(self):
@@ -183,6 +190,13 @@ class MeshIntegration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'package version'):
             verify()
         installed['mapd'] = original
+        # A copied test overlay cannot substitute for the newly versioned core APK.
+        core = installed['luci-mod-network']
+        installed['luci-mod-network'] = {'Version': '26.249.28459~d6167ea'}
+        with self.assertRaisesRegex(ValueError, 'package version.*luci-mod-network'):
+            verify()
+        installed['luci-mod-network'] = core
+        verify()
         files['usr/libexec/ax6000-mesh-control'] += b'\nchanged\n'
         with self.assertRaisesRegex(ValueError, 'feature bytes'):
             verify()
@@ -237,6 +251,57 @@ class MeshIntegration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ABI marker differs'):
             MESH.configure(selected, self.source, native=True)
 
+
+
+    def pristine_vendor_source(self):
+        """Start at pinned upstream country preimages, not an already layered tree."""
+        import gzip
+        import hashlib
+        import vendor_country
+        self.vendor_source()
+        fixture = ROOT / 'tests/fixtures/vendor-country'
+        provenance = json.loads((fixture / 'provenance.json').read_text())['612']['files']
+        for name, entry in provenance.items():
+            data = gzip.decompress((fixture / ('612-' + name + '.gz')).read_bytes())
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['sha256'])
+            (self.source / entry['path']).write_bytes(data)
+        js = self.source / vendor_country.NATIVE / vendor_country.JAVASCRIPT
+        self.assertEqual(vendor_country.digest(js.read_bytes()), vendor_country.PREIMAGES['612'][0])
+        (self.source / '.git').mkdir()
+        selected = profile(); selected.pop('pbr_source', None)
+        return selected
+
+    def assert_vendor_mesh_layer(self):
+        manifest = MESH.vendor_wireless_manifest()
+        for name, item in manifest['files'].items():
+            self.assertEqual(MESH.digest((self.source / name).read_bytes()), item['after_sha256'])
+        MESH.configure(profile(), self.source, native=True, check_only=True)
+
+    def test_real_prepare_overrides_layers_pristine_country_before_mesh_and_replays(self):
+        import prepare
+        selected = self.pristine_vendor_source()
+        prepare.apply_overrides({}, self.source, selected)
+        self.assert_vendor_mesh_layer()
+        prepare.apply_overrides({}, self.source, selected)
+        self.assert_vendor_mesh_layer()
+
+    def test_real_native_configure_layers_pristine_country_before_mesh_and_replays(self):
+        import types
+        spec = importlib.util.spec_from_file_location('mesh_test_prepare_firmware', ROOT / 'scripts/prepare-firmware.py')
+        firmware = importlib.util.module_from_spec(spec); spec.loader.exec_module(firmware)
+        selected = self.pristine_vendor_source()
+        baseline = self.source / selected['build_source']['defconfig']
+        baseline.parent.mkdir(parents=True); baseline.write_text('CONFIG_MTK_MT_WIFI=m\n')
+        sibling = firmware.sibling_module
+        # Repository/APK-world fixtures are independent of country/Mesh layering;
+        # both actual patch implementations and preparation entry points run.
+        with patch.object(firmware, 'repository_files'), patch.object(firmware, 'sibling_module',
+                side_effect=lambda name: types.SimpleNamespace(configure_source=lambda *args: None)
+                if name == 'apk_world' else sibling(name)):
+            firmware.configure(selected, {}, self.source)
+            self.assert_vendor_mesh_layer()
+            firmware.configure(selected, {}, self.source)
+            self.assert_vendor_mesh_layer()
 
 if __name__ == '__main__':
     unittest.main()

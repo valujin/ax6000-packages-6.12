@@ -1,0 +1,161 @@
+#!/bin/sh
+# PLAN CREDENTIALS SOURCE_WIRELESS NEW_OUTPUT_DIR [ORIGINAL_WIRELESS]
+# Offline only. Secrets enter uci through private batch stdin, never argv.
+set -e
+LC_ALL=C; export LC_ALL
+umask 077
+. /usr/share/libubox/jshn.sh
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+name_ok() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1;; esac; [ "${#1}" -le 32 ]; }
+[ "$#" = 4 ] || [ "$#" = 5 ] || fail 'Expected plan, credentials, source wireless, new output directory and optional original wireless.'
+plan=$1; credentials=$2; source=$3; output=$4; original=${5-}
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail 'Output already exists.'
+work=$(mktemp -d "${output}.tmp.XXXXXX") || fail 'Cannot create staging directory.'
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+package=mesh_stage_$(basename "$work" | tr -cd A-Za-z0-9_)
+mkdir "$work/stage" "$work/user" "$work/original" "$work/delta" "$work/slots" "$work/keys" "$work/ids"
+for file in "$plan" "$credentials" "$source"; do
+ [ -f "$file" ] && [ ! -L "$file" ] || fail 'Input must be a regular file.'
+ mode=$(stat -c %a "$file"); [ "$((0$mode & 077))" = 0 ] || fail 'Input must be private.'
+done
+cp "$source" "$work/stage/$package"; cp "$source" "$work/user/$package"
+if [ -n "$original" ]; then
+ [ -f "$original" ] && [ ! -L "$original" ] || fail 'Invalid original wireless.'
+ cp "$original" "$work/original/$package"
+fi
+u() { uci -q -c "$work/$tree" -C "$work/$tree" -t "$work/delta" "$@"; }
+get() { u get "$package.$1" 2>/dev/null || :; }
+# UCI's command parser supports shell-style adjacent quoted fragments.
+quote() { printf "'"; printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
+setopt() { printf 'set wireless.%s=' "$1"; quote "$2"; printf '\n'; }
+apply() { sed "s/^\\(set\\|delete\\|reorder\\) wireless\\./\\1 $package./" "$work/batch" | u batch >/dev/null 2>&1 || fail 'Cannot apply staged UCI.'; u commit "$package" >/dev/null 2>&1 || fail 'Cannot commit staged UCI.'; }
+load_json() {
+ [ "$(wc -c < "$1")" = "$(tr -d '\000' < "$1" | wc -c)" ] || fail 'Invalid JSON NUL.'
+ [ "$(wc -c < "$1")" -le 65536 ] || fail 'Oversized JSON.'
+ ! grep -qiF '\u0000' "$1" || fail 'Invalid JSON NUL.'
+ jshn -R "$1" >/dev/null 2>&1 && json_load_file "$1" 2>/dev/null || fail 'Invalid JSON.'
+}
+load_json "$credentials"; json_get_vars schema quarantine_key
+[ "$schema" = 1 ] && [ "${#quarantine_key}" -ge 8 ] && [ "${#quarantine_key}" -le 63 ] || fail 'Invalid quarantine credentials.'
+json_select keys || fail 'Missing credentials.'; json_get_keys entries
+for entry in $entries; do
+ json_select "$entry"; json_get_vars id key; json_select ..
+ name_ok "$id" && [ ! -e "$work/keys/$id" ] || fail 'Duplicate or invalid credential identity.'
+ printf '%s' "$key" > "$work/keys/$id"
+done
+load_json "$plan"; json_get_vars ok schema phase primary_network
+[ "$ok:$schema:$phase" = 1:1:proposed ] && name_ok "$primary_network" || fail 'Invalid allocation plan.'
+json_select bsses || fail 'Missing BSS plan.'; json_get_keys entries
+tree=stage
+for entry in $entries; do
+ json_select "$entry"; json_get_vars id band slot network ssid security hidden isolate ifname; json_select ..
+ name_ok "$id" && name_ok "$network" || fail 'Invalid planned identity.'
+ case "$id" in ax6000_mesh_*) fail 'Reserved planned identity.';; esac
+ case "$band:$slot" in 2g:0|2g:2|2g:3) prefix=ra;; 5g:0|5g:2|5g:3) prefix=rax;; *) fail 'Invalid slot.';; esac
+ [ "$ifname" = "$prefix$slot" ] || fail 'Invalid planned interface.'
+ [ ! -e "$work/ids/$id" ] && [ ! -e "$work/slots/$band-$slot" ] || fail 'Duplicate allocation.'
+ [ "$(get "$id")" = wifi-iface ] && [ "$(get "$id.mode")" = ap ] || fail 'Missing source AP.'
+ [ "$(get "$id.disabled")" != 1 ] || fail 'Disabled planned AP.'
+ source_hidden=$(get "$id.hidden"); source_isolate=$(get "$id.isolate")
+ [ "${source_hidden:-0}:${source_isolate:-0}" = "$hidden:$isolate" ] || fail 'Source flags changed after normalization.'
+ device=$(get "$id.device"); name_ok "$device" && [ "$(get "$device.band")" = "$band" ] || fail 'Source band differs.'
+ logical=$(get "$id.network"); [ -n "$logical" ] || logical=$(get "$id.mesh_network")
+ [ "$logical" = "$network" ] && [ "$(get "$id.ssid")" = "$ssid" ] && [ "$(get "$id.encryption")" = "$security" ] || fail 'Source changed after normalization.'
+ [ -f "$work/keys/$id" ] && [ "$(get "$id.key")" = "$(cat "$work/keys/$id")" ] || fail 'Source credentials changed.'
+ if [ "$slot" = 0 ]; then
+  [ "$network" = "$primary_network" ] || fail 'Primary slot has wrong network.'
+  printf '%s\n' "$device" > "$work/device-$band"
+ fi
+ printf '%s\n' "$id" > "$work/slots/$band-$slot"; printf '%s\n' "$device" > "$work/ids/$id"
+done
+[ -f "$work/device-2g" ] && [ -f "$work/device-5g" ] || fail 'Both primary bands are required.'
+# Reject any unplanned iface, including disabled extras: they can consume vendor slots.
+u -X show "$package" | sed "s/^$package\\./wireless./" > "$work/show"
+sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p' "$work/show" > "$work/ifaces"
+while IFS= read -r id; do
+ case "$id" in
+ ax6000_mesh_bh1|ax6000_mesh_bh2) [ "$(get "$id.mode")" = sta ] || fail 'Unowned station identity.';;
+ ax6000_mesh_ap1|ax6000_mesh_ap2) [ "$(get "$id.mode"):$(get "$id.map_bss_type")" = ap:64 ] || fail 'Unowned backhaul identity.';;
+ ax6000_mesh_slot24_2|ax6000_mesh_slot24_3|ax6000_mesh_slot5_2|ax6000_mesh_slot5_3) [ "$(get "$id.mesh_placeholder")" = 1 ] || fail 'Unowned placeholder identity.';;
+ *) [ -f "$work/ids/$id" ] || fail 'Unplanned wireless interface.';;
+ esac
+done < "$work/ifaces"
+: > "$work/batch"
+for band in 2g 5g; do
+ device=$(cat "$work/device-$band")
+ case "$band" in 2g) bh=ax6000_mesh_ap1; tag=24;; 5g) bh=ax6000_mesh_ap2; tag=5;; esac
+ [ "$(get "$bh.device")" = "$device" ] && [ "$(get "$bh.mode"):$(get "$bh.map_bss_type")" = ap:64 ] || fail 'Existing backhaul AP is required.'
+ for slot in 0 2 3; do
+  if [ -f "$work/slots/$band-$slot" ]; then
+   id=$(cat "$work/slots/$band-$slot")
+   [ "$(cat "$work/ids/$id")" = "$device" ] || fail 'Multiple devices per band are unsupported.'
+   placeholder=ax6000_mesh_slot${tag}_$slot
+   [ -z "$(get "$placeholder")" ] || printf 'delete wireless.%s\n' "$placeholder" >> "$work/batch"
+   logical=$(get "$id.network"); [ -n "$logical" ] || logical=$(get "$id.mesh_network")
+   setopt "$id.mesh_network" "$logical" >> "$work/batch"
+   if [ "$logical" != "$primary_network" ]; then
+    [ -z "$(get "$id.network")" ] || printf 'delete wireless.%s.network\n' "$id" >> "$work/batch"
+   fi
+   setopt "$id.map_bss_type" 32 >> "$work/batch"
+  else
+   id=ax6000_mesh_slot${tag}_$slot
+   [ -z "$(get "$id")" ] || printf 'delete wireless.%s\n' "$id" >> "$work/batch"
+   { setopt "$id" wifi-iface; setopt "$id.device" "$device"; setopt "$id.mode" ap; setopt "$id.ssid" "AX6000-quarantine-$tag-$slot"; setopt "$id.key" "$quarantine_key"; setopt "$id.encryption" psk2; setopt "$id.hidden" 1; setopt "$id.isolate" 1; setopt "$id.mesh_placeholder" 1; setopt "$id.map_bss_type" 32; } >> "$work/batch"
+   printf '%s\n' "$id" > "$work/slots/$band-$slot"
+  fi
+ done
+ printf '%s\n' "$bh" > "$work/slots/$band-1"
+done
+apply
+# Moving only AP sections to the tail preserves root PHY order and all other sections.
+: > "$work/batch"
+for band in 2g 5g; do
+ for slot in 0 1 2 3; do
+  id=$(cat "$work/slots/$band-$slot"); printf 'reorder wireless.%s=999999\n' "$id" >> "$work/batch"
+ done
+done
+# Owned station overlays follow the complete AP bank and do not consume AP slots.
+for id in ax6000_mesh_bh1 ax6000_mesh_bh2; do
+ [ -z "$(get "$id")" ] || printf 'reorder wireless.%s=999999\n' "$id" >> "$work/batch"
+done
+apply
+# Verify the materialized package, since some UCI versions report batch errors
+# without failing the batch process itself.
+for band in 2g 5g; do
+ for slot in 0 1 2 3; do
+  id=$(cat "$work/slots/$band-$slot")
+  [ "$(get "$id.mode")" = ap ] || fail 'Incomplete staged AP set.'
+  if [ "$slot" != 1 ]; then
+   [ "$(get "$id.map_bss_type")" = 32 ] || fail 'Missing staged ownership.'
+   logical=$(get "$id.mesh_network")
+   if [ "$logical" != "$primary_network" ]; then
+    [ -z "$(get "$id.network")" ] || fail 'Unsafe staged network attachment.'
+   fi
+  fi
+ done
+done
+# Restoration overlays retain current user configuration and recover owned fields
+# from the optional pre-enrollment snapshot, without resurrecting old SSIDs/keys.
+tree=user; : > "$work/batch"
+while IFS= read -r id; do
+ case "$id" in ax6000_mesh_*) printf 'delete wireless.%s\n' "$id" >> "$work/batch";; *)
+  logical=$(get "$id.network"); [ -n "$logical" ] || logical=$(get "$id.mesh_network")
+  [ -z "$logical" ] || setopt "$id.network" "$logical" >> "$work/batch"
+  for option in mesh_network map_bss_type; do
+   value=''; if [ -n "$original" ]; then tree=original; value=$(get "$id.$option"); tree=user; fi
+   if [ -n "$value" ]; then setopt "$id.$option" "$value" >> "$work/batch"
+   elif [ -n "$(get "$id.$option")" ]; then printf 'delete wireless.%s.%s\n' "$id" "$option" >> "$work/batch"; fi
+  done;;
+ esac
+done < "$work/ifaces"
+for band in 2g 5g; do
+ device=$(cat "$work/device-$band")
+ for option in map_mode map_agent; do
+  value=''; if [ -n "$original" ]; then tree=original; value=$(get "$device.$option"); tree=user; fi
+  if [ -n "$value" ]; then setopt "$device.$option" "$value" >> "$work/batch"
+  elif [ -n "$(get "$device.$option")" ]; then printf 'delete wireless.%s.%s\n' "$device" "$option" >> "$work/batch"; fi
+ done
+done
+apply
+mkdir "$work/result"; cp "$work/stage/$package" "$work/result/wireless"; cp "$work/user/$package" "$work/result/user-wireless"
+chmod 600 "$work/result/"*; mv "$work/result" "$output"

@@ -106,7 +106,7 @@ def expected(profile, lock, source=None):
         # Presence and native-control equality are checked even though LMO is
         # a compiled translation, not a byte-for-byte PO source copy.
         suffixes['luci-i18n-attendedsysupgrade-ru'] = ''
-    if profile.get('vendor_country_db'):
+    if profile.get('vendor_country_db') and not profile.get('mediatek_mesh'):
         series = '66' if profile['firmware']['commit'].startswith('ec9ef10') else '612'
         hashes['usr/share/luci-app-mtwifi-cfg/wireless-mtk.js'] = vendor_country.POSTIMAGES[series][0]
         versions['luci-app-mtwifi-cfg'] = '1-r' + (vendor_country.RELEASES[series] if hasattr(vendor_country, 'RELEASES') else vendor_country.RELEASE)
@@ -155,7 +155,7 @@ def expected(profile, lock, source=None):
         hashes['lib/netifd/wireless-device.uc'] = 'b7db6a27ab0a9806a563bc89bef2a2f66addb6ea21295521b3f3181486bfadb3'
     if source is not None:
         for path in list(mesh['files']):
-            if path.endswith('.js'):
+            if path.startswith('www/') and path.endswith('.js'):
                 data, mode = files[path]
                 files[path] = (minified_js(data, source), mode)
     return {'files': files, 'hashes': hashes, 'versions': versions, 'version_suffixes': suffixes}

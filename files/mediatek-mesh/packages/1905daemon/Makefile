@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=1905daemon
 PKG_VERSION:=3.0.2.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_SOURCE_VERSION:=35234223
 PKG_SOURCE:=1905daemon-35234223.tar.bz2
 PKG_SOURCE_URL:=https://raw.githubusercontent.com/immortalwrt-mt798x/immortalwrt/a3f94baa4ea053130be796915ad9ff2fa5fcf567/dl
